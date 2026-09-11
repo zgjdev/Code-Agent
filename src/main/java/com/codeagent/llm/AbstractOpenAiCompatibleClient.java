@@ -116,6 +116,10 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             ResponseBody responseBodyObj = response.body();
             if (!response.isSuccessful()) {
                 String errorBody = responseBodyObj != null ? responseBodyObj.string() : "无响应体";
+                if (isContextWindowError(response.code(), errorBody)) {
+                    throw new ContextWindowExceededException(
+                            "API 上下文窗口超限: " + response.code() + " - " + errorBody);
+                }
                 throw new LlmHttpException(
                         response.code(),
                         response.header("Retry-After"),
@@ -230,6 +234,16 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                     cachedInputTokens
             );
         }
+    }
+
+    private boolean isContextWindowError(int statusCode, String body) {
+        if (statusCode < 400 || statusCode >= 500 || body == null) return false;
+        String normalized = body.toLowerCase(Locale.ROOT);
+        return normalized.contains("context length")
+                || normalized.contains("context window")
+                || normalized.contains("maximum context")
+                || normalized.contains("prompt is too long")
+                || normalized.contains("token limit");
     }
 
     LlmRetryPolicy retryPolicy() {

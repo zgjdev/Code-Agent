@@ -429,3 +429,94 @@ base64 图片成本高，后续每轮重复携带会迅速挤满窗口。新轮�
 - 摘要压缩依赖 LLM 调用，存在信息损失；完整摘要路径只对摘要 IO 失败与空摘要做防护。
 - 历史图片一旦被 `pruneHistoricalImagePayloads` 移除，后续无法再让模型观察原图像素。
 - 系统不会自动学习全部对话：长期记忆只从显式入口写入。
+
+## 12. 持久化、检索与短期摘要的精确时机
+
+本节按“什么时候发生、保存什么、下一步谁会读取”重新列出运行时事实，便于排查“记忆是否已经保存”“为什么本轮没有召回”这类问题。
+
+### 12.1 长期记忆的写入时机与文件内容
+
+长期记忆只有显式入口会写入：
+
+1. `/save <事实>` 或 `/save --global <事实>`；
+2. Agent 调用 `save_memory` 工具（工具描述要求用户明确表达记忆意图，`scope` 只能是 `project`/`global`）；
+3. 浏览器登录复用的特殊启发式：只有检测到“记住/保存”等明确意图，并且同时提到 Chrome/浏览器登录复用时，才生成一条 global fact。
+
+`MemoryManager.storeFact` 创建 `MemoryEntry`：
+
+- `id`：`fact-` 加 8 位随机 UUID 片段；
+- `content`：事实正文；
+- `type`：`FACT`；
+- `metadata`：`source=fact`、`scope`，project 作用域额外带规范化项目路径 `project`；
+- `tokenCount`：写入时用 `MemoryEntry.estimateTokens` 计算。
+
+`LongTermMemory.store` 在内存中完成去重、写入和 token 累加后**立即全量重写** `long_term_memory.json`；不是退出时批量保存，也不是定时刷盘。`delete` 与 `clear` 同样在操作成功后立即重写文件；重复条目被去重时不会触发写盘。默认文件为：
+
+```text
+~/.codeagent/memory/long_term_memory.json
+```
+
+可用系统属性 `codeagent.memory.dir` 或环境变量 `CODEAGENT_MEMORY_DIR` 覆盖目录。JSON 是数组，每项保存 `id`、`content`、`type`、ISO-8601 `timestamp`、`metadata` 和 `tokenCount`。进程启动构造 `LongTermMemory` 时创建目录并加载文件；缺少 `tokenCount` 的旧记录会重新估算，无法反序列化的坏记录会跳过。写盘失败只记录 warning，当前进程内存仍保留新值，因此重启后可能丢失最近写入；实现没有临时文件原子替换或跨进程事务。
+
+### 12.2 哪些数据永远不写入长期记忆
+
+- 普通用户输入、assistant 回复、tool call、tool result 不会因为“出现过”而自动转成事实；
+- 自动上下文压缩产生的 `[会话记忆摘要]` 或 `[已压缩的历史对话摘要]` 只作为当前会话消息，不会调用 `LongTermMemory.store`；
+- `ConversationLedger` 保存的是原始会话审计记录，和长期记忆文件完全分离；
+- `/clear` 只清理当前 `conversationHistory`、Session Memory 状态和 Skill buffer，不删除长期记忆。
+
+### 12.3 检索发生在哪些时机
+
+Agent 每次 `run` 开始时，在追加本轮 user message 前执行一次长期记忆检索：
+
+```text
+pruneHistoricalImagePayloads
+→ storeExplicitBrowserMemoryHint
+→ buildContextForQuery(userInput, memoryContextTokens)
+→ 用新 system prompt 替换 conversationHistory[0]
+→ 追加本轮 user message
+```
+
+因此，本轮新写入的浏览器登录 fact 可能会在同一轮被下一步检索到；普通 `save_memory` 工具是在模型已经开始工作后调用的，写入结果通常供后续轮次使用，而不是回写当前已经发送的那一条请求。
+
+Agent 注入路径使用 `MemoryRetriever.buildContextForQuery`：先从当前项目可见的 global/project 条目中打分排序，最多取 10 条，再按 `maxTokens` 累加条目的 `tokenCount`，超预算就在第一条放不下时停止。无命中返回空字符串，不生成空的“相关长期记忆”章节。
+
+Plan-and-Execute 路径也遵循同一规则：为具体计划任务使用任务描述调用 `buildContextForQuery`，不会把 ReAct 的短期 history 复制到 `MemoryManager`；Multi-Agent worker 同样共享长期记忆门面，但各自维护独立的消息 history 和压缩状态。
+
+CLI `/memory search <关键词>` 是另一条管理查询路径：它直接调用 `LongTermMemory.search(query, limit, currentProject)`，使用 jieba token 对正文或 metadata 做大小写不敏感的子串匹配，按底层集合迭代顺序截断 `limit`，**不使用 `MemoryRetriever` 的相关度排序和时间衰减**。所以 CLI 搜索结果与 Agent 自动注入结果的顺序可能不同；前者用于人工管理，后者用于提示词召回。
+
+### 12.4 短期记忆、会话摘要和持久化的关系
+
+短期记忆不是一个可单独落盘的 `MemoryEntry` 集合，而是 `Agent.conversationHistory` 本身。它包含 system、user、assistant、tool 消息以及必要的多模态内容，是下一次 `LlmClient.chat` 的直接输入视图。`SessionMemoryCompactor` 的“会话记忆”只是绑定到某个 history 对象的异步摘要状态（`WeakReference` + `pending/ready`），不写文件、不跨进程、不跨会话复用；history 被替换或 `/clear` 后该状态会失效并清理。
+
+真正可跨会话复用的只有两类内容：
+
+- `LongTermMemory` 中显式保存的事实；
+- `CODEAGENT.md` 系列项目记忆文件。
+
+`ConversationLedger` 虽然也持久化，但用途是审计/回溯，不会在新请求启动时自动重放进 `conversationHistory`。
+
+### 12.5 压缩发生在何处以及压缩后保存什么
+
+每次 ReAct 内部调用 LLM 前都会调用 `maybeCompactHistory`，所以一次用户输入触发多个 tool-call 迭代时，压缩检查可能发生多次。自动压缩只改内存中的 delivery view，并向 ledger 追加一条 `compaction` 事件；不会重写旧 JSONL 原始消息。
+
+压缩前的旧消息由 LLM 总结为目标、约束、关键操作/工具结果、已达成结论和未解决事项。重建后的 history 固定包含：
+
+```text
+[原 system prompt]
+[user: 摘要]
+[assistant: 已了解上下文的确认]
+[从某个 user 边界开始保留的原始尾部]
+```
+
+切点按 user 轮次而不是固定消息条数，因此不会把 assistant `tool_calls` 和对应的 tool result 拆开。完整摘要路径默认保留最近 3 个 user 轮次；手动 `/compact` 强制执行完整摘要并只保留最近 1 个 user 轮次。摘要失败、返回空文本、user 轮次不足或会话快路径重建后没有变短时，原 history 保持不变或回退完整摘要。
+
+### 12.6 Token 的三种口径
+
+项目同时存在三种不能混用的 token 数：
+
+1. **上下文估算（ctx）**：`TokenBudget.estimateMessagesTokens(history)` 加上 Agent 单独估算的工具 schema；用于压缩触发、状态栏和 `/context`。它是启发式估算，不等于 provider usage。
+2. **单次调用 usage**：provider 返回的 `inputTokens`、`outputTokens`、`cachedInputTokens`，由 `AgentBudget` 记录并汇总到 `MemoryManager.TokenBudget`；这是最近任务的真实/准真实用量统计。
+3. **长期记忆条目 tokenCount**：保存于每个 `MemoryEntry`，主要用于构建“相关长期记忆”注入预算，不代表一次 LLM 请求的完整输入 token。
+
+`TokenBudget` 的消息估算包括文本 part、图片近似成本、tool-call arguments，以及每条消息固定约 4 token 的角色/分隔开销；contentParts 非 null 时只计算 parts。工具 schema 不在该静态方法内，而是在 Agent 计算 ctx 时另行序列化估算。上下文可用预算默认按 `window - 500(system) - 800(tools) - 2000(response)` 计算；`ContextProfile` 的自动压缩阈值则使用独立的“摘要输出预留 + 安全缓冲”公式，不能把二者视为同一个数字。

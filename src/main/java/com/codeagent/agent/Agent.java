@@ -1,8 +1,13 @@
 package com.codeagent.agent;
 
 import com.codeagent.llm.LlmClient;
+import com.codeagent.llm.ContextWindowExceededException;
 import com.codeagent.llm.LlmTraceLogger;
 import com.codeagent.context.ContextProfile;
+import com.codeagent.context.ContextTokenTracker;
+import com.codeagent.context.RequestSnapshot;
+import com.codeagent.context.RequestSnapshotFactory;
+import com.codeagent.context.InvalidationReason;
 import com.codeagent.context.TokenUsageFormatter;
 import com.codeagent.history.ConversationLedger;
 import com.codeagent.lsp.LspDiagnosticReport;
@@ -59,6 +64,9 @@ public class Agent {
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private boolean returnFinalResponseWhenStreamed;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private final ContextTokenTracker contextTokenTracker = new ContextTokenTracker();
+    private final RequestSnapshotFactory requestSnapshotFactory = new RequestSnapshotFactory();
+    private long historyVersion;
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry());
@@ -68,6 +76,7 @@ public class Agent {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
         this.conversationHistory = new ArrayList<>();
+        this.historyVersion = 0L;
         this.memoryManager = new MemoryManager(llmClient);
         this.autoCompactionManager = new AutoCompactionManager(llmClient);
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
@@ -98,6 +107,7 @@ public class Agent {
 
     public void setLlmClient(LlmClient llmClient) {
         this.llmClient = llmClient;
+        this.contextTokenTracker.invalidate(InvalidationReason.PROVIDER_CHANGED);
         this.memoryManager.setLlmClient(llmClient);
         this.autoCompactionManager.setLlmClient(llmClient);
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
@@ -178,6 +188,7 @@ public class Agent {
 
         long startNanos = System.nanoTime();
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        int overflowRetries = 0;
         pushStatus(budget, startNanos, "running");
 
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
@@ -188,10 +199,20 @@ public class Agent {
                 pushStatus(budget, startNanos, "idle");
                 return "⏹️ 已取消当前任务。";
             }
-            // 调 LLM 前只评估真正发送的 conversationHistory。会话记忆快速路径和完整摘要
-            // 回退路径都由同一个协调器管理，不再复制一份影子短期记忆。
+            // 工具定义必须先冻结，token 预测与实际 chat() 使用同一份列表。
             injectPendingLspDiagnostics();
-            maybeCompactHistory();
+            List<LlmClient.Tool> toolDefinitions = llmClient.supportsTools()
+                    ? toolRegistry.getToolDefinitions()
+                    : null;
+            TurnToolPolicy.ToolExposure toolExposure = turnToolPolicy.expose(toolDefinitions);
+            RequestSnapshot requestSnapshot = requestSnapshotFactory.capture(
+                    llmClient, conversationHistory, toolExposure.definitions(), historyVersion);
+            ContextTokenTracker.ContextPrediction prediction = contextTokenTracker.predict(requestSnapshot);
+            if (maybeCompactHistory(requestSnapshot, prediction)) {
+                requestSnapshot = requestSnapshotFactory.capture(
+                        llmClient, conversationHistory, toolExposure.definitions(), historyVersion);
+                prediction = contextTokenTracker.predict(requestSnapshot);
+            }
             AgentBudget.ExitReason exitReason = budget.check();
             if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
                 return finalizePartialResult(
@@ -201,10 +222,6 @@ public class Agent {
             int iteration = budget.beginIteration();
 
             try {
-                List<LlmClient.Tool> toolDefinitions = llmClient.supportsTools()
-                        ? toolRegistry.getToolDefinitions()
-                        : null;
-                TurnToolPolicy.ToolExposure toolExposure = turnToolPolicy.expose(toolDefinitions);
                 logRequestContext("react iteration=" + iteration, toolExposure.definitions());
                 streamRenderer.beginThinking();
                 // 调用 LLM
@@ -222,6 +239,13 @@ public class Agent {
                 }
 
                 budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+
+                LlmClient.Message assistantMessage = LlmClient.Message.assistant(
+                        response.reasoningContent(), response.content(), response.toolCalls());
+                contextTokenTracker.recordSuccessfulCall(
+                        requestSnapshot,
+                        com.codeagent.memory.TokenBudget.estimateMessageTokens(assistantMessage),
+                        llmClient.normalizeUsage(response));
 
                 // 如果有工具调用
                 if (response.hasToolCalls()) {
@@ -261,6 +285,7 @@ public class Agent {
                 // Keep the delivery view compatible with providers that do not require
                 // final-turn reasoning replay, while the raw ledger preserves the complete response.
                 conversationHistory.add(LlmClient.Message.assistant(response.content()));
+                historyVersion++;
                 conversationLedger.appendMessage(
                         "react",
                         "agent",
@@ -288,6 +313,24 @@ public class Agent {
                 streamRenderer.clearThinkingPanel();
                 return formatUserFacingResponse(reasoningTranscript.toString(), response.content());
 
+            } catch (ContextWindowExceededException e) {
+                if (overflowRetries < 1) {
+                    overflowRetries++;
+                    try {
+                        AutoCompactionManager.Result recovery = autoCompactionManager.compactNow(conversationHistory);
+                        if (recovery.compacted()) {
+                            historyVersion++;
+                            contextTokenTracker.invalidate(InvalidationReason.OVERFLOW_RECOVERY);
+                            renderer().stream().println("⚠️ provider 报告上下文超限，已压缩后重试。");
+                            continue;
+                        }
+                    } catch (Exception recoveryError) {
+                        log.warn("overflow recovery compaction failed", recoveryError);
+                    }
+                }
+                log.error("LLM context window exceeded in ReAct loop", e);
+                streamRenderer.finish();
+                return "❌ 上下文窗口超限: " + e.getMessage();
             } catch (IOException e) {
                 log.error("LLM call failed in ReAct loop", e);
                 streamRenderer.finish();
@@ -328,6 +371,7 @@ public class Agent {
             String responseContent = response.content() == null ? "" : response.content().trim();
             String partialResult = formatPartialResult(description, responseContent);
             conversationHistory.add(LlmClient.Message.assistant(partialResult));
+            historyVersion++;
             conversationLedger.appendMessage(
                     "react",
                     "agent",
@@ -370,6 +414,8 @@ public class Agent {
                 "slash_clear",
                 java.util.Map.of("discardedViewMessages", conversationHistory.size()));
         conversationHistory.clear();
+        historyVersion++;
+        contextTokenTracker.invalidate(InvalidationReason.CLEAR);
         appendConversationMessage(
                 LlmClient.Message.system(buildSystemPrompt("")),
                 "history_reset");
@@ -406,7 +452,7 @@ public class Agent {
         String model = llmClient == null ? "—" : llmClient.getModelName();
         long contextWindow = llmClient == null ? 0L : llmClient.maxContextWindow();
         boolean hitl = Boolean.TRUE.equals(hitlEnabledSupplier.get());
-        long contextTokens = estimateCurrentContextTokens();
+        long contextTokens = projectedContextTokens();
         if ("idle".equals(normalizedPhase)) {
             return StatusInfo.idle(model, contextWindow, contextTokens, hitl);
         }
@@ -419,6 +465,7 @@ public class Agent {
     private void updateSystemPromptWithMemory(String memoryContext) {
         LlmClient.Message systemMessage = LlmClient.Message.system(buildSystemPrompt(memoryContext));
         conversationHistory.set(0, systemMessage);
+        historyVersion++;
         conversationLedger.appendMessage(
                 "react", "agent", "memory_context_refresh", systemMessage);
     }
@@ -433,22 +480,31 @@ public class Agent {
                 .build());
     }
 
-    private void maybeCompactHistory() {
+    private boolean maybeCompactHistory(RequestSnapshot snapshot,
+                                        ContextTokenTracker.ContextPrediction prediction) {
         int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
         int beforeMessages = conversationHistory.size();
         long beforeTokens = estimateCurrentContextTokens();
+        if (prediction.effectiveTokens() < trigger) {
+            return false;
+        }
         try {
-            AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(conversationHistory, trigger);
+            AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(
+                    conversationHistory, trigger, prediction.effectiveTokens());
             if (result.compacted()) {
+                historyVersion++;
+                contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
                 recordCompaction("automatic:" + result.strategy().name().toLowerCase(), beforeMessages, beforeTokens);
                 String strategy = result.strategy() == AutoCompactionManager.Strategy.SESSION_MEMORY
                         ? "会话记忆摘要"
                         : "完整对话摘要";
                 renderer().stream().println("📦 上下文接近窗口上限，已通过" + strategy + "压缩后继续。");
+                return true;
             }
         } catch (Exception e) {
             log.warn("conversationHistory compaction failed", e);
         }
+        return false;
     }
 
     private void pruneHistoricalImagePayloads() {
@@ -461,6 +517,8 @@ public class Agent {
                 continue;
             }
             conversationHistory.set(i, message.withoutImageContent());
+            historyVersion++;
+            contextTokenTracker.invalidate(InvalidationReason.IMAGE_PAYLOAD_PRUNED);
             messageCount++;
             imageCount += images;
         }
@@ -626,6 +684,18 @@ public class Agent {
         return Math.max(0L, messageTokens + estimateToolsSchemaTokens());
     }
 
+    private long projectedContextTokens() {
+        try {
+            List<LlmClient.Tool> tools = llmClient != null && llmClient.supportsTools()
+                    ? toolRegistry.getToolDefinitions() : null;
+            RequestSnapshot snapshot = requestSnapshotFactory.capture(
+                    llmClient, conversationHistory, tools, historyVersion);
+            return contextTokenTracker.predict(snapshot).effectiveTokens();
+        } catch (Exception e) {
+            return estimateCurrentContextTokens();
+        }
+    }
+
     private void logRequestContext(String scope, List<LlmClient.Tool> tools) {
         if (!log.isInfoEnabled()) {
             return;
@@ -754,7 +824,7 @@ public class Agent {
             renderer().updateStatus(StatusInfo.tokens(
                     model,
                     contextWindow,
-                    estimateCurrentContextTokens(),
+                    projectedContextTokens(),
                     budget == null ? 0L : budget.totalInputTokens(),
                     budget == null ? 0L : budget.totalOutputTokens(),
                     budget == null ? 0L : budget.totalCachedInputTokens(),
@@ -917,6 +987,7 @@ public class Agent {
 
     private void appendConversationMessage(LlmClient.Message message, String source) {
         conversationHistory.add(message);
+        historyVersion++;
         conversationLedger.appendMessage("react", "agent", source, message);
     }
 

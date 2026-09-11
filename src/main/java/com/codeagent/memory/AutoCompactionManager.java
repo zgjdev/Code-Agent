@@ -41,11 +41,17 @@ public class AutoCompactionManager {
     }
 
     public Result compactIfNeeded(List<LlmClient.Message> history, int triggerTokens) {
+        long estimated = TokenBudget.estimateMessagesTokens(history);
+        return compactIfNeeded(history, triggerTokens, estimated);
+    }
+
+    public Result compactIfNeeded(
+            List<LlmClient.Message> history,
+            int triggerTokens,
+            long measuredOrPredictedTokens) {
         if (triggerTokens <= 0) return Result.none();
+        if (measuredOrPredictedTokens < triggerTokens) return Result.none();
         sessionMemoryCompactor.prepareIfNeeded(history, triggerTokens);
-        if (TokenBudget.estimateMessagesTokens(history) < triggerTokens) {
-            return Result.none();
-        }
         if (sessionMemoryCompactor.compactIfReady(history, triggerTokens)) {
             return new Result(true, Strategy.SESSION_MEMORY);
         }

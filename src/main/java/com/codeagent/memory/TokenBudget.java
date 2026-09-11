@@ -1,6 +1,8 @@
 package com.codeagent.memory;
 
 import com.codeagent.llm.LlmClient;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.List;
 
@@ -13,6 +15,11 @@ import java.util.List;
  * 3. 超出预算时触发压缩或裁剪
  */
 public class TokenBudget {
+    private static final int MESSAGE_OVERHEAD = 4;
+    private static final int CONTENT_PART_OVERHEAD = 1;
+    private static final int TOOL_CALL_OVERHEAD = 2;
+    private static final int TOOLS_OVERHEAD = 4;
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final int contextWindow;    // 模型上下文窗口大小
     private final int reservedForSystem; // 系统提示预留
     private final int reservedForTools;  // 工具定义预留
@@ -97,32 +104,81 @@ public class TokenBudget {
      */
     public static int estimateMessagesTokens(List<LlmClient.Message> messages) {
         if (messages == null) return 0;
-        int total = 0;
+        long total = 0;
         for (LlmClient.Message msg : messages) {
-            if (msg.contentParts() != null) {
-                for (LlmClient.ContentPart part : msg.contentParts()) {
-                    if (part == null) {
-                        continue;
-                    }
-                    if (part.isText()) {
-                        total += MemoryEntry.estimateTokens(part.text());
-                    } else if (part.isImage()) {
-                        total += estimateImageTokens(part);
-                    }
-                }
-            } else {
-                total += MemoryEntry.estimateTokens(msg.content());
+            total += estimateMessageTokens(msg);
+        }
+        return saturatingInt(total);
+    }
+
+    /** Estimates one complete model-visible message, including tool calls. */
+    public static int estimateMessageTokens(LlmClient.Message message) {
+        if (message == null) return 0;
+        long total = MESSAGE_OVERHEAD
+                + estimateText(message.role())
+                + estimateText(message.reasoningContent())
+                + estimateText(message.toolCallId());
+        if (message.contentParts() != null && !message.contentParts().isEmpty()) {
+            for (LlmClient.ContentPart part : message.contentParts()) {
+                total += CONTENT_PART_OVERHEAD + estimateContentPart(part);
             }
-            // 工具调用的 arguments 也计算
-            if (msg.toolCalls() != null) {
-                for (LlmClient.ToolCall tc : msg.toolCalls()) {
-                    total += MemoryEntry.estimateTokens(tc.function().arguments());
+        } else {
+            total += estimateText(message.content());
+        }
+        if (message.toolCalls() != null) {
+            for (LlmClient.ToolCall call : message.toolCalls()) {
+                if (call == null) continue;
+                total += TOOL_CALL_OVERHEAD;
+                total += estimateText(call.id());
+                if (call.function() != null) {
+                    total += estimateText(call.function().name());
+                    total += estimateText(call.function().arguments());
                 }
             }
         }
-        // 每条消息额外开销约 4 tokens（role、separator 等）
-        total += messages.size() * 4;
-        return total;
+        return saturatingInt(total);
+    }
+
+    /** Estimates tools schema separately from messages. */
+    public static int estimateToolsTokens(List<LlmClient.Tool> tools) {
+        if (tools == null || tools.isEmpty()) return 0;
+        try {
+            return saturatingInt((long) TOOLS_OVERHEAD
+                    + MemoryEntry.estimateTokens(JSON.writeValueAsString(tools)));
+        } catch (JsonProcessingException e) {
+            throw new TokenEstimationException("无法序列化 tools schema", e);
+        }
+    }
+
+    /** Estimates the exact request envelope used by LlmClient.chat(messages, tools). */
+    public static int estimateRequestTokens(
+            List<LlmClient.Message> messages,
+            List<LlmClient.Tool> tools) {
+        return saturatingInt((long) estimateMessagesTokens(messages) + estimateToolsTokens(tools));
+    }
+
+    private static int estimateContentPart(LlmClient.ContentPart part) {
+        if (part == null) return 0;
+        if (part.isText()) return estimateText(part.text());
+        if (part.isImage()) {
+            return estimateImageTokens(part)
+                    + estimateText(part.imageUrl())
+                    + estimateText(part.mimeType());
+        }
+        try {
+            return MemoryEntry.estimateTokens(JSON.writeValueAsString(part));
+        } catch (JsonProcessingException e) {
+            throw new TokenEstimationException("无法序列化未知 content part", e);
+        }
+    }
+
+    private static int estimateText(String text) {
+        return MemoryEntry.estimateTokens(text);
+    }
+
+    private static int saturatingInt(long value) {
+        if (value <= 0) return 0;
+        return value >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) value;
     }
 
     private static int estimateImageTokens(LlmClient.ContentPart part) {

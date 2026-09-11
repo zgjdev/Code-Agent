@@ -1,10 +1,12 @@
 package com.codeagent.llm;
 
+import com.codeagent.context.MeasuredUsage;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.time.Instant;
 
 public interface LlmClient {
 
@@ -34,6 +36,19 @@ public interface LlmClient {
 
     default String promptCacheMode() {
         return "none";
+    }
+
+    default MeasuredUsage normalizeUsage(ChatResponse response) {
+        return new MeasuredUsage(
+                Math.max(0, response == null ? 0 : response.inputTokens()),
+                Math.max(0, response == null ? 0 : response.outputTokens()),
+                Math.max(0, response == null ? 0 : response.cachedInputTokens()),
+                MeasuredUsage.InputScope.UNKNOWN,
+                false, false, false, Instant.now());
+    }
+
+    default String requestConfigurationFingerprint() {
+        return String.valueOf(getProviderName()) + "\u0000" + String.valueOf(getModelName());
     }
 
     record ContentPart(String type, String text, String imageBase64, String imageUrl, String mimeType) {

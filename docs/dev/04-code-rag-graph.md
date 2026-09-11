@@ -1,17 +1,19 @@
 # 代码库 RAG 与关系图谱
 
-> 本文以当前代码实际行为为准，说明代码索引、混合检索和静态关系查询如何实现。它不是对"通用 RAG"概念的泛讲，也不会把未来可选的向量数据库、增量索引或符号解析能力写成已经交付的功能。凡标注数值均为便于定位的行为描述，具体常量以源码为准。
+> 本文以当前代码实际行为为准，说明代码索引、混合检索和静态关系查询如何实现。它不是对"通用 RAG"概念的泛讲，也不会把未来可选的向量数据库、增量索引或符号解析能力写成已经交付的功能。所有行号均为当前源码行号；为避免文档随常量调整失真，正文不写具体常量数值，需要精确值时以对应 `file:line` 为准。
 
 ## 1. 功能定位
 
-`CodeIndex` + `CodeRetriever` 是 CodeAgent 面向"用户只知道描述、不知道符号名"场景的辅助召回层：索引端遍历项目白名单源码文件，对 Java 用 AST 切出类块和方法块、对其他文本按字符预算沿行分段，为每个块生成 Embedding 并写入 SQLite；同时用 JavaParser 抽取 imports、extends、implements、contains、calls 五类静态关系写入独立表。查询端 `CodeRetriever.hybridSearch` 融合语义检索与关键词检索，按文件路径与名称去重、加权、限制单文件条数后返回 Top K，关系图则提供一跳导航线索。它**不替代** `grep_code` / `glob_files` / `read_file` 的精确定位，而是为模糊问题补充候选。
+`CodeIndex` + `CodeRetriever` 是 CodeAgent 面向"用户只知道描述、不知道符号名"场景的辅助召回层：索引端遍历项目白名单源码文件，对 Java 用 AST 切出类块和方法块、对其他文本按字符预算沿行分段，为每个块生成 Embedding 并写入 SQLite；同时用 JavaParser 抽取 imports、extends、implements、contains、calls 五类静态关系写入独立表。查询端 `CodeRetriever.hybridSearch` 融合语义检索与关键词检索，按文件路径与名称去重、加权、限制单文件条数后返回 Top K，关系图则提供一跳导航线索。它**不替代**实时代码探索：已知符号或字符串时，`grep_code` 走的是另一条完全不依赖预索引的路径（优先本机 ripgrep，不可用则回退 Java 扫描，见 `src/main/java/com/codeagent/tool/RipgrepCodeSearchEngine.java:203`），`search_code` 只在关键词不明确、常规搜索无果时为模糊问题补充候选。
 
 - 索引入口：`CodeIndex.index(String)` — `src/main/java/com/codeagent/rag/CodeIndex.java:57`
 - 混合检索入口：`CodeRetriever.hybridSearch(String, int)` — `src/main/java/com/codeagent/rag/CodeRetriever.java:50`
 - 语义 / 关键词检索：`CodeRetriever.semanticSearch` — `CodeRetriever.java:35`；`CodeRetriever.keywordSearch` — `CodeRetriever.java:43`
-- 关系图查询：`CodeRetriever.getRelationGraph` — `CodeRetriever.java:152`；`VectorStore.getOutgoingRelations` — `src/main/java/com/codeagent/rag/VectorStore.java:255`
-- CLI 入口：`/index` — `src/main/java/com/codeagent/cli/Main.java:721`；`/search` — `Main.java:733`；`/graph` — `Main.java:757`
-- Agent 工具：`search_code` 注册 — `src/main/java/com/codeagent/tool/ToolRegistry.java:578`
+- 关系图查询：`CodeRetriever.getRelationGraph` — `CodeRetriever.java:152`；`VectorStore.getRelations` — `src/main/java/com/codeagent/rag/VectorStore.java:226`
+- CLI 命令解析：`/index` — `src/main/java/com/codeagent/cli/CliCommandParser.java:174`；`/search` — `CliCommandParser.java:182`；`/graph` — `CliCommandParser.java:190`
+- CLI 命令执行：`/index` — `src/main/java/com/codeagent/cli/Main.java:814`；`/search` — `Main.java:826`；`/graph` — `Main.java:850`
+- Agent 工具：`search_code` 注册 — `src/main/java/com/codeagent/tool/ToolRegistry.java:597`
+- 实时对照路径：`grep_code` 注册 — `ToolRegistry.java:351`；实际分发到 `RipgrepCodeSearchEngine.search` — `ToolRegistry.java:466`
 
 ## 2. 设计意图
 
@@ -59,9 +61,12 @@ flowchart LR
 
     Name[类名或方法名] --> RelationQuery[关系查询]
     RelationQuery --> Graph
+
+    Real[实时精确搜索] --> Grep[grep_code<br/>ripgrep / Java 回退]
+    Grep -.不依赖索引.-> Root
 ```
 
-架构按职责分为五层：
+架构按职责分为五层；图外的 `grep_code` 是独立实时路径，仅作定位对照：
 
 | 层次 | 核心类 | 职责 | 不负责什么 |
 |---|---|---|---|
@@ -81,7 +86,7 @@ flowchart LR
 
 `SearchResult`（`VectorStore.java:352-353`）保存文件路径、块类型、名称、内容和 `similarity`。这里的 `similarity` 在混合检索后不再是纯余弦值，而是"余弦或关键词基础分 + 多项业务加权"的综合排序分，适合排序，不能解释为严格概率，也不能拿固定阈值跨模型比较。
 
-`CodeRelation`（`CodeRelation.java:12-13`）由 `fromFile`、`fromName`、`toFile`、`toName`、`relationType` 构成。目标文件经常为 `null`，因为当前实现没有符号求解器。
+`CodeRelation`（`src/main/java/com/codeagent/rag/CodeRelation.java:12-13`）由 `fromFile`、`fromName`、`toFile`、`toName`、`relationType` 构成。目标文件经常为 `null`，因为当前实现没有符号求解器。
 
 ### 3.3 索引端到端调用链
 
@@ -117,9 +122,9 @@ sequenceDiagram
 
 入口把字符串路径转换为绝对路径并 `normalize()`（`CodeIndex.java:58`）。路径不存在时直接返回块数和关系数都为 0 的 `IndexResult` 并报告错误（`CodeIndex.java:59-63`），而不是继续创建空索引。当前只检查"是否存在"，没有在入口显式检查"是否为目录"。
 
-先 `collectFiles` 形成完整文件列表（`CodeIndex.java:67-69`），再逐文件处理；进度在每处理若干文件或处理到最后一个时输出（`CodeIndex.java:79-81`）。代价是超大仓库需要先在内存保存所有 `Path`。
+先 `collectFiles` 形成完整文件列表（`CodeIndex.java:67-69`），再逐文件处理；进度在每处理固定数量文件或处理到最后一个时输出（`CodeIndex.java:79-81`）。代价是超大仓库需要先在内存保存所有 `Path`。
 
-切块、Embedding 或 Java 分析发生异常时，异常在**文件粒度**被捕获，记录警告后继续处理其他文件（`CodeIndex.java:97-101`）。因此单个乱码文件、临时网络问题或 AST 解析问题不会终止整次扫描。但注意这会产生"部分索引"：`IndexResult` 没有 `partial` 字段，最终只报告成功写入的块数和关系数，用户需从进度输出或日志判断哪些文件失败。
+切块、Embedding 或 Java 分析发生异常时，异常在**文件粒度**被捕获，记录警告后继续处理其他文件（`CodeIndex.java:97-101`）。因此单个乱码文件、临时网络问题或 AST 解析问题不会终止整次扫描。但注意这会产生"部分索引"：`IndexResult` 只有 `chunkCount`、`relationCount`、`message` 三个字段（`CodeIndex.java:176`），没有 `partial` 标志，最终只报告成功写入的块数和关系数，用户需从进度输出或日志判断哪些文件失败。
 
 扫描阶段先在内存积累全部 `CodeChunkEntry` 和 `CodeRelation`，最后打开 `VectorStore` 统一写入（`CodeIndex.java:105-108`）：`clearProject()` → `insertChunks()` → `insertRelations()`。仓库规模上升时，正文和向量都堆在内存中，峰值内存会成为限制。
 
@@ -131,13 +136,13 @@ sequenceDiagram
 
 ### 3.5 代码切块设计
 
-**非 Java 文件**（`CodeChunker.chunkLargeText` — `CodeChunker.java:50-78`）：不超过字符上限时整个文件作为单个 `file` 块（`CodeChunker.java:51-53`）；超过上限时按换行分段，段名为 `filePath + "#" + segIndex`（`CodeChunker.java:62-64`、`72-75`）。选择按行而不是固定字符切割，是为了避免从语句或配置行中间截断。
+**非 Java 文件**（`CodeChunker.chunkLargeText` — `src/main/java/com/codeagent/rag/CodeChunker.java:50-78`）：不超过字符上限时整个文件作为单个 `file` 块（`CodeChunker.java:51-53`）；超过上限时按换行分段，段名为 `filePath + "#" + segIndex`（`CodeChunker.java:62-64`、`72-75`）。选择按行而不是固定字符切割，是为了避免从语句或配置行中间截断。注意"整文件小文本"走 `CodeChunk.fileChunk`，两个行号字段是占位值；只有"超预算分段"路径才会写入真实行号——同一 `file` 类型下两条路径的行号口径并不一致。
 
 **Java 文件**（`CodeChunker.chunkJavaFile` — `CodeChunker.java:80-125`）：JavaParser 使用 Java 17 语言级别（`CodeChunker.java:25-26`），解析成功后遍历所有 `ClassOrInterfaceDeclaration`：为每个类或接口生成一个 `class` 块（`CodeChunker.java:101-103`），并为每个直接方法生成 `method` 块（`CodeChunker.java:112-115`）。类块内容只取声明头部，方法实现由方法块负责，减少大面积重复。
 
 **解析失败降级**（`CodeChunker.java:84-87`）：解析失败或没有 CompilationUnit 时退回按行文本切块；AST 成功但没有类或接口时同样回退（`CodeChunker.java:120-122`）。一个尚未编译通过的源码文件仍有机会通过关键词或语义被搜到。
 
-需要区分两个不同的字符上限：`CodeChunker` 的分段预算只直接约束文本分段，Java 方法块没有二次分段，超长方法可以完整保存在 SQLite 中；真正发送给 Embedding API 时，`EmbeddingClient` 另有一次输入截断（`EmbeddingClient.java:41`、`EmbeddingClient.java:52-54`）。这意味着超长方法后半部分不参与向量计算，但仍可被 SQL 关键词检索命中。
+需要区分两个不同的字符上限：`CodeChunker` 的分段预算（`CodeChunker.java:29`）只直接约束文本分段，Java 方法块没有二次分段，超长方法可以完整保存在 SQLite 中；真正发送给 Embedding API 时，`EmbeddingClient` 另有一次输入截断（`EmbeddingClient.java:41`、`EmbeddingClient.java:52-54`）。这意味着超长方法后半部分不参与向量计算，但仍可被 SQL 关键词检索命中。
 
 ### 3.6 静态关系抽取
 
@@ -149,7 +154,7 @@ sequenceDiagram
 | `extends` | 类的 extended types | `CodeAnalyzer.java:76-79` | `Child` 继承 `Parent` |
 | `implements` | 类的 implemented types | `CodeAnalyzer.java:82-85` | `ServiceImpl` 实现 `Service` |
 | `contains` | 类的方法声明 | `CodeAnalyzer.java:88-92` | `Agent` 包含 `Agent.run`（只使用方法名，不含重载签名） |
-| `calls` | `MethodCallExpr` | `CodeAnalyzer.java:95-104` | 向父节点回溯最近 `MethodDeclaration`，生成 `调用者类.方法 -> 被调用方法名` |
+| `calls` | `MethodCallExpr` | `CodeAnalyzer.java:95-104` | 向父节点回溯最近 `MethodDeclaration`（`findParentMethod` — `CodeAnalyzer.java:108-117`），生成 `调用者类.方法 -> 被调用方法名` |
 
 该策略简单、低成本，但存在明确边界：不使用 JavaParser Symbol Solver；不解析接收者类型；只保存被调用方法的简单名称；同名方法无法消歧；反射、动态代理、方法句柄和运行时分派无法识别；构造器调用不属于 `MethodCallExpr`；字段访问和数据流也不在关系模型中。因此准确表述应是"基于 AST 的轻量静态关系图"，不能称为完整调用图或知识图谱推理引擎。
 
@@ -162,13 +167,13 @@ sequenceDiagram
 | Ollama | `/api/embeddings`（`EmbeddingClient.java:63-64`） | `model`、`prompt` | 默认无 Bearer Token |
 | OpenAI 兼容 | `/embeddings`（`EmbeddingClient.java:85-86`） | `model`、`input` | 可选 Bearer Token |
 
-`openai`、`zhipu`、`glm` 走兼容接口，未知 provider 回退到 Ollama 路径。默认 provider 是 `ollama`，默认模型是 `nomic-embed-text:latest`（`EmbeddingClient.java:27-28`），base URL 由 `getEnv` 读取，缺省时回落到 `inferDefaultUrl(provider)`（`EmbeddingClient.java:29`）。配置读取顺序是系统环境变量优先，再读取同名 Java system property，最后使用默认值（`EmbeddingClient.java:140-150`）。
+`openai`、`zhipu`、`glm` 走兼容接口，未知 provider 回退到 Ollama 路径。默认 provider 是 `ollama`，默认模型仍是本地嵌入模型，默认 base URL 与默认密钥均在构造器读取（`EmbeddingClient.java:26-31`）。base URL 由 `getEnv` 读取，缺省时回落到 `inferDefaultUrl(provider)`（`EmbeddingClient.java:29`）。配置读取顺序是系统环境变量优先，再读取同名 Java system property，最后使用默认值（`EmbeddingClient.java:140-150`）。
 
-OkHttp 连接超时为 30 秒、读取超时为 120 秒（`EmbeddingClient.java:16-19`）。非 2xx、空响应体、响应 JSON 缺少向量数组都会抛出 `IOException`（`EmbeddingClient.java:74-75`、`121-127`）。空输入直接返回长度为 0 的向量（`EmbeddingClient.java:47-49`）。当前没有在表里记录 provider、模型名或维度，也没有索引版本校验；切换模型后应重新执行索引。
+HTTP 客户端在静态初始化时设置连接与读取两个固定超时（`EmbeddingClient.java:16-19`）。非 2xx、空响应体、响应 JSON 缺少向量数组都会抛出 `IOException`（`EmbeddingClient.java:74-75`、`:96-98`、`:121-127`）。空输入直接返回长度为 0 的向量（`EmbeddingClient.java:47-49`）。当前没有在表里记录 provider、模型名或维度，也没有索引版本校验；切换模型后应重新执行索引。
 
 ### 3.8 SQLite 存储设计
 
-数据库默认位于 `~/.codeagent/rag/codebase.db`，可用 system property `codeagent.rag.dir` 修改目录（`VectorStore.java:24-31`）。多个项目共用同一个文件，通过规范化的项目绝对路径隔离。
+数据库默认位于用户主目录下的 `.codeagent/rag` 目录，可用 system property `codeagent.rag.dir` 修改目录（`VectorStore.java:24-31`），库文件名固定为 `codebase.db`（`VectorStore.java:30`）。多个项目共用同一个文件，通过规范化的项目绝对路径隔离。
 
 `code_chunks` 表（`VectorStore.java:37-48`）：
 
@@ -182,6 +187,8 @@ OkHttp 连接超时为 30 秒、读取超时为 120 秒（`EmbeddingClient.java:
 | `content` | `TEXT NOT NULL` |
 | `embedding_json` | `TEXT`（可空） |
 | `created_at` | `TIMESTAMP DEFAULT CURRENT_TIMESTAMP` |
+
+注意该表**没有** `start_line` / `end_line` 列（对照 `VectorStore.java:37-48` 的建表语句与 `VectorStore.java:103-106` 的插入列清单）：`CodeChunk` 里的行号只存在于内存对象，`insertChunks` 不会写入，检索结果也就拿不到行号用于精确定位。
 
 `code_relations` 表（`VectorStore.java:51-62`）：
 
@@ -218,16 +225,16 @@ OkHttp 连接超时为 30 秒、读取超时为 120 秒（`EmbeddingClient.java:
 
 ```mermaid
 flowchart TD
-    Q[query, topK] --> S[语义召回<br/>limit 由 topK 放大而来]
+    Q[query, topK] --> S[语义召回<br/>limit 由 topK 放大并取固定下限]
     Q --> T[Jieba + ASCII token]
-    T --> K[逐关键词 SQL 召回]
-    S --> M[按 filePath#name 去重]
-    K --> B[名称/路径/内容加分]
+    T --> K[逐关键词 SQL LIKE 召回]
+    K --> B[boostKeywordMatch<br/>名称/路径/内容加分]
+    S --> M[mergeResult<br/>按 filePath#name 合并]
     B --> M
-    M --> D{同一 filePath#name<br/>再次出现?}
-    D -->|是且尚未奖励| X[再发一次重复奖励]
-    D -->|否| Y[保持最佳分]
-    X --> C[method 高于 class<br/>file 不加]
+    M --> D{同一 filePath#name<br/>第二次出现?}
+    D -->|是且该键尚未奖励| X[取两次较大分后<br/>再发一次重复奖励]
+    D -->|否| Y[直接放入]
+    X --> C[类型奖励 method > class > file]
     Y --> C
     C --> R[降序排序]
     R --> L[每文件条数上限<br/>总数最多 topK]
@@ -239,31 +246,31 @@ flowchart TD
 2. **语义结果合并**（`CodeRetriever.java:56-58`）。
 3. **关键词召回**：对分词结果逐个关键词做 LIKE 查询并加权（`CodeRetriever.java:61-66`）。
 4. **去重键**：`filePath#name`（`CodeRetriever.java:86`）。同一代码块被多次召回时只保留一个结果。
-5. **重复命中奖励**：同一键再次出现时先取两次分数的最大值，再额外加分；`dualMatchBonused`（`CodeRetriever.java:52`）保证该奖励每个键只发一次。**注意这里只判断"键是否重复"，不区分来源**——语义 + 关键词、或两条语义命中（如重载方法），都会触发。
-6. **关键词加权**：见 `boostKeywordMatch`（`CodeRetriever.java:103-128`）。名称命中权重最高、路径与内容命中并列次之，具体数值见源码。设计上把总分控制在关键词基础分之上、且不超过语义分上限，避免关键词结果压过强语义结果。
-7. **类型奖励**：方法块高于类块，文件块不加（`CodeRetriever.java:71-75`）。原因是"怎么实现"类问题通常由具体方法或类声明更直接回答。
-8. **排序与每文件限流**：降序排序后调用 `limitPerFile`（`CodeRetriever.java:80-81`、`133-147`），对每个文件设置条数上限，防止一个大类的多个相似方法占满全部 Top K。该规则提高覆盖面，但可能丢掉同一核心文件中的其他高价值方法。
+5. **重复命中奖励**：同一键再次出现时先取两次分数的最大值，再额外加分；`dualMatchBonused`（`CodeRetriever.java:52`）保证该奖励每个键只发一次（`CodeRetriever.java:91-96`）。**注意这里只判断"键是否重复"，不区分来源**——语义 + 关键词、或两条语义命中（如重载方法），都会触发。
+6. **关键词加权**：见 `boostKeywordMatch`（`CodeRetriever.java:103-128`）。名称命中权重最高、路径与内容命中并列次之，具体数值见源码。设计上把总分控制在关键词基础分之上、且不超过语义分上限（注释见 `CodeRetriever.java:109`），避免关键词结果压过强语义结果。
+7. **类型奖励**：在合并完成后的遍历中按 `chunkType` 加一个内联常量，方法块高于类块，文件块不加（`CodeRetriever.java:71-75`）。原因是"怎么实现"类问题通常由具体方法或类声明更直接回答。
+8. **排序与每文件限流**：降序排序后调用 `limitPerFile`（`CodeRetriever.java:80-81`、`:133-147`），对每个文件设置条数上限（调用处传入固定值 — `CodeRetriever.java:81`），防止一个大类的多个相似方法占满全部 Top K。该规则提高覆盖面，但可能丢掉同一核心文件中的其他高价值方法。
 
 这里不是简单把"语义分 + 所有关键词分"无条件相加：合并逻辑先取已存在分与候选分的最大值，再只发一次重复奖励。因此 `similarity` 只用于当前候选集排序。
 
 ### 3.12 关系图查询与结果展示
 
-`getRelationGraph(name)` 查询 `from_name = name OR to_name = name`（`VectorStore.java:226-250`），返回与指定名称直接相连的一跳关系。`getOutgoingRelations(name)` **只按 `from_name` 过滤**（`VectorStore.java:255-259`），不匹配 `to_name`。当前没有多跳遍历、环检测、路径搜索、模糊名称匹配、包名和重载消歧，也没有与向量结果自动联动展开邻居。
+`getRelationGraph(name)` 委托给 `VectorStore.getRelations`，查询 `from_name = name OR to_name = name`（`VectorStore.java:226-250`），返回与指定名称直接相连的一跳关系。`getOutgoingRelations(name)` **只按 `from_name` 过滤**（`VectorStore.java:255-259`），不匹配 `to_name`；该方法当前**没有任何调用方**，是未被 `/graph` 或 `search_code` 使用的预留 API。当前没有多跳遍历、环检测、路径搜索、模糊名称匹配、包名和重载消歧，也没有与向量结果自动联动展开邻居。
 
 如果用户输入 `Agent.run`，关系表中 calls 起点可能命中；如果输入完整方法签名，而关系只保存方法名，则不会自动归一化。调用方需要先从代码块名称提取适合图查询的名字。
 
-检索结果展示由 `SearchResultFormatter` 承担（`src/main/java/com/codeagent/rag/SearchResultFormatter.java:16`）：`formatForCli`（`SearchResultFormatter.java:21-39`）与 `formatForTool`（`SearchResultFormatter.java:41-59`）都会先输出一段不含额外 LLM 调用的简短摘要（`buildSummary` — `SearchResultFormatter.java:61-94`），再逐条打印 `[类型:名称]`、相似度和路径。CLI `/search` 用 `formatForCli`（`Main.java:750`），Agent 工具 `search_code` 用 `formatForTool`（`ToolRegistry.java:607`）。
+检索结果展示由 `SearchResultFormatter` 承担（`src/main/java/com/codeagent/rag/SearchResultFormatter.java:16`）：`formatForCli`（`SearchResultFormatter.java:21-39`）与 `formatForTool`（`SearchResultFormatter.java:41-59`）都会先输出一段不含额外 LLM 调用的简短摘要（`buildSummary` — `SearchResultFormatter.java:61-94`），再逐条打印 `[类型:名称]`、相似度和路径；两个入口的正文片段长度上限不同（`SearchResultFormatter.java:34`、`:55`），且正文不为空时才截断。CLI `/search` 用 `formatForCli`（`Main.java:843`），Agent 工具 `search_code` 用 `formatForTool`（`ToolRegistry.java:626`）。
 
 ### 3.13 典型场景推演
 
 **场景一："上下文快满时在哪里压缩"**
 
-1. `search_code` 把自然语言发送到 `CodeRetriever.hybridSearch`（`ToolRegistry.java:602`）。
+1. `search_code` 把自然语言发送到 `CodeRetriever.hybridSearch`（`ToolRegistry.java:621`）。
 2. 语义召回找到 `ConversationHistoryCompactor` 和 `MemoryManager`。
 3. "上下文、压缩"等中文关键词补充正文命中。
 4. method/class 类型得到加分。
 5. 每文件条数上限避免一个文件占满列表。
-6. Agent 再用 `read_file` 查看 `compactIfNeeded`（`ConversationHistoryCompactor.java:77`）和调用方 `Agent.maybeCompactHistory`（`src/main/java/com/codeagent/agent/Agent.java:323`）。
+6. Agent 再用 `read_file` 查看 `compactIfNeeded`（`ConversationHistoryCompactor.java:74`）和调用方 `Agent.maybeCompactHistory`（`src/main/java/com/codeagent/agent/Agent.java:436`，调用点 `Agent.java:194`）。
 
 检索负责缩小候选集，最终结论仍来自源码阅读。
 
@@ -281,22 +288,27 @@ flowchart TD
 
 | 主题 | 设计意图 | 实际实现 | 源码位置 |
 |---|---|---|---|
-| 类块行范围 | 类块"取声明开始处到后 5 行" | `extractLines` 的循环是**闭区间**（起点 `startLine - 1`、条件 `i < endLine`），因此实际包含起始行，行数比标签描述多一行；同时又用 `Math.min(classStart + N, classEnd)` 按类结束行截断 | `CodeChunker.java:98`、`CodeChunker.java:127-135` |
-| 代码块行号 | 以为 `startLine`/`endLine` 在切块时统一计算并贯穿使用 | class/method 块确实带真实起止行（`CodeChunker.java:101-103`、`112-115`），但**整文件文本块硬编码两个字段都为 0**（`CodeChunk.java:20`）；且两字段都不入库，查询结果拿不到行号 | `CodeChunk.java:19-21`、`VectorStore.java:37-48` |
-| 查询停用词 | 文档只列了少数几个低信息词 | `isUsefulToken` 实际过滤的停用词集合更大，还额外丢弃过短 token，并要求 token 含汉字或字母数字；完整集合与阈值见源码 | `RagQueryTokenizer.java:52-74` |
+| 类块行范围 | 类块"从声明起始行向后取固定行数" | 端点由 `Math.min(classStart + 固定偏移, classEnd)` 决定，且 `extractLines` 的循环是**闭区间**（起点 `startLine - 1`、条件 `i < min(endLine, lines.length)`），因此实际包含起始行，实际行数比"偏移量"多一行 | `CodeChunker.java:98`、`CodeChunker.java:127-136` |
+| 类块行号与内容不匹配 | 以为块的 `startLine`/`endLine` 覆盖范围等于 `content` 范围 | 类块 `content` 只有声明头部若干行，但 `startLine/endLine` 记的是整个类的起止行（`CodeChunker.java:101-103`）；整文件小文本块又把两个字段硬编码为 0（`CodeChunk.java:20`） | `CodeChunk.java:19-21`、`CodeChunker.java:98-103` |
+| 代码块行号持久化 | 以为 `startLine`/`endLine` 会随索引写库 | class/method 块确实带真实起止行，但 `code_chunks` **没有行号列**，`insertChunks` 只写 6 个业务列，查询结果拿不到行号 | `VectorStore.java:37-48`、`VectorStore.java:103-106` |
+| 非 Java 分段行号口径 | 旧文档称早早收尾段的 `endLine` 用 0 基索引、与末段口径不一致 | 实际是一致的 **1-based**：收尾段写触发溢出行的下标 `i`，恰好等于该段最后一行（`lines[i-1]`）的 1-based 行号；新段 `startLine = i+1`；末段 `endLine = lines.length` 同样正确 | `CodeChunker.java:61-75` |
+| 查询停用词 | 文档只列了少数几个低信息词 | `isUsefulToken` 实际过滤的停用词集合更大，还额外丢弃过短 token，并要求 token 含汉字或字母数字 | `RagQueryTokenizer.java:52-74` |
 | Embedding 默认地址 | 以为全局只有单一默认 base URL | `inferDefaultUrl` 按 provider 返回**不同**默认：`zhipu`/`glm` 落到智谱开放平台地址，`ollama` 与未知 provider 才落到本地地址；`EMBEDDING_BASE_URL` 可覆盖 | `EmbeddingClient.java:29`、`EmbeddingClient.java:132-138` |
 | 重复命中的加分 | 流程图标注为"双路命中"，语义 + 关键词各一路 | `mergeResult` 只判断同一个 `filePath#name` 键是否第二次出现，**与来源无关**：两条语义命中（如重载方法）同样会触发；奖励由 `dualMatchBonused` 保证每个键只发一次 | `CodeRetriever.java:84-101`（键 `:86`、发放 `:93-96`） |
-| `code_chunks` 表结构 | 只笼统说"主键、项目路径、文件路径、类型、名称、正文、向量 JSON、时间" | 精确列为 `id` / `project_path` / `file_path` / `chunk_type` / `name` / `content` / `embedding_json` / `created_at`，`embedding_json` 可空 | `VectorStore.java:37-48` |
+| 关键词召回范围 | 以为路径也参与 LIKE 匹配 | SQL 只 `name`/`content` 两列 ILIKE；路径加分只作用于已被名称或正文召回的候选 | `VectorStore.java:196-199` |
+| `code_chunks` 表结构 | 只笼统说"主键、项目路径、文件路径、类型、名称、正文、向量 JSON、时间" | 精确列为 `id` / `project_path` / `file_path` / `chunk_type` / `name` / `content` / `embedding_json` / `created_at`，`embedding_json` 可空；**无行号列** | `VectorStore.java:37-48` |
 | `code_relations` 表结构 | 只笼统说"两端文件和名称、类型、时间" | 精确列为 `id` / `project_path` / `from_file` / `from_name` / `to_file` / `to_name` / `relation_type` / `created_at`，`to_file`/`to_name` 可空 | `VectorStore.java:51-62` |
 | 索引 | 文档未列索引名 | 实际建立 `idx_project`、`idx_file`、`idx_type`（均在 `code_chunks`）与 `idx_rel_project`、`idx_rel_from`、`idx_rel_to`（均在 `code_relations`） | `VectorStore.java:65-70` |
 | 关键词评分权重 | 文档只说"名称、路径、内容、双路命中分别加权" | 关键词命中以一个固定基础分起算（`VectorStore.java:215`）；`boostKeywordMatch` 中名称命中权重最高、文件路径与内容命中并列次之，实现为多个 `if` 累加 | `CodeRetriever.java:103-128` |
 | 类型奖励 | 文档写 method/class 加分 | 常量以 `switch` 内联在 `hybridSearch` 中，method 高于 class，file 记 0 | `CodeRetriever.java:71-75` |
-| 语义候选上限 | 文档写为 `max(topK*2, 10)` | 关系是"按 `topK` 的一个倍数放大，并与一个固定下限取较大值" | `CodeRetriever.java:55` |
-| 文本分段命名与 endLine | 文档写段名为 `filePath#序号` | 命名确认如此；但**提前收尾的分段把 `endLine` 写成"触发溢出的那一行的索引（从 0 计数）"**，而最后一段写 `lines.length`，两者口径不一致 | `CodeChunker.java:62-64`、`CodeChunker.java:72-75` |
-| 结果格式化 | 文档未提该组件 | 存在 `SearchResultFormatter`（CLI 与 tool 两种格式），并有对应单测 | `SearchResultFormatter.java:21`、`SearchResultFormatter.java:41`、`SearchResultFormatterTest.java:11` |
-| 出边查询 | 文档写"只查询从该名称出发的边" | 确认 SQL 仅按 `from_name` 过滤，不匹配 `to_name` | `VectorStore.java:255-259` |
+| 语义候选上限 | 旧文档写成一个固定算式（放大倍数 + 下限） | 关系确为"按 `topK` 的一个倍数放大，并与一个固定下限取较大值"，具体数值以源码为准 | `CodeRetriever.java:55` |
+| 文本分段命名 | 文档写段名为 `filePath#序号` | 命名确认如此；但只有超预算分段才写真实 1-based 行号，整文件小文本块走 `fileChunk` 写 0/0 | `CodeChunker.java:62-64`、`CodeChunker.java:72-75`、`CodeChunk.java:20` |
+| 结果格式化 | 文档未提该组件 | 存在 `SearchResultFormatter`（CLI 与 tool 两种格式，片段长度上限不同），并有对应单测 | `SearchResultFormatter.java:21`、`:41`、`SearchResultFormatterTest.java:11` |
+| 出边查询 | 文档写"只查询从该名称出发的边" | 确认 SQL 仅按 `from_name` 过滤，不匹配 `to_name`；且该方法**当前无调用方** | `VectorStore.java:255-259` |
 | 余弦计算守卫 | 文档只写"任一向量范数为 0 返回 0" | 还有显式的**维度一致性守卫**：两端维度不同直接返回 0，不抛异常 | `VectorStore.java:303-317` |
 | 文件收集 | 文档描述排除目录与后缀白名单 | 确认 `collectFiles` 用目录名硬编码排除 + 后缀白名单；不读 `.gitignore`，以 `.` 开头的目录一律跳过 | `CodeIndex.java:129-174`（排除 `:136-141`、白名单 `:150-158`） |
+| CLI 索引与检索的项目路径 | 以为 `/index 某路径` 后 `/search` 会在同一项目上检索 | `/index` 用 payload 路径索引，并把绝对路径同步给 `ToolRegistry`/`MemoryManager`（`Main.java:815-823`）；但 CLI `/search` 与 `/graph` 固定用 `new CodeRetriever(".")`，即**当前工作目录**（`Main.java:833`、`Main.java:857`）。索引非 `.` 路径时二者可能落到不同的 `project_path` | `Main.java:815-823`、`Main.java:833`、`Main.java:857` |
+| 实时精确搜索 | 文档只对比 `grep_code` 概念 | 实现上是 `RipgrepCodeSearchEngine`（优先）与 `JavaCodeSearchEngine`（回退）两个实现，注册面在 `grep_code` | `ToolRegistry.java:351`、`ToolRegistry.java:466`、`RipgrepCodeSearchEngine.java:203` |
 
 ## 5. 设计取舍
 
@@ -324,7 +336,7 @@ AST 切块保留类和方法边界，结果更适合代码问答；固定窗口�
 
 ### 5.5 RAG vs 实时代码探索
 
-RAG 擅长模糊语义召回，但索引可能过期；实时 `grep_code` 精确且反映当前磁盘，但要求用户或模型已有关键词。项目将两者定义为互补能力，而不是让 RAG 接管所有代码定位。
+RAG 擅长模糊语义召回，但索引可能过期；实时 `grep_code` 精确且反映当前磁盘，但要求用户或模型已有关键词。`grep_code` 背后是两套引擎的运行时选择（优先 ripgrep，缺失或失败回退纯 Java 扫描，`RipgrepCodeSearchEngine.java:203`），不依赖任何向量或索引状态。项目将两者定义为互补能力：默认走实时探索，RAG 只作模糊兜底，而不是让 RAG 接管所有代码定位。
 
 ## 6. 失败与边界矩阵
 
@@ -337,25 +349,29 @@ RAG 擅长模糊语义召回，但索引可能过期；实时 `grep_code` 精确
 | Embedding 非 2xx / 响应格式错误 | `postJson` 抛出 `IOException` | 向上冒泡，本次文件或查询失败 | 该次索引或查询失败 |
 | 查询向量维度不一致 | `cosineSimilarity` 维度守卫 | 相似度返回 0 | 语义排序失真 |
 | 向量范数为 0 | `cosineSimilarity` 零向量守卫 | 相似度返回 0 | 该候选得分失真 |
-| clear 成功、insert 失败 | 分步提交 | 返回持久化失败 | 旧项目索引可能已清空 |
+| 空向量块 | `search` 跳过空 `embedding_json` | 不进入候选集 | 该块无法被语义召回 |
+| clear 成功、insert 失败 | 分步提交 | 返回携带错误消息的 0/0 `IndexResult` | 旧项目索引可能已清空 |
 | 关系写入失败 | 独立事务 | 代码块可能已提交 | 图数据缺失 |
 | 语义检索时 Embedding 服务不可用 | `hybridSearch` 先执行语义路径 | 异常直接向上抛出，不自动降级关键词 | 本次混合检索失败 |
 | 空查询 | `EmbeddingClient.embed` 空输入 | 返回空向量 | 相似度多为 0 |
-| `topK` 非正数 | 检索器入口未统一校验 | 调用方需传正整数 | 可能触发截取边界问题 |
+| `topK` 非正数（工具入口） | `search_code` 内联 clamp | 夹到合法正区间 | 不会触发截取边界问题 |
+| `topK` 非正数（CLI/库入口） | 无统一校验 | 依赖调用方传正整数 | `hybridSearch` 可能出现候选集异常 |
+| `/index` 到非 cwd 路径后 `/search` | 无校验 | `/search` 用 cwd 打开另一个 `project_path` | 报"尚未索引"或检索不到刚索引的内容 |
 | 超长单行 | 文本分段 | 单行本身无法再拆，块可能超预算 | 向量输入被截断，存储正文完整 |
 | 两个同名方法 | calls 关系 | 目标无法消歧 | 图查询假阳性 |
+| `getOutgoingRelations` | 无调用方 | 死代码，行为仅存于单测之外 | 无运行时影响 |
 
 ## 7. 测试策略与证据
 
 ### 7.1 已存在的单测覆盖（经核对）
 
-- `CodeChunkerTest`（`src/test/java/com/codeagent/rag/CodeChunkerTest.java:11`）：断言 `.java` 文件切出 class 块和 method 块，以及 `toEmbeddingText()` 的 `[class:名称]` 格式（`CodeChunkerTest.java:26-50`）。注意该用例输入的仍是 `.java` 文件，**并未真正覆盖非 Java 文本分段路径**。
+- `CodeChunkerTest`（`src/test/java/com/codeagent/rag/CodeChunkerTest.java:11`）：断言 `.java` 文件切出 class 块和 method 块，以及 `toEmbeddingText()` 的 `[class:名称]` 格式（`CodeChunkerTest.java:25-50`）。注意 `testNonJavaFile`（`CodeChunkerTest.java:15-23`）虽然名为"非 Java 文件"，传入的却是 `.java` 路径，**并未真正覆盖非 Java 文本分段路径**。
 - `CodeAnalyzerTest`（`CodeAnalyzerTest.java:11`）：对示例类断言 extends、implements、contains、imports 四类关系（`CodeAnalyzerTest.java:22-38`）；**未断言 calls**。
-- `VectorStoreTest`（`VectorStoreTest.java:12`）：插入与向量搜索（`:32-54`）、关键词搜索（`:57-65`）、关系存储与 `getRelations`（`:68-75`）、`clearProject`（`:78-85`）。
-- `CodeRetrieverTest`（`CodeRetrieverTest.java:12`）：验证自然语言查询中的代码关键词会把目标方法提升到首位（`CodeRetrieverTest.java:32-63`）。
-- `CodeIndexTest`（`CodeIndexTest.java:10`）：不存在路径返回 0/0（`:13-18`）、索引测试资源目录（`:20-28`）、进度监听器收到开始/发现/完成消息（`:30-41`）。
+- `VectorStoreTest`（`VectorStoreTest.java:12`）：插入与向量搜索（`:31-54`）、关键词搜索（`:56-65`）、关系存储与 `getRelations`（`:67-75`）、`clearProject`（`:77-85`）；每个用例用 `codeagent.rag.dir` 指向临时目录。
+- `CodeRetrieverTest`（`CodeRetrieverTest.java:12`）：用自定义 stub `EmbeddingClient` 验证自然语言查询中的代码关键词会把目标方法提升到首位（`CodeRetrieverTest.java:31-64`）。
+- `CodeIndexTest`（`CodeIndexTest.java:10`）：不存在路径返回 0/0（`:12-18`）、索引测试资源目录（`:20-28`）、进度监听器收到开始/发现/完成消息（`:30-41`）。
 - `SearchResultFormatterTest`（`SearchResultFormatterTest.java:9`）：CLI 输出包含"搜索摘要"与首条结果（`:11-28`）。
-- `EmbeddingClientTest`（`EmbeddingClientTest.java:7`）：默认 provider/模型、自定义配置、空输入返回空数组（`:9-29`）。
+- `EmbeddingClientTest`（`EmbeddingClientTest.java:7`）：默认 provider/模型、自定义配置、空输入返回空数组（`:9-29`；注意此处按断言固定了默认 provider/模型字面量，与源码常量同源）。
 
 ### 7.2 回归命令
 
@@ -363,14 +379,18 @@ RAG 擅长模糊语义召回，但索引可能过期；实时 `grep_code` 精确
 mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest,CodeRetrieverTest,SearchResultFormatterTest,EmbeddingClientTest
 ```
 
+`AGENTS.md` 中 RAG 场景的推荐命令是 `mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest`。
+
 ### 7.3 尚未覆盖、值得补测的边界
 
-- 非 Java 文本超预算分段的段名与行号口径。
+- 非 Java 文本超预算分段的段名与 1-based 行号口径。
+- 整文件小文本块行号占位（0/0）与分段块行号并存的行为。
 - Java 17 新语法、AST 失败回退、嵌套类和方法重载。
 - calls 关系、JDK import 过滤、重载同名歧义。
 - 两个项目的数据隔离、LIKE 通配符转义、batch 中途失败回滚。
 - 重复命中奖励只发一次、每文件条数上限、method/class 类型奖励。
 - Embedding 维度不一致与空向量的返回行为。
+- CLI `/index <path>` 后 `/search` 的项目路径一致性。
 - 真实 Embedding 服务相关的集成测试应注入确定性 fake client 并使用临时数据库目录，避免环境依赖。
 
 ## 8. 面试讲解模板
@@ -383,7 +403,7 @@ mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest,C
 
 这个模块解决的是用户不知道准确符号名时如何找到实现。入口 `CodeIndex` 遍历白名单源码文件，Java 文件由 `CodeChunker` 使用 Java 17 AST 生成类块和方法块，解析失败退回按行文本分段；`CodeAnalyzer` 在同一 AST 思路下提取五类静态关系。每个块把类型和名称与源码一起送入 Embedding，向量和正文写入 SQLite，关系写入独立表，向量以 JSON 保存以换取零运维部署。
 
-查询时先按 `topK` 放大语义候选集，再用 Jieba 和 ASCII 正则提取关键词执行 LIKE 检索。结果按 `filePath#name` 去重，名称、路径、正文、重复召回以及 method/class 类型分别加分，最后对每个文件限制条数。当前向量在 JVM 内全量计算余弦，所以适合本地中小仓库；它的优势是部署简单，边界是大规模性能、索引发布非原子（clear、块、关系分步提交）、关系没有符号求解以及混合查询没有 Embedding 失败降级。
+查询时先按 `topK` 放大语义候选集，再用 Jieba 和 ASCII 正则提取关键词执行 LIKE 检索。结果按 `filePath#name` 去重，名称、路径、正文、重复召回以及 method/class 类型分别加分，最后对每个文件限制条数。当前向量在 JVM 内全量计算余弦，所以适合本地中小仓库；它的优势是部署简单，边界是大规模性能、索引发布非原子（clear、块、关系分步提交）、行号不入库、关系没有符号求解以及混合查询没有 Embedding 失败降级。
 
 ## 9. 高频面试问答
 
@@ -413,7 +433,7 @@ mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest,C
 
 ### Q7：索引是否原子更新？
 
-不是。`clearProject`、代码块 batch 和关系 batch 是分开的提交边界（`VectorStore.java:87-97`、`102-127`、`132-157`）。中途失败可能清掉旧索引或留下只有代码块的状态。更可靠的方案是版本化写入后原子切换 active version。
+不是。`clearProject`、代码块 batch 和关系 batch 是分开的提交边界（`VectorStore.java:87-97`、`:102-127`、`:132-157`）。中途失败可能清掉旧索引或留下只有代码块的状态，而且失败时返回的统计是 0/0，不能反映已提交的部分数据。更可靠的方案是版本化写入后原子切换 active version。
 
 ### Q8：Embedding 服务不可用时会自动走关键词吗？
 
@@ -437,11 +457,11 @@ Java AST 切块失败时退回文本分段（`CodeChunker.java:84-87`），因�
 
 ### Q13：startLine/endLine 有什么用？
 
-类块和方法块在切块阶段会写入真实起止行（`CodeChunker.java:101-103`、`112-115`），但**整文件文本块把两字段硬编码为 0**（`CodeChunk.java:20`）；而且两个字段都不持久化到 SQLite，查询结果不能直接依赖它定位行号。这是可以完善的点。
+类块和方法块在切块阶段会写入真实起止行（`CodeChunker.java:101-103`、`:112-115`），但**整文件小文本块把两字段硬编码为 0**（`CodeChunk.java:20`），类块的 `content` 又只有声明头部、行号却覆盖整个类。更关键的是两个字段都不持久化，`code_chunks` 没有行号列（`VectorStore.java:37-48`），查询结果不能直接依赖它定位行号。这是可以完善的点。
 
 ### Q14：为什么 RAG 不作为精确代码搜索首选？
 
-RAG 依赖预索引且结果是相关性排序，可能过期或出现语义误召回。已知标识符时，实时 grep 更准确、更容易解释。
+RAG 依赖预索引且结果是相关性排序，可能过期或出现语义误召回。已知标识符时，实时 `grep_code`（ripgrep 优先、Java 回退）更准确、更容易解释。
 
 ### Q15：如何做增量索引？
 
@@ -457,11 +477,11 @@ RAG 依赖预索引且结果是相关性排序，可能过期或出现语义误�
 
 ### Q18：怎样评价检索质量？
 
-建立代码问题与期望文件/方法的 golden set，统计 Recall@K、MRR 和首条命中率；分别比较纯语义、纯关键词和混合排序，并记录不同语言和查询类型。
+建立代码问题与期望文件/方法的 golden set，统计 Recall@K、MRR 和首条命中率；分别比较纯语义、纯关键词和混合排序，并记录不同语言和查询类型。当前仓库的 `CodeSearchGoldenSetTest` 覆盖的是 `grep_code` + `read_file` 的实时路径，并不评测 RAG。
 
 ### Q19：当前最大的可靠性边界是什么？
 
-索引发布不是仓库级原子事务，且 partial 文件没有结构化报告。其次是混合查询没有 Embedding 失败降级。
+索引发布不是仓库级原子事务，失败后 `IndexResult` 也不报告哪一步/哪些文件失败。其次是混合查询没有 Embedding 失败降级，以及行号不入库导致结果无法精确定位。
 
 ### Q20：当前最大的规模边界是什么？
 
@@ -477,27 +497,28 @@ RAG 依赖预索引且结果是相关性排序，可能过期或出现语义误�
 |---|---|
 | 基于 SQLite | JDBC 连接 `jdbc:sqlite:` — `VectorStore.java:31`；表结构与索引 `VectorStore.java:37-70` |
 | 基于 JavaParser | `CodeChunker` 与 `CodeAnalyzer` 各自构造 Java 17 级别 `JavaParser` — `CodeChunker.java:25-26`、`CodeAnalyzer.java:32-33` |
-| 按文件切分 | 非 Java 整文件块 / 按行分段 — `CodeChunker.java:39-41`、`CodeChunker.java:50-78` |
-| 按类、方法切分 | class 块与 method 块 — `CodeChunker.java:92-117`；块类型定义 `CodeChunk.java:19-37` |
+| 按文件切分 | 非 Java 整文件块 / 按行分段 — `CodeChunker.java:34-45`、`CodeChunker.java:50-78` |
+| 按类、方法切分 | class 块与 method 块 — `CodeChunker.java:98-116`；块类型定义 `CodeChunk.java:13-37` |
 | 生成 Embedding | `toEmbeddingText()` — `CodeChunk.java:42-44`；索引调用 `embeddingClient.embed(...)` — `CodeIndex.java:89` |
 | 抽取 imports | `extractImports` — `CodeAnalyzer.java:59-69` |
 | 抽取 extends / implements | `CodeAnalyzer.java:76-79`、`CodeAnalyzer.java:82-85` |
 | 抽取 calls | `CodeAnalyzer.java:95-104`；包含关系 `CodeAnalyzer.java:88-92` |
 | 语义检索 | `CodeRetriever.semanticSearch` — `CodeRetriever.java:35-38`；余弦全扫描 `VectorStore.java:162-190` |
 | 关键词检索 | `CodeRetriever.keywordSearch` — `CodeRetriever.java:43-45`；LIKE 转义 `VectorStore.java:195-221` |
-| 关系图查询 | `CodeRetriever.getRelationGraph` — `CodeRetriever.java:152-154`；一跳查询 `VectorStore.java:226-250`；出边 `VectorStore.java:255-277` |
+| 关系图查询 | `CodeRetriever.getRelationGraph` — `CodeRetriever.java:152-154`；一跳查询 `VectorStore.java:226-250`；出边（当前无调用方）`VectorStore.java:255-277` |
 
 ## 11. 当前实现边界
 
-已经实现：Java 类和方法切块、非 Java 文本分段、两类 Embedding 接口、SQLite 持久化、JVM 余弦搜索、关键词召回、混合重排、单文件限流、结果格式化及一跳关系查询。
+已经实现：Java 类和方法切块、非 Java 文本分段、两类 Embedding 接口、SQLite 持久化、JVM 余弦搜索、关键词召回、混合重排、单文件限流、结果格式化及一跳关系查询；`/index`、`/search`、`/graph` 三个 CLI 命令与 `search_code` 工具均已接线。
 
 尚未实现：仓库级原子发布、增量索引、ANN、模型版本与维度校验、混合检索自动降级、Java 符号求解、多跳图遍历和搜索结果行号持久化。
 
 - 索引是串行执行的：`CodeIndex` 逐文件、逐块调用 Embedding（`CodeIndex.java:77-101`），大仓库耗时与块数线性增长。
-- `VectorStore` 持有单个 JDBC Connection，未声明线程安全（`VectorStore.java:19`），`CodeRetriever` 应按一次检索生命周期使用并通过 `close()` 释放（`CodeRetriever.java:164-166`）。
-- 索引发布非原子，`IndexResult` 缺少 `partial` 字段，无法报告哪些文件失败。
-- 整文件文本块的行号为占位值，且行号未入库，检索结果不能直接用于精确定位。
-- 关系图为静态近似，"calls" 不做符号求解，目标文件常为 `null`。
+- `VectorStore` 持有单个 JDBC Connection，未声明线程安全（`VectorStore.java:19`），`CodeRetriever` 应按一次检索生命周期使用并通过 `close()` 释放（`CodeRetriever.java:163-166`）。
+- 索引发布非原子，`IndexResult` 只有三个统计字段（`CodeIndex.java:176`），无法报告哪些文件失败。
+- 整文件小文本块的行号为占位值，类块行号与其 `content` 范围不匹配，且行号未入库，检索结果不能直接用于精确定位。
+- CLI `/index <path>` 与 `/search`、`/graph` 的项目路径来源不同（前者 payload/同步属性，后者固定 cwd），存在跨项目错配风险。
+- 关系图为静态近似，"calls" 不做符号求解，目标文件常为 `null`；`getOutgoingRelations` 是未被调用的预留 API。
 - 混合检索不具备 Embedding 失败后的自动关键词降级。
 
-这组边界决定了该模块最准确的定位：它是面向本地 Agent 的轻量代码语义辅助与静态关系导航，不是大型代码搜索平台，也不是编译器级程序分析系统。
+这组边界决定了该模块最准确的定位：它是面向本地 Agent 的轻量代码语义辅助与静态关系导航，不是大型代码搜索平台，也不是编译器级程序分析系统；精确代码定位始终由实时探索路径（`grep_code` / `glob_files` / `read_file`）承担。

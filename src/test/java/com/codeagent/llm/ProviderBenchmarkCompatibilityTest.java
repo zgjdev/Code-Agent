@@ -92,6 +92,20 @@ class ProviderBenchmarkCompatibilityTest {
     }
 
     @Test
+    void glmNormalizesPromptTokensAsTotalAndDoesNotDoubleCountCache() {
+        GLMClient client = new GLMClient("test-key", "glm-5.1");
+        MeasuredUsage usage = client.normalizeUsage(new LlmClient.ChatResponse(
+                "assistant", "ok", null, null, 1_000, 50, 800));
+
+        assertEquals(MeasuredUsage.InputScope.TOTAL_PROMPT, usage.inputScope());
+        assertEquals(1_000, usage.promptPressureTokens());
+        assertEquals(1_050, usage.usageAnchorTokens());
+        assertTrue(usage.includesSystem());
+        assertTrue(usage.includesTools());
+        assertTrue(usage.trusted());
+    }
+
+    @Test
     void glm53UsesOneMillionContextAndKeepsThinkingAcrossToolTurns() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             enqueueTextResponse(server);

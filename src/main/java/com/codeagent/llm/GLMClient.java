@@ -1,5 +1,6 @@
 package com.codeagent.llm;
 
+import com.codeagent.context.MeasuredUsage;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 public class GLMClient extends AbstractOpenAiCompatibleClient {
@@ -88,6 +89,36 @@ public class GLMClient extends AbstractOpenAiCompatibleClient {
     @Override
     public String promptCacheMode() {
         return "glm-prompt-cache";
+    }
+
+    /**
+     * GLM prompt_tokens is the complete prompt total, including system and tools.
+     * completion_tokens includes the assistant response and tool-call output.
+     */
+    @Override
+    public MeasuredUsage normalizeUsage(ChatResponse response) {
+        if (response == null || response.inputTokens() <= 0 || response.outputTokens() < 0
+                || response.cachedInputTokens() < 0
+                || response.cachedInputTokens() > response.inputTokens()) {
+            return new MeasuredUsage(
+                    Math.max(0, response == null ? 0 : response.inputTokens()),
+                    Math.max(0, response == null ? 0 : response.outputTokens()),
+                    Math.max(0, response == null ? 0 : response.cachedInputTokens()),
+                    MeasuredUsage.InputScope.UNKNOWN,
+                    false,
+                    false,
+                    false,
+                    java.time.Instant.now());
+        }
+        return new MeasuredUsage(
+                response.inputTokens(),
+                response.outputTokens(),
+                response.cachedInputTokens(),
+                MeasuredUsage.InputScope.TOTAL_PROMPT,
+                true,
+                true,
+                true,
+                java.time.Instant.now());
     }
 
     @Override

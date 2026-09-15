@@ -51,7 +51,7 @@ mvn test -DskipTests=false
 - 项目级记忆通过 `CODEAGENT.md` / `.codeagent/CODEAGENT.md` 启动自动注入，适合提交到仓库的团队共享规则；`CODEAGENT.local.md` / `.codeagent/CODEAGENT.local.md` 只做本地覆盖
 - 注入给模型的相关记忆只使用长期稳定事实，不把当前轮短期对话误当成“历史记忆”
 - 对话接近预算时自动做摘要压缩；可选 Session Memory 增量摘要快速路径，不可用时回退完整对话摘要
-- ReAct 压缩判断使用完整请求快照；DeepSeek 已通过真实 API 契约测试启用 `provider usage + surface delta`，其他尚未确认 usage 语义的 provider 保守回退完整本地估算
+- ReAct 压缩判断使用完整请求快照；DeepSeek 和 GLM 已通过真实 API 契约测试启用 `provider usage + surface delta`，其他尚未确认 usage 语义的 provider 保守回退完整本地估算
 - 新增 `/memory` 查看状态、`/memory list/search/delete/clear` 管理长期记忆、`/save` 手动保存事实；Agent 在用户明确说“记一下 / 记住”时可调用 `save_memory`
 
 ### 第四期：RAG 检索 + 代码库理解
@@ -129,7 +129,7 @@ mvn test -DskipTests=false
 - `search_code` 未显式传 `top_k` 时按上下文模式自适应；默认代码定位仍优先实时 grep/read
 - 长上下文模式下自动把 MCP resources 的 URI / 描述索引注入 system prompt，不自动注入正文
 - inline 模式下 Token / cached input tokens / 估算成本 / 耗时进入底部状态栏，避免占用正文输出区
-- DeepSeek 的 `prompt_tokens` 按完整 prompt 总量处理（已包含 cached prefix），`completion_tokens` 已包含 reasoning / tool call；缓存 token 不重复加入上下文压力
+- DeepSeek 和 GLM 的 `prompt_tokens` 按完整 prompt 总量处理，`completion_tokens` 已包含 reasoning / tool call；DeepSeek 的缓存 token 不重复加入上下文压力
 - `/context` 会显示当前上下文模式、prompt cache 模式、RAG topK、resources 自动索引状态
 
 ### 第十三期：Chrome DevTools MCP

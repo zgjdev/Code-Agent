@@ -595,7 +595,7 @@ src/main/java/com/codeagent/llm/HunyuanClient.java
 
 ### 8.3 当前验证状态（2026-09-15）
 
-DeepSeek 已使用项目 `DeepSeekClient` 和真实 API 完成四组契约探针：短 system 基线、长 system、大 tools schema、强制 assistant tool call。重复运行观察到：
+DeepSeek 已使用项目 `DeepSeekClient`、GLM 已使用项目 `GLMClient` 和真实 API 完成四组契约探针：短 system 基线、长 system、大 tools schema、强制 assistant tool call。重复运行观察到：
 
 ```text
 baseline       prompt_tokens=39
@@ -614,7 +614,9 @@ cache sample   prompt_tokens=1536, prompt_cache_hit_tokens=1280
 
 因此 `DeepSeekClient.normalizeUsage()` 返回 `TOTAL_PROMPT`、`includesSystem=true`、`includesTools=true`、`trusted=true`，DeepSeek 正常下一轮可进入 `USAGE_ANCHORED_DELTA`。真实契约测试位于 `ProviderUsageLiveContractTest`，默认不进入 CI，显式使用 `-Dcodeagent.live.provider-usage=true` 启用，且不打印 key、prompt 或响应正文。
 
-GLM 当前运行环境未配置可读取的 `GLM_API_KEY`，尚未执行真实 API 契约探针；`GLMClient` 必须继续沿用默认 `UNKNOWN/trusted=false`，不得根据 OpenAI-compatible 外形推断其 usage 语义。
+GLM 真实样本为 `baseline input=15`、`long system input=1512`、`large tools input=1945`、`tool call output=32` 且返回 tool call。GLM 的 `prompt_tokens` 覆盖 system/tools，`completion_tokens` 覆盖 assistant tool call；`GLMClient.normalizeUsage()` 现已按 `TOTAL_PROMPT`、`includesSystem=true`、`includesTools=true`、`trusted=true` 归一化，下一轮可进入 `USAGE_ANCHORED_DELTA`。本次样本未出现可报告的 GLM cached input 字段，因此没有对 GLM cache 语义做额外推断。
+
+其他 provider 仍需分别完成真实契约验证后才能覆盖默认归一化。
 
 ## 9. Context overflow recovery
 

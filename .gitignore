@@ -13,6 +13,7 @@ target/
 .idea/
 *.iml
 .vscode/
+.worktrees/
 .claude/settings.local.json
 
 # 日志

@@ -1,5 +1,6 @@
 package com.codeagent.llm;
 
+import com.codeagent.context.MeasuredUsage;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
@@ -95,6 +96,36 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
     @Override
     public String promptCacheMode() {
         return "automatic-prefix-cache";
+    }
+
+    /**
+     * DeepSeek prompt_tokens is the complete prompt total, including cached prefix
+     * tokens. completion_tokens includes reasoning and assistant tool-call output.
+     */
+    @Override
+    public MeasuredUsage normalizeUsage(ChatResponse response) {
+        if (response == null || response.inputTokens() <= 0 || response.outputTokens() < 0
+                || response.cachedInputTokens() < 0
+                || response.cachedInputTokens() > response.inputTokens()) {
+            return new MeasuredUsage(
+                    Math.max(0, response == null ? 0 : response.inputTokens()),
+                    Math.max(0, response == null ? 0 : response.outputTokens()),
+                    Math.max(0, response == null ? 0 : response.cachedInputTokens()),
+                    MeasuredUsage.InputScope.UNKNOWN,
+                    false,
+                    false,
+                    false,
+                    java.time.Instant.now());
+        }
+        return new MeasuredUsage(
+                response.inputTokens(),
+                response.outputTokens(),
+                response.cachedInputTokens(),
+                MeasuredUsage.InputScope.TOTAL_PROMPT,
+                true,
+                true,
+                true,
+                java.time.Instant.now());
     }
 
     private boolean isDeepSeekV4() {

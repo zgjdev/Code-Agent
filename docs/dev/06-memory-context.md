@@ -515,8 +515,8 @@ CLI `/memory search <关键词>` 是另一条管理查询路径：它直接调�
 
 项目同时存在三种不能混用的 token 数：
 
-1. **上下文估算（ctx）**：`TokenBudget.estimateMessagesTokens(history)` 加上 Agent 单独估算的工具 schema；用于压缩触发、状态栏和 `/context`。它是启发式估算，不等于 provider usage。
+1. **上下文预测（ctx）**：请求前冻结实际 `messages + tools` 并生成 `RequestSnapshot`。有可信且 envelope 可比的 provider usage 时，使用“上一轮 input + output + 当前 surface 有符号增量”；否则使用 `TokenBudget.estimateRequestTokens(messages, tools)` 完整本地估算。两条路径都只用于压缩触发和状态栏预测。
 2. **单次调用 usage**：provider 返回的 `inputTokens`、`outputTokens`、`cachedInputTokens`，由 `AgentBudget` 记录并汇总到 `MemoryManager.TokenBudget`；这是最近任务的真实/准真实用量统计。
 3. **长期记忆条目 tokenCount**：保存于每个 `MemoryEntry`，主要用于构建“相关长期记忆”注入预算，不代表一次 LLM 请求的完整输入 token。
 
-`TokenBudget` 的消息估算包括文本 part、图片近似成本、tool-call arguments，以及每条消息固定约 4 token 的角色/分隔开销；contentParts 非 null 时只计算 parts。工具 schema 不在该静态方法内，而是在 Agent 计算 ctx 时另行序列化估算。上下文可用预算默认按 `window - 500(system) - 800(tools) - 2000(response)` 计算；`ContextProfile` 的自动压缩阈值则使用独立的“摘要输出预留 + 安全缓冲”公式，不能把二者视为同一个数字。
+`TokenBudget` 的消息估算包括文本 part、图片近似成本、tool-call arguments，以及每条消息固定约 4 token 的角色/分隔开销；contentParts 非 null 时只计算 parts。`estimateToolsTokens` 单独估算工具 schema，`estimateRequestTokens` 将消息与工具两部分合并。DeepSeek 已通过真实 API 验证：`prompt_tokens` 包含 system、tools schema 和 cached prefix，`completion_tokens` 包含 reasoning / assistant tool call，因此缓存和 tool call 都不能额外重复相加。GLM 等尚未完成真实契约验证的 provider 仍走完整本地估算。上下文可用预算默认按 `window - 500(system) - 800(tools) - 2000(response)` 计算；`ContextProfile` 的自动压缩阈值则使用独立的“摘要输出预留 + 安全缓冲”公式，不能把二者视为同一个数字。

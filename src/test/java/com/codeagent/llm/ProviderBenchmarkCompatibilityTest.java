@@ -2,6 +2,7 @@ package com.codeagent.llm;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.codeagent.context.MeasuredUsage;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -59,6 +60,35 @@ class ProviderBenchmarkCompatibilityTest {
             assertFalse(root.has("reasoning_effort"));
             assertFalse(root.has("thinking"));
         }
+    }
+
+    @Test
+    void deepSeekNormalizesPromptTokensAsTotalAndDoesNotDoubleCountCache() {
+        DeepSeekClient client = new DeepSeekClient("test-key", "deepseek-v4-flash");
+        MeasuredUsage usage = client.normalizeUsage(new LlmClient.ChatResponse(
+                "assistant", "ok", null, null, 1_000, 50, 800));
+
+        assertEquals(MeasuredUsage.InputScope.TOTAL_PROMPT, usage.inputScope());
+        assertEquals(1_000, usage.promptPressureTokens());
+        assertEquals(1_050, usage.usageAnchorTokens());
+        assertTrue(usage.includesSystem());
+        assertTrue(usage.includesTools());
+        assertTrue(usage.trusted());
+    }
+
+    @Test
+    void deepSeekRejectsMissingOrContradictoryUsage() {
+        DeepSeekClient client = new DeepSeekClient("test-key", "deepseek-v4-flash");
+
+        MeasuredUsage missing = client.normalizeUsage(new LlmClient.ChatResponse(
+                "assistant", "ok", null, null, 0, 0, 0));
+        MeasuredUsage cacheExceedsPrompt = client.normalizeUsage(new LlmClient.ChatResponse(
+                "assistant", "ok", null, null, 100, 10, 101));
+
+        assertFalse(missing.trusted());
+        assertEquals(MeasuredUsage.InputScope.UNKNOWN, missing.inputScope());
+        assertFalse(cacheExceedsPrompt.trusted());
+        assertEquals(MeasuredUsage.InputScope.UNKNOWN, cacheExceedsPrompt.inputScope());
     }
 
     @Test

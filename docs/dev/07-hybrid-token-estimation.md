@@ -593,6 +593,29 @@ src/main/java/com/codeagent/llm/HunyuanClient.java
 
 无法确认的客户端保持 `trusted=false`，走完整估算；不得用猜测填充语义。
 
+### 8.3 当前验证状态（2026-09-15）
+
+DeepSeek 已使用项目 `DeepSeekClient` 和真实 API 完成四组契约探针：短 system 基线、长 system、大 tools schema、强制 assistant tool call。重复运行观察到：
+
+```text
+baseline       prompt_tokens=39
+long system    prompt_tokens=1536
+large tools    prompt_tokens=2087
+tool call      completion_tokens=62~70, hasToolCalls=true
+cache sample   prompt_tokens=1536, prompt_cache_hit_tokens=1280
+```
+
+由此确认当前 DeepSeek Chat Completions 口径：
+
+- `prompt_tokens` 覆盖 system 和 tools schema；
+- `prompt_tokens` 是完整 prompt 总量，已包含 cached prefix，不能再加 `prompt_cache_hit_tokens`；
+- `completion_tokens` 覆盖 reasoning 和 assistant tool call，不能再加独立 tool-call token；
+- 非法或矛盾 usage（无 input、负数、cache 大于 prompt）不建立锚点。
+
+因此 `DeepSeekClient.normalizeUsage()` 返回 `TOTAL_PROMPT`、`includesSystem=true`、`includesTools=true`、`trusted=true`，DeepSeek 正常下一轮可进入 `USAGE_ANCHORED_DELTA`。真实契约测试位于 `ProviderUsageLiveContractTest`，默认不进入 CI，显式使用 `-Dcodeagent.live.provider-usage=true` 启用，且不打印 key、prompt 或响应正文。
+
+GLM 当前运行环境未配置可读取的 `GLM_API_KEY`，尚未执行真实 API 契约探针；`GLMClient` 必须继续沿用默认 `UNKNOWN/trusted=false`，不得根据 OpenAI-compatible 外形推断其 usage 语义。
+
 ## 9. Context overflow recovery
 
 ### 9.1 统一异常

@@ -43,7 +43,7 @@ class ContextTokenTrackerTest {
 
         assertEquals(ContextTokenTracker.Mode.USAGE_ANCHORED_DELTA, prediction.mode());
         assertEquals(100, prediction.surfaceDeltaTokens());
-        assertEquals(1_300, prediction.rawPredictedTokens());
+        assertEquals(1_400, prediction.rawPredictedTokens());
     }
 
     @Test

@@ -3,6 +3,10 @@ package com.codeagent.agent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.codeagent.history.ConversationLedger;
+import com.codeagent.context.ContextTokenTracker;
+import com.codeagent.context.InvalidationReason;
+import com.codeagent.context.RequestSnapshot;
+import com.codeagent.context.RequestSnapshotFactory;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.llm.LlmTraceLogger;
 import com.codeagent.lsp.LspDiagnosticReport;
@@ -54,6 +58,9 @@ public class SubAgent {
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final AutoCompactionManager autoCompactionManager;
+    private final ContextTokenTracker contextTokenTracker = new ContextTokenTracker();
+    private final RequestSnapshotFactory requestSnapshotFactory = new RequestSnapshotFactory();
+    private long historyVersion;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private TurnToolPolicy turnToolPolicy;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
@@ -121,14 +128,26 @@ public class SubAgent {
         };
     }
 
-    private void maybeCompactHistory(PrintStream out) {
+    private boolean maybeCompactHistory(PrintStream out,
+                                        ContextTokenTracker.ContextPrediction prediction) {
         ContextProfile profile = toolRegistry == null ? null : toolRegistry.getContextProfile();
-        if (profile == null) return;
+        if (profile == null) return false;
         int beforeMessages = conversationHistory.size();
         try {
-            AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(
-                    conversationHistory, profile.compressionTriggerTokens());
+            AutoCompactionManager.Result result;
+            if (prediction.mode() == ContextTokenTracker.Mode.NONE) {
+                result = autoCompactionManager.compactIfNeeded(
+                        conversationHistory, profile.compressionTriggerTokens());
+            } else if (prediction.effectiveTokens() < profile.compressionTriggerTokens()) {
+                return false;
+            } else {
+                result = autoCompactionManager.compactIfNeeded(
+                        conversationHistory, profile.compressionTriggerTokens(),
+                        prediction.effectiveTokens());
+            }
             if (result.compacted()) {
+                historyVersion++;
+                contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
                 conversationLedger.appendEvent(
                         "compaction",
                         "team",
@@ -141,10 +160,23 @@ public class SubAgent {
                 if (out != null) {
                     out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
                 }
+                return true;
             }
         } catch (Exception e) {
-            log.warn("[{}] conversationHistory compaction failed", name, e);
+            log.warn("[{}] request snapshot/compaction failed; using legacy estimate fallback", name, e);
+            try {
+                AutoCompactionManager.Result fallback = autoCompactionManager.compactIfNeeded(
+                        conversationHistory, profile.compressionTriggerTokens());
+                if (fallback.compacted()) {
+                    historyVersion++;
+                    contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
+                    return true;
+                }
+            } catch (Exception fallbackError) {
+                log.warn("[{}] legacy compaction fallback failed", name, fallbackError);
+            }
         }
+        return false;
     }
 
     private String buildSkillIndex() {
@@ -170,6 +202,7 @@ public class SubAgent {
         if (!conversationHistory.isEmpty()) {
             LlmClient.Message systemMessage = LlmClient.Message.system(getSystemPrompt());
             conversationHistory.set(0, systemMessage);
+            historyVersion++;
             conversationLedger.appendMessage(
                     "team", name, "system_prompt_refresh", systemMessage);
         }
@@ -249,15 +282,31 @@ public class SubAgent {
 
             budget.beginIteration();
 
-            // 调 LLM 前评估 conversationHistory 是否接近 window 上限；超阈值压缩早期消息为摘要。
+            // 冻结最终 tools exposure 后预测完整请求；只有快照/计量异常才回退旧估算。
             injectPendingLspDiagnostics(out);
-            maybeCompactHistory(out);
 
             try {
                 List<LlmClient.Tool> toolDefinitions = shouldUseTools() && llmClient.supportsTools()
                         ? toolRegistry.getToolDefinitions()
                         : null;
                 TurnToolPolicy.ToolExposure toolExposure = activeToolPolicy.expose(toolDefinitions);
+                RequestSnapshot requestSnapshot;
+                ContextTokenTracker.ContextPrediction prediction;
+                try {
+                    requestSnapshot = requestSnapshotFactory.capture(
+                            llmClient, conversationHistory, toolExposure.definitions(), historyVersion);
+                    prediction = contextTokenTracker.predict(requestSnapshot);
+                } catch (Exception snapshotError) {
+                    log.warn("[{}] request snapshot failed; using legacy estimate fallback", name, snapshotError);
+                    requestSnapshot = null;
+                    prediction = new ContextTokenTracker.ContextPrediction(
+                            0, Integer.MAX_VALUE, 0, 0, 0,
+                            ContextTokenTracker.Mode.NONE, false, "snapshot failed");
+                }
+                if (maybeCompactHistory(out, prediction)) {
+                    requestSnapshot = requestSnapshotFactory.capture(
+                            llmClient, conversationHistory, toolExposure.definitions(), historyVersion);
+                }
                 LlmClient.ChatResponse response = llmClient.chat(
                         conversationHistory,
                         toolExposure.definitions(),
@@ -269,6 +318,14 @@ public class SubAgent {
                         response.reasoningContent());
 
                 budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+                LlmClient.Message assistantMessage = LlmClient.Message.assistant(
+                        response.reasoningContent(), response.content(), response.toolCalls());
+                if (requestSnapshot != null) {
+                    contextTokenTracker.recordSuccessfulCall(
+                            requestSnapshot,
+                            com.codeagent.memory.TokenBudget.estimateMessageTokens(assistantMessage),
+                            llmClient.normalizeUsage(response));
+                }
 
                 if (response.hasToolCalls()) {
                     budget.recordToolCalls(response.toolCalls());
@@ -297,6 +354,7 @@ public class SubAgent {
 
                 // 没有工具调用，返回最终结果
                 conversationHistory.add(LlmClient.Message.assistant(response.content()));
+                historyVersion++;
                 conversationLedger.appendMessage(
                         "team",
                         name,
@@ -423,6 +481,8 @@ public class SubAgent {
                 Map.of("discardedViewMessages", Math.max(0, conversationHistory.size() - 1)));
         conversationHistory.clear();
         conversationHistory.add(systemMsg);
+        historyVersion++;
+        contextTokenTracker.invalidate(InvalidationReason.CLEAR);
     }
 
     private void pruneHistoricalImagePayloads() {
@@ -435,6 +495,8 @@ public class SubAgent {
                 continue;
             }
             conversationHistory.set(i, message.withoutImageContent());
+            historyVersion++;
+            contextTokenTracker.invalidate(InvalidationReason.IMAGE_PAYLOAD_PRUNED);
             messageCount++;
             imageCount += images;
         }
@@ -506,6 +568,7 @@ public class SubAgent {
 
     private void appendConversationMessage(LlmClient.Message message, String source) {
         conversationHistory.add(message);
+        historyVersion++;
         conversationLedger.appendMessage("team", name, source, message);
     }
 

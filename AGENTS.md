@@ -135,6 +135,7 @@ src/main/java/com/codeagent/
 - 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory clear`
 - 当前短期上下文只有各 Agent 实际发给 LLM 的 `conversationHistory`，不要再维护 `MemoryManager.shortTermMemory` 之类的影子消息副本。
 - 自动压缩有两条路径：`CODEAGENT_SESSION_MEMORY_COMPACTION_ENABLED=true` 时优先使用阈值前异步生成的增量 Session Memory 摘要；摘要未就绪、失效或收益不足时回退 `ConversationHistoryCompactor` 完整摘要。两条路径最终都原地重建同一份 conversationHistory。
+- ReAct、Plan task 和 SubAgent 正常请求都使用 `RequestSnapshotFactory` + `ContextTokenTracker` 的完整 request 预测；只有快照生成失败、usage 未知/非法或无法安全对齐时，Plan/SubAgent 才回退 history-only 估算，不能把 legacy fallback 当作正常入口。
 - 自动压缩阈值按 Claude Code 风格预留摘要输出和安全缓冲：大窗口使用 `window - 20k - 13k`，例如 200k 窗口约 167k 触发、1M 窗口约 967k 触发；小窗口按比例缩小预留。
 - ReAct、Plan 单任务和 SubAgent 默认不设固定迭代上限；`codeagent.react.hard.max.iterations` 仅在显式配置正整数时启用。显式轮数/Token 预算或停滞检测命中后必须禁用工具并做一次最佳努力收尾，返回“部分完成”结果，不能直接丢弃已有工作。
 

@@ -527,7 +527,7 @@ public Result compactIfNeeded(
 4. 完整摘要按 user 轮次切分，保持 assistant tool call 与 tool result 配对。
 5. 成功后由 `Agent` 使 tracker 失效并重新捕获；失败时原 history 不变。
 
-旧两参数方法仅保留给兼容测试，生产 `Agent` 不再调用。
+旧两参数方法不参与正常预测；ReAct、Plan task 和 SubAgent 都先使用 snapshot/tracker。它仅在 Plan/SubAgent 无法生成快照、无法安全测量实际请求时作为明确的 legacy fallback，避免异常时丢弃已有工作；不得把它作为正常压缩入口。
 
 ### 7.2 tool-result 先裁剪
 

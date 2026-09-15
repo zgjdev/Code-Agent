@@ -498,7 +498,7 @@ CLI `/memory search <关键词>` 是另一条管理查询路径：它直接调�
 
 ### 12.5 压缩发生在何处以及压缩后保存什么
 
-每次 ReAct 内部调用 LLM 前都会调用 `maybeCompactHistory`，所以一次用户输入触发多个 tool-call 迭代时，压缩检查可能发生多次。自动压缩只改内存中的 delivery view，并向 ledger 追加一条 `compaction` 事件；不会重写旧 JSONL 原始消息。
+ReAct、Plan task 和 SubAgent 每次调用 LLM 前都会冻结实际 `messages + tools`，通过 `ContextTokenTracker` 判断是否压缩；一次用户输入触发多个 tool-call 迭代时，压缩检查可能发生多次。只有快照生成或 usage 语义无法安全确认时，Plan/SubAgent 才回退旧的 history-only 估算。自动压缩只改内存中的 delivery view，并向 ledger 追加一条 `compaction` 事件；不会重写旧 JSONL 原始消息。
 
 压缩前的旧消息由 LLM 总结为目标、约束、关键操作/工具结果、已达成结论和未解决事项。重建后的 history 固定包含：
 

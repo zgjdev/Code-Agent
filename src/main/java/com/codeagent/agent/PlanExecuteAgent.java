@@ -3,6 +3,10 @@ package com.codeagent.agent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.codeagent.history.ConversationLedger;
+import com.codeagent.context.ContextTokenTracker;
+import com.codeagent.context.InvalidationReason;
+import com.codeagent.context.RequestSnapshot;
+import com.codeagent.context.RequestSnapshotFactory;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.llm.LlmTraceLogger;
 import com.codeagent.lsp.LspDiagnosticReport;
@@ -111,6 +115,9 @@ public class PlanExecuteAgent {
     private final PlanReviewHandler reviewHandler;
     private final MemoryManager memoryManager;
     private final AutoCompactionManager autoCompactionManager;
+    private final ContextTokenTracker contextTokenTracker = new ContextTokenTracker();
+    private final RequestSnapshotFactory requestSnapshotFactory = new RequestSnapshotFactory();
+    private long historyVersion;
     private final PrintStream out;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private Supplier<String> externalContextSupplier = () -> "";
@@ -202,12 +209,25 @@ public class PlanExecuteAgent {
         return conversationLedger;
     }
 
-    private void maybeCompactHistory(List<LlmClient.Message> messages, PrintStream out, String actor) {
+    private boolean maybeCompactHistory(List<LlmClient.Message> messages,
+                                        PrintStream out,
+                                        String actor,
+                                        ContextTokenTracker.ContextPrediction prediction) {
         int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
         int beforeMessages = messages.size();
         try {
-            AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(messages, trigger);
+            AutoCompactionManager.Result result;
+            if (prediction.mode() == ContextTokenTracker.Mode.NONE) {
+                result = autoCompactionManager.compactIfNeeded(messages, trigger);
+            } else if (prediction.effectiveTokens() < trigger) {
+                return false;
+            } else {
+                result = autoCompactionManager.compactIfNeeded(
+                        messages, trigger, prediction.effectiveTokens());
+            }
             if (result.compacted()) {
+                historyVersion++;
+                contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
                 conversationLedger.appendEvent(
                         "compaction",
                         "plan",
@@ -220,10 +240,23 @@ public class PlanExecuteAgent {
                 if (out != null) {
                     out.println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
                 }
+                return true;
             }
         } catch (Exception e) {
-            log.warn("conversationHistory compaction failed", e);
+            log.warn("request snapshot/compaction failed; using legacy estimate fallback", e);
+            try {
+                AutoCompactionManager.Result fallback = autoCompactionManager
+                        .compactIfNeeded(messages, trigger);
+                if (fallback.compacted()) {
+                    historyVersion++;
+                    contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
+                    return true;
+                }
+            } catch (Exception fallbackError) {
+                log.warn("conversationHistory legacy compaction fallback failed", fallbackError);
+            }
         }
+        return false;
     }
 
     private String buildSkillIndex() {
@@ -576,14 +609,30 @@ public class PlanExecuteAgent {
             }
             int iteration = budget.beginIteration();
 
-            // 调 LLM 前评估 messages 是否接近 window 上限；超阈值压缩早期消息为摘要。
+            // 冻结最终 tools exposure 后预测完整请求；只有快照/计量异常才回退旧估算。
             injectPendingLspDiagnostics(messages, out, actor);
-            maybeCompactHistory(messages, out, actor);
-
             List<LlmClient.Tool> toolDefinitions = llmClient.supportsTools()
                     ? toolRegistry.getToolDefinitions()
                     : null;
             TurnToolPolicy.ToolExposure toolExposure = taskToolPolicy.expose(toolDefinitions);
+            RequestSnapshot requestSnapshot;
+            ContextTokenTracker.ContextPrediction prediction;
+            try {
+                requestSnapshot = requestSnapshotFactory.capture(
+                        llmClient, messages, toolExposure.definitions(), historyVersion);
+                prediction = contextTokenTracker.predict(requestSnapshot);
+            } catch (Exception snapshotError) {
+                log.warn("plan request snapshot failed; using legacy estimate fallback", snapshotError);
+                requestSnapshot = null;
+                prediction = new ContextTokenTracker.ContextPrediction(
+                        0, Integer.MAX_VALUE, 0, 0, 0,
+                        ContextTokenTracker.Mode.NONE, false, "snapshot failed");
+            }
+            if (maybeCompactHistory(messages, out, actor, prediction)) {
+                requestSnapshot = requestSnapshotFactory.capture(
+                        llmClient, messages, toolExposure.definitions(), historyVersion);
+                prediction = contextTokenTracker.predict(requestSnapshot);
+            }
             LlmClient.ChatResponse response = llmClient.chat(
                     messages,
                     toolExposure.definitions(),
@@ -600,6 +649,14 @@ public class PlanExecuteAgent {
             }
 
             budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+            LlmClient.Message assistantMessage = LlmClient.Message.assistant(
+                    response.reasoningContent(), response.content(), response.toolCalls());
+            if (requestSnapshot != null) {
+                contextTokenTracker.recordSuccessfulCall(
+                        requestSnapshot,
+                        com.codeagent.memory.TokenBudget.estimateMessageTokens(assistantMessage),
+                        llmClient.normalizeUsage(response));
+            }
 
             log.info("Task {} iteration {} response: toolCalls={}, reasoningChars={}, contentChars={}",
                     task.getId(),
@@ -803,6 +860,7 @@ public class PlanExecuteAgent {
     private void appendTaskMessage(List<LlmClient.Message> messages, String actor,
                                    String source, LlmClient.Message message) {
         messages.add(message);
+        historyVersion++;
         conversationLedger.appendMessage("plan", actor, source, message);
     }
 

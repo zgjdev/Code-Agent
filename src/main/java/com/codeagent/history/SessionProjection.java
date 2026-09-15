@@ -3,6 +3,7 @@ package com.codeagent.history;
 import com.codeagent.context.MeasuredUsage;
 import com.codeagent.llm.LlmClient;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -28,6 +29,14 @@ public record SessionProjection(
 
     public List<LlmClient.Message> messages() {
         return activeSurface.stream().map(SurfaceNode::message).toList();
+    }
+
+    public SessionProjection withWarning(String warning) {
+        List<String> updatedWarnings = new ArrayList<>(warnings);
+        updatedWarnings.add(warning);
+        return new SessionProjection(activeSurface, lastAppliedSequence, historyVersion,
+                compactionGeneration, lastCompletedUsage, incompleteRequestIds, pendingTools,
+                cleanlyClosed, updatedWarnings);
     }
 
     public record SurfaceNode(long sequence, LlmClient.Message message) {

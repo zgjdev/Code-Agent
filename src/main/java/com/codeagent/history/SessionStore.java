@@ -83,6 +83,36 @@ public final class SessionStore implements AutoCloseable {
         return handle;
     }
 
+    SessionHandle createLegacy(SessionCreateRequest request, String sourceSha256,
+                               boolean resumeUnsafe) throws IOException {
+        SessionHandle handle = create(request);
+        handle.manifest = new SessionManifest(handle.manifest.schemaVersion(), handle.manifest.sessionId(),
+                handle.manifest.workspace(), handle.manifest.provider(), handle.manifest.model(),
+                handle.manifest.createdAt(), handle.manifest.updatedAt(), handle.manifest.parentSessionId(),
+                handle.manifest.closed(), handle.manifest.lastEventSequence(), resumeUnsafe, sourceSha256);
+        writeManifest(handle.directory, handle.manifest);
+        return handle;
+    }
+
+    Optional<SessionSummary> findLegacySource(Path workspace, String sourceSha256) throws IOException {
+        String expectedWorkspace = normalizeWorkspace(workspace).toString();
+        if (Files.notExists(sessionsDirectory)) return Optional.empty();
+        try (var directories = Files.list(sessionsDirectory)) {
+            for (Path directory : directories.filter(Files::isDirectory).toList()) {
+                try {
+                    SessionManifest manifest = readManifest(directory);
+                    if (expectedWorkspace.equals(manifest.workspace())
+                            && sourceSha256.equals(manifest.legacySourceSha256())) {
+                        return Optional.of(SessionSummary.from(manifest));
+                    }
+                } catch (IOException ignored) {
+                    // An unrelated corrupt manifest does not prevent idempotency lookup.
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
     public SessionHandle resumeWritable(String sessionId, Path workspace) throws IOException {
         String safeId = requireSafeSessionId(sessionId);
         Path directory = sessionsDirectory.resolve(safeId);
@@ -92,6 +122,9 @@ public final class SessionStore implements AutoCloseable {
             throw new WorkspaceMismatchException(
                     "session workspace does not match: expected " + manifest.workspace()
                             + " but got " + expectedWorkspace);
+        }
+        if (manifest.resumeUnsafe()) {
+            throw new ResumeUnsafeException("legacy session cannot be safely resumed: " + sessionId);
         }
         SessionHandle handle = openHandle(
                 directory, manifest, null, "incomplete final line ignored during recovery");
@@ -110,6 +143,14 @@ public final class SessionStore implements AutoCloseable {
 
     public Optional<SessionSummary> latest(Path workspace) throws IOException {
         return list(workspace, 1).stream().findFirst();
+    }
+
+    public SessionProjection readProjection(String sessionId) throws IOException {
+        String safeId = requireSafeSessionId(sessionId);
+        Path directory = sessionsDirectory.resolve(safeId);
+        SessionManifest manifest = readManifest(directory);
+        List<SessionEvent> events = readEvents(directory.resolve("events.jsonl")).events();
+        return new SessionCheckpointStore(directory).loadLatest(manifest, events).projection();
     }
 
     public List<SessionSummary> list(Path workspace, int limit) throws IOException {
@@ -167,7 +208,8 @@ public final class SessionStore implements AutoCloseable {
             if (readResult.incompleteFinalLine()) {
                 isolateIncompleteTail(eventsFile, readResult.committedLength());
             }
-            SessionProjection projection = replayer.replay(manifest, readResult.events());
+            SessionProjection projection = new SessionCheckpointStore(directory)
+                    .loadLatest(manifest, readResult.events()).projection();
             if (readResult.incompleteFinalLine() && incompleteTailWarning != null) {
                 projection = projection.withWarning(incompleteTailWarning);
             }
@@ -398,6 +440,10 @@ public final class SessionStore implements AutoCloseable {
             return directory;
         }
 
+        public SessionManifest manifest() {
+            return manifest;
+        }
+
         public SessionProjection projection() {
             return projection;
         }
@@ -475,7 +521,26 @@ public final class SessionStore implements AutoCloseable {
                 log.warn("Session event committed but manifest update failed: session={}, sequence={}",
                         manifest.sessionId(), event.sequence(), e);
             }
+            if (shouldCheckpoint(event, projection)) {
+                try {
+                    new SessionCheckpointStore(directory).write(manifest.sessionId(), events, projection);
+                } catch (IOException e) {
+                    log.warn("Session checkpoint write failed: session={}, sequence={}",
+                            manifest.sessionId(), event.sequence(), e);
+                }
+            }
             return event;
+        }
+
+        private boolean shouldCheckpoint(SessionEvent event, SessionProjection current) {
+            if (!current.incompleteRequestIds().isEmpty()) return false;
+            if (current.warnings().stream().anyMatch(warning -> warning.startsWith("incomplete compaction ignored:"))) {
+                return false;
+            }
+            if (SessionEvent.Types.SESSION_END.equals(event.type())) return true;
+            if (SessionEvent.Types.COMPACTION_END.equals(event.type())
+                    && "completed".equals(event.payload().path("status").asText())) return true;
+            return (event.sequence() + 1) % 50 == 0;
         }
 
         public void markClosed(String reason) throws IOException {
@@ -514,6 +579,12 @@ public final class SessionStore implements AutoCloseable {
 
     public static class WorkspaceMismatchException extends IOException {
         public WorkspaceMismatchException(String message) {
+            super(message);
+        }
+    }
+
+    public static class ResumeUnsafeException extends IOException {
+        public ResumeUnsafeException(String message) {
             super(message);
         }
     }

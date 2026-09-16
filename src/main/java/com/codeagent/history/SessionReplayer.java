@@ -67,6 +67,29 @@ public final class SessionReplayer {
         return state.freeze();
     }
 
+    public SessionProjection replayFrom(SessionManifest manifest, SessionProjection checkpoint,
+                                        List<SessionEvent> tail) {
+        if (manifest == null || checkpoint == null) {
+            throw new CorruptSessionException("missing checkpoint replay state");
+        }
+        MutableProjection state = new MutableProjection(checkpoint);
+        long expectedSequence = checkpoint.lastAppliedSequence() + 1;
+        for (SessionEvent event : tail == null ? List.<SessionEvent>of() : tail) {
+            validate(manifest, event, expectedSequence++);
+            state.lastAppliedSequence = event.sequence();
+            state.cleanlyClosed = false;
+            if (!KNOWN_TYPES.contains(event.type())) {
+                if (event.ignorable()) continue;
+                throw new UnsupportedSessionEventException("unsupported required event: " + event.type());
+            }
+            apply(state, event);
+        }
+        for (String compactionId : state.compactions.keySet()) {
+            state.warnings.add("incomplete compaction ignored: " + compactionId);
+        }
+        return state.freeze();
+    }
+
     private static void validate(SessionManifest manifest, SessionEvent event, long expectedSequence) {
         if (event == null) {
             throw new CorruptSessionException("null event at sequence " + expectedSequence);
@@ -302,6 +325,18 @@ public final class SessionReplayer {
 
         private MutableProjection(boolean cleanlyClosed) {
             this.cleanlyClosed = cleanlyClosed;
+        }
+
+        private MutableProjection(SessionProjection checkpoint) {
+            surface.addAll(checkpoint.activeSurface());
+            incompleteRequests.addAll(checkpoint.incompleteRequestIds());
+            pendingTools.putAll(checkpoint.pendingTools());
+            warnings.addAll(checkpoint.warnings());
+            lastAppliedSequence = checkpoint.lastAppliedSequence();
+            historyVersion = checkpoint.historyVersion();
+            compactionGeneration = checkpoint.compactionGeneration();
+            lastCompletedUsage = checkpoint.lastCompletedUsage();
+            cleanlyClosed = checkpoint.cleanlyClosed();
         }
 
         private SessionProjection freeze() {

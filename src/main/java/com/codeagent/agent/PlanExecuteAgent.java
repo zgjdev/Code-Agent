@@ -2,7 +2,11 @@ package com.codeagent.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.codeagent.history.ConversationLedger;
+import com.codeagent.history.SessionEvent;
+import com.codeagent.history.SessionEventDraft;
+import com.codeagent.history.SessionStore;
 import com.codeagent.context.ContextTokenTracker;
 import com.codeagent.context.InvalidationReason;
 import com.codeagent.context.RequestSnapshot;
@@ -120,6 +124,8 @@ public class PlanExecuteAgent {
     private long historyVersion;
     private final PrintStream out;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
+    private SessionStore.SessionHandle parentSession;
+    private final ThreadLocal<SessionStore.SessionHandle> childSession = new ThreadLocal<>();
     private Supplier<String> externalContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
@@ -207,6 +213,10 @@ public class PlanExecuteAgent {
 
     ConversationLedger getConversationLedger() {
         return conversationLedger;
+    }
+
+    public void setParentSession(SessionStore.SessionHandle parentSession) {
+        this.parentSession = parentSession;
     }
 
     private boolean maybeCompactHistory(List<LlmClient.Message> messages,
@@ -541,10 +551,22 @@ public class PlanExecuteAgent {
                 .filter(Objects::nonNull)
                 .toList();
         TurnToolPolicy taskToolPolicy = turnToolPolicy.forkWithTrustedUrls(dependencyUrls);
+        SessionStore.SessionHandle child = null;
         try {
-            return executeTaskWithPolicy(
+            if (parentSession != null) {
+                child = parentSession.createChild("plan", "task:" + task.getId());
+                childSession.set(child);
+            }
+            TaskRunResult result = executeTaskWithPolicy(
                     goal, plan, task, streamState, out, dependencyUrls, taskToolPolicy);
+            if (child != null) {
+                parentSession.recordChildResult(child, result.result(), "completed");
+                child.markClosed("completed");
+            }
+            return result;
         } finally {
+            childSession.remove();
+            if (child != null) child.close();
             taskToolPolicy.releaseBrowserLease();
         }
     }
@@ -671,6 +693,8 @@ public class PlanExecuteAgent {
                         actor,
                         "llm_response",
                         LlmClient.Message.assistant(response.reasoningContent(), response.content()));
+                persistChildMessage(LlmClient.Message.assistant(
+                        response.reasoningContent(), response.content()), "llm_response");
                 memoryManager.recordTokenUsage(
                         budget.totalInputTokens(),
                         budget.totalOutputTokens(),
@@ -862,6 +886,29 @@ public class PlanExecuteAgent {
         messages.add(message);
         historyVersion++;
         conversationLedger.appendMessage("plan", actor, source, message);
+        persistChildMessage(message, source);
+    }
+
+    private void persistChildMessage(LlmClient.Message message, String source) {
+        SessionStore.SessionHandle child = childSession.get();
+        if (child == null || message == null) return;
+        String type = switch (message.role()) {
+            case "system" -> SessionEvent.Types.SYSTEM_MESSAGE;
+            case "assistant" -> SessionEvent.Types.ASSISTANT_MESSAGE;
+            case "tool" -> SessionEvent.Types.TOOL_RESULT;
+            default -> SessionEvent.Types.USER_MESSAGE;
+        };
+        ObjectNode payload = JSON_MAPPER.createObjectNode().put("source", source);
+        payload.set("message", JSON_MAPPER.valueToTree(message));
+        if ("tool".equals(message.role())) {
+            payload.put("invocationId", message.toolCallId() == null ? "unknown" : message.toolCallId());
+        }
+        try {
+            child.append(new SessionEventDraft(type, "plan", child.manifest().actor(), source,
+                    false, SessionEvent.SurfaceOperation.append(), payload));
+        } catch (IOException e) {
+            throw new IllegalStateException("unable to append plan child message", e);
+        }
     }
 
     private static void printToolCalls(PrintStream out, List<LlmClient.ToolCall> toolCalls) {

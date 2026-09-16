@@ -10,6 +10,10 @@ import com.codeagent.context.RequestSnapshotFactory;
 import com.codeagent.context.InvalidationReason;
 import com.codeagent.context.TokenUsageFormatter;
 import com.codeagent.history.ConversationLedger;
+import com.codeagent.history.SessionEvent;
+import com.codeagent.history.SessionEventDraft;
+import com.codeagent.history.SessionProjection;
+import com.codeagent.history.SessionStore;
 import com.codeagent.lsp.LspDiagnosticReport;
 import com.codeagent.memory.AutoCompactionManager;
 import com.codeagent.memory.ExplicitMemoryHints;
@@ -33,6 +37,7 @@ import com.codeagent.tool.TurnToolPolicy;
 import com.codeagent.util.TerminalMarkdownRenderer;
 import com.codeagent.image.ImageReferenceParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +49,8 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
@@ -51,12 +58,14 @@ import java.util.function.Supplier;
  */
 public class Agent {
     private static final Logger log = LoggerFactory.getLogger(Agent.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
     private LlmClient llmClient;
     private final ToolRegistry toolRegistry;
     private final List<LlmClient.Message> conversationHistory;
     private final MemoryManager memoryManager;
     private final AutoCompactionManager autoCompactionManager;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
+    private SessionStore.SessionHandle sessionHandle;
     private Supplier<String> externalContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
@@ -103,6 +112,45 @@ public class Agent {
             this.conversationLedger.appendMessage(
                     "react", "agent", "session_attach", conversationHistory.get(0));
         }
+    }
+
+    /** Attaches either a new durable session or a projection restored from disk. */
+    public void attachSession(SessionStore.SessionHandle handle) throws IOException {
+        SessionStore.SessionHandle next = Objects.requireNonNull(handle, "handle");
+        SessionStore.SessionHandle previous = this.sessionHandle;
+        List<LlmClient.Message> previousHistory = new ArrayList<>(conversationHistory);
+        long previousVersion = historyVersion;
+        this.sessionHandle = next;
+        try {
+            SessionProjection projection = next.projection();
+            if (projection.messages().isEmpty()) {
+                LlmClient.Message system = LlmClient.Message.system(buildSystemPrompt(""));
+                persistMessage(system, SessionEvent.Types.SYSTEM_MESSAGE,
+                        SessionEvent.SurfaceOperation.append(), null);
+                conversationHistory.clear();
+                conversationHistory.add(system);
+                historyVersion = next.projection().historyVersion();
+                conversationLedger.appendMessage("react", "agent", "session_attach", system);
+            } else {
+                conversationHistory.clear();
+                conversationHistory.addAll(projection.messages());
+                historyVersion = projection.historyVersion();
+            }
+            contextTokenTracker.invalidate(InvalidationReason.SESSION_RESTORED);
+        } catch (RuntimeException e) {
+            this.sessionHandle = previous;
+            conversationHistory.clear();
+            conversationHistory.addAll(previousHistory);
+            historyVersion = previousVersion;
+            if (e.getCause() instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw e;
+        }
+    }
+
+    public SessionStore.SessionHandle getSessionHandle() {
+        return sessionHandle;
     }
 
     public void setLlmClient(LlmClient llmClient) {
@@ -170,19 +218,24 @@ public class Agent {
                 submittedUserInput,
                 toolRegistry.isSharedBrowserSession(),
                 toolRegistry.hasAgentOwnedCurrentBrowserPage());
-        pruneHistoricalImagePayloads();
-        storeExplicitBrowserMemoryHint(userInput);
+        try {
+            pruneHistoricalImagePayloads();
+            storeExplicitBrowserMemoryHint(userInput);
 
-        // 检索相关长期记忆，注入到 system prompt
-        ContextProfile contextProfile = memoryManager.getContextProfile();
-        String memoryContext = memoryManager.buildContextForQuery(userInput, contextProfile.memoryContextTokens());
-        updateSystemPromptWithMemory(memoryContext);
+            // 检索相关长期记忆，注入到 system prompt
+            ContextProfile contextProfile = memoryManager.getContextProfile();
+            String memoryContext = memoryManager.buildContextForQuery(userInput, contextProfile.memoryContextTokens());
+            updateSystemPromptWithMemory(memoryContext);
 
-        // 添加用户输入到历史（如有 skill body 注入，前置到原文之前）
-        String userMessageContent = prependSkillBodies(userInput);
-        appendConversationMessage(ImageReferenceParser.userMessage(
-                userMessageContent,
-                Path.of(toolRegistry.getProjectPath())), "user_input");
+            // 添加用户输入到历史（如有 skill body 注入，前置到原文之前）
+            String userMessageContent = prependSkillBodies(userInput);
+            appendConversationMessage(ImageReferenceParser.userMessage(
+                    userMessageContent,
+                    Path.of(toolRegistry.getProjectPath())), "user_input");
+        } catch (SessionPersistenceException e) {
+            log.error("Failed to persist ReAct input before provider call", e);
+            return "Failed to persist conversation state: " + e.getMessage();
+        }
         StringBuilder reasoningTranscript = new StringBuilder();
         StreamRenderer streamRenderer = new StreamRenderer(renderer());
 
@@ -220,9 +273,11 @@ public class Agent {
             }
 
             int iteration = budget.beginIteration();
+            String requestId = UUID.randomUUID().toString();
 
             try {
                 logRequestContext("react iteration=" + iteration, toolExposure.definitions());
+                persistRequestStarted(requestId, requestSnapshot);
                 streamRenderer.beginThinking();
                 // 调用 LLM
                 LlmClient.ChatResponse response = llmClient.chat(
@@ -232,6 +287,7 @@ public class Agent {
                 );
                 LlmTraceLogger.logReasoning(log, "react iteration=" + iteration, llmClient, response.reasoningContent());
                 if (CancellationContext.isCancelled()) {
+                    persistRequestFailedBestEffort(requestId, new IOException("cancelled"));
                     log.info("ReAct run cancelled after LLM response");
                     streamRenderer.finish();
                     pushStatus(budget, startNanos, "idle");
@@ -242,9 +298,13 @@ public class Agent {
 
                 LlmClient.Message assistantMessage = LlmClient.Message.assistant(
                         response.reasoningContent(), response.content(), response.toolCalls());
+                LlmClient.Message committedAssistant = response.hasToolCalls()
+                        ? assistantMessage
+                        : LlmClient.Message.assistant(response.content());
+                persistCompletedResponse(requestId, committedAssistant, llmClient.normalizeUsage(response));
                 contextTokenTracker.recordSuccessfulCall(
                         requestSnapshot,
-                        com.codeagent.memory.TokenBudget.estimateMessageTokens(assistantMessage),
+                        com.codeagent.memory.TokenBudget.estimateMessageTokens(committedAssistant),
                         llmClient.normalizeUsage(response));
 
                 // 如果有工具调用
@@ -253,11 +313,10 @@ public class Agent {
                     log.info("LLM requested {} tool call(s) in iteration {}", response.toolCalls().size(), iteration);
                     budget.recordToolCalls(response.toolCalls());
                     // 添加助手消息（包含工具调用）
-                    appendConversationMessage(LlmClient.Message.assistant(
-                            response.reasoningContent(),
-                            response.content(),
-                            response.toolCalls()
-                    ), "llm_response");
+                    appendCommittedConversationMessage(committedAssistant);
+                    conversationLedger.appendMessage(
+                            "react", "agent", "llm_response", assistantMessage);
+                    persistToolCalls(response.toolCalls());
 
                     // 在工具执行前就 flush 本轮流式渲染器，避免 TerminalMarkdownRenderer
                     // 内部 pending 缓冲区（仅按换行 flush）里的文本被 HITL 提示"跨过"
@@ -284,8 +343,7 @@ public class Agent {
                 appendReasoning(reasoningTranscript, response.reasoningContent());
                 // Keep the delivery view compatible with providers that do not require
                 // final-turn reasoning replay, while the raw ledger preserves the complete response.
-                conversationHistory.add(LlmClient.Message.assistant(response.content()));
-                historyVersion++;
+                appendCommittedConversationMessage(committedAssistant);
                 conversationLedger.appendMessage(
                         "react",
                         "agent",
@@ -313,7 +371,12 @@ public class Agent {
                 streamRenderer.clearThinkingPanel();
                 return formatUserFacingResponse(reasoningTranscript.toString(), response.content());
 
+            } catch (SessionPersistenceException e) {
+                log.error("Failed to persist ReAct request lifecycle", e);
+                streamRenderer.finish();
+                return "Failed to persist conversation state: " + e.getMessage();
             } catch (ContextWindowExceededException e) {
+                persistRequestFailedBestEffort(requestId, e);
                 if (overflowRetries < 1) {
                     overflowRetries++;
                     try {
@@ -332,6 +395,7 @@ public class Agent {
                 streamRenderer.finish();
                 return "❌ 上下文窗口超限: " + e.getMessage();
             } catch (IOException e) {
+                persistRequestFailedBestEffort(requestId, e);
                 log.error("LLM call failed in ReAct loop", e);
                 streamRenderer.finish();
                 return "❌ 调用 LLM 失败: " + e.getMessage();
@@ -413,12 +477,19 @@ public class Agent {
                 "agent",
                 "slash_clear",
                 java.util.Map.of("discardedViewMessages", conversationHistory.size()));
+        LlmClient.Message freshSystem = LlmClient.Message.system(buildSystemPrompt(""));
+        if (sessionHandle != null) {
+            persistEvent(SessionEvent.Types.SURFACE_CLEAR,
+                    SessionEvent.SurfaceOperation.clear(), JSON.createObjectNode());
+            persistMessage(freshSystem, SessionEvent.Types.SYSTEM_MESSAGE,
+                    SessionEvent.SurfaceOperation.append(), null);
+        }
         conversationHistory.clear();
         historyVersion++;
         contextTokenTracker.invalidate(InvalidationReason.CLEAR);
-        appendConversationMessage(
-                LlmClient.Message.system(buildSystemPrompt("")),
-                "history_reset");
+        conversationHistory.add(freshSystem);
+        historyVersion++;
+        conversationLedger.appendMessage("react", "agent", "history_reset", freshSystem);
 
         if (skillContextBuffer != null) {
             skillContextBuffer.clear();
@@ -432,8 +503,10 @@ public class Agent {
         long beforeTokens = estimateCurrentContextTokens();
         int beforeMessages = conversationHistory.size();
         try {
-            AutoCompactionManager.Result result = autoCompactionManager.compactNow(conversationHistory);
+            List<LlmClient.Message> candidate = new ArrayList<>(conversationHistory);
+            AutoCompactionManager.Result result = autoCompactionManager.compactNow(candidate);
             if (result.compacted()) {
+                commitCompaction(candidate, "manual", beforeTokens);
                 recordCompaction("manual", beforeMessages, beforeTokens);
             }
             return new CompactionResult(result.compacted(), beforeTokens, estimateCurrentContextTokens(), null);
@@ -464,6 +537,19 @@ public class Agent {
      */
     private void updateSystemPromptWithMemory(String memoryContext) {
         LlmClient.Message systemMessage = LlmClient.Message.system(buildSystemPrompt(memoryContext));
+        if (systemMessage.equals(conversationHistory.get(0))) {
+            return;
+        }
+        if (sessionHandle != null) {
+            long currentSystemSequence = sessionHandle.projection().activeSurface().stream()
+                    .filter(node -> "system".equals(node.message().role()))
+                    .findFirst()
+                    .map(SessionProjection.SurfaceNode::sequence)
+                    .orElseThrow(() -> new SessionPersistenceException(
+                            "durable session has no system message", null));
+            persistMessage(systemMessage, SessionEvent.Types.SYSTEM_MESSAGE,
+                    SessionEvent.SurfaceOperation.replace(currentSystemSequence, currentSystemSequence), null);
+        }
         conversationHistory.set(0, systemMessage);
         historyVersion++;
         conversationLedger.appendMessage(
@@ -489,10 +575,12 @@ public class Agent {
             return false;
         }
         try {
+            List<LlmClient.Message> candidate = new ArrayList<>(conversationHistory);
             AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(
-                    conversationHistory, trigger, prediction.effectiveTokens());
+                    candidate, trigger, prediction.effectiveTokens());
             if (result.compacted()) {
-                historyVersion++;
+                commitCompaction(candidate,
+                        "automatic:" + result.strategy().name().toLowerCase(), beforeTokens);
                 contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
                 recordCompaction("automatic:" + result.strategy().name().toLowerCase(), beforeMessages, beforeTokens);
                 String strategy = result.strategy() == AutoCompactionManager.Strategy.SESSION_MEMORY
@@ -516,7 +604,13 @@ public class Agent {
             if (images <= 0) {
                 continue;
             }
-            conversationHistory.set(i, message.withoutImageContent());
+            LlmClient.Message pruned = message.withoutImageContent();
+            if (sessionHandle != null) {
+                long sequence = sessionHandle.projection().activeSurface().get(i).sequence();
+                persistMessage(pruned, SessionEvent.Types.IMAGE_PRUNED,
+                        SessionEvent.SurfaceOperation.replace(sequence, sequence), null);
+            }
+            conversationHistory.set(i, pruned);
             historyVersion++;
             contextTokenTracker.invalidate(InvalidationReason.IMAGE_PAYLOAD_PRUNED);
             messageCount++;
@@ -694,6 +788,15 @@ public class Agent {
         } catch (Exception e) {
             return estimateCurrentContextTokens();
         }
+    }
+
+    /** Returns the same context prediction used by the next provider request. */
+    public ContextTokenTracker.ContextPrediction currentContextPrediction() {
+        List<LlmClient.Tool> tools = llmClient != null && llmClient.supportsTools()
+                ? toolRegistry.getToolDefinitions() : null;
+        RequestSnapshot snapshot = requestSnapshotFactory.capture(
+                llmClient, conversationHistory, tools, historyVersion);
+        return contextTokenTracker.predict(snapshot);
     }
 
     private void logRequestContext(String scope, List<LlmClient.Tool> tools) {
@@ -986,9 +1089,125 @@ public class Agent {
     }
 
     private void appendConversationMessage(LlmClient.Message message, String source) {
+        if (sessionHandle != null) {
+            persistMessage(message, eventType(message), SessionEvent.SurfaceOperation.append(), null);
+        }
         conversationHistory.add(message);
         historyVersion++;
         conversationLedger.appendMessage("react", "agent", source, message);
+    }
+
+    private void appendCommittedConversationMessage(LlmClient.Message message) {
+        conversationHistory.add(message);
+        historyVersion++;
+    }
+
+    private void persistRequestStarted(String requestId, RequestSnapshot snapshot) {
+        ObjectNode started = JSON.createObjectNode().put("requestId", requestId);
+        persistEvent(SessionEvent.Types.REQUEST_STARTED, SessionEvent.SurfaceOperation.none(), started);
+        ObjectNode captured = JSON.createObjectNode()
+                .put("requestId", requestId)
+                .put("provider", snapshot.provider())
+                .put("model", snapshot.model())
+                .put("callConfigFingerprint", snapshot.callConfigFingerprint())
+                .put("toolSchemaFingerprint", snapshot.toolSchemaFingerprint())
+                .put("surfaceFingerprint", snapshot.surfaceFingerprint())
+                .put("historyVersion", snapshot.historyVersion());
+        persistEvent(SessionEvent.Types.REQUEST_SNAPSHOT, SessionEvent.SurfaceOperation.none(), captured);
+    }
+
+    private void persistCompletedResponse(String requestId, LlmClient.Message assistant,
+                                          com.codeagent.context.MeasuredUsage usage) {
+        persistMessage(assistant, SessionEvent.Types.ASSISTANT_MESSAGE,
+                SessionEvent.SurfaceOperation.append(), requestId);
+        ObjectNode usagePayload = JSON.createObjectNode()
+                .put("requestId", requestId)
+                .put("provider", llmClient.getProviderName())
+                .put("model", llmClient.getModelName());
+        ObjectNode measured = usagePayload.putObject("usage");
+        measured.put("inputTokens", usage.inputTokens())
+                .put("outputTokens", usage.outputTokens())
+                .put("cachedInputTokens", usage.cachedInputTokens())
+                .put("inputScope", usage.inputScope().name())
+                .put("includesTools", usage.includesTools())
+                .put("includesSystem", usage.includesSystem())
+                .put("trusted", usage.trusted())
+                .put("measuredAtEpochMilli", usage.measuredAt().toEpochMilli());
+        persistEvent(SessionEvent.Types.PROVIDER_USAGE, SessionEvent.SurfaceOperation.none(), usagePayload);
+        persistEvent(SessionEvent.Types.REQUEST_FINISHED, SessionEvent.SurfaceOperation.none(),
+                JSON.createObjectNode().put("requestId", requestId));
+    }
+
+    private void persistToolCalls(List<LlmClient.ToolCall> toolCalls) {
+        if (sessionHandle == null || toolCalls == null) {
+            return;
+        }
+        for (LlmClient.ToolCall call : toolCalls) {
+            ObjectNode payload = JSON.createObjectNode()
+                    .put("invocationId", call.id())
+                    .put("name", call.function().name())
+                    .put("arguments", call.function().arguments());
+            persistEvent(SessionEvent.Types.TOOL_CALL, SessionEvent.SurfaceOperation.none(), payload);
+            persistEvent(SessionEvent.Types.TOOL_EXECUTION_STARTED,
+                    SessionEvent.SurfaceOperation.none(), payload);
+        }
+    }
+
+    private void persistRequestFailedBestEffort(String requestId, Exception failure) {
+        if (sessionHandle == null) {
+            return;
+        }
+        try {
+            ObjectNode payload = JSON.createObjectNode().put("requestId", requestId);
+            if (failure != null && failure.getMessage() != null) {
+                payload.put("error", failure.getMessage());
+            }
+            persistEvent(SessionEvent.Types.REQUEST_FAILED, SessionEvent.SurfaceOperation.none(), payload);
+        } catch (SessionPersistenceException persistenceFailure) {
+            log.warn("Failed to persist request failure: requestId={}", requestId, persistenceFailure);
+        }
+    }
+
+    private void persistMessage(LlmClient.Message message, String type,
+                                SessionEvent.SurfaceOperation operation, String requestId) {
+        ObjectNode payload = JSON.createObjectNode();
+        payload.set("message", JSON.valueToTree(message));
+        if (requestId != null) {
+            payload.put("requestId", requestId);
+        }
+        if (SessionEvent.Types.TOOL_RESULT.equals(type) && message.toolCallId() != null) {
+            payload.put("invocationId", message.toolCallId());
+        }
+        persistEvent(type, operation, payload);
+    }
+
+    private void persistEvent(String type, SessionEvent.SurfaceOperation operation, ObjectNode payload) {
+        if (sessionHandle == null) {
+            return;
+        }
+        try {
+            sessionHandle.append(new SessionEventDraft(type, "react", "agent", "agent",
+                    false, operation, payload));
+        } catch (IOException | IllegalStateException e) {
+            throw new SessionPersistenceException("unable to append " + type, e);
+        }
+    }
+
+    private static String eventType(LlmClient.Message message) {
+        return switch (message.role()) {
+            case "system" -> SessionEvent.Types.SYSTEM_MESSAGE;
+            case "user" -> SessionEvent.Types.USER_MESSAGE;
+            case "tool" -> SessionEvent.Types.TOOL_RESULT;
+            case "assistant" -> SessionEvent.Types.ASSISTANT_MESSAGE;
+            default -> throw new IllegalArgumentException(
+                    "unsupported durable message role: " + message.role());
+        };
+    }
+
+    private static final class SessionPersistenceException extends RuntimeException {
+        private SessionPersistenceException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 
     private void recordCompaction(String source, int beforeMessages, long beforeTokens) {
@@ -1002,6 +1221,78 @@ public class Agent {
                         "afterMessages", conversationHistory.size(),
                         "beforeTokens", beforeTokens,
                         "afterTokens", estimateCurrentContextTokens()));
+    }
+
+    private void commitCompaction(List<LlmClient.Message> candidate,
+                                  String source, long beforeTokens) {
+        if (candidate.equals(conversationHistory)) {
+            return;
+        }
+        if (sessionHandle == null) {
+            conversationHistory.clear();
+            conversationHistory.addAll(candidate);
+            historyVersion++;
+            contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
+            return;
+        }
+
+        int commonSuffix = commonSuffixLength(conversationHistory, candidate);
+        int removedEndIndex = conversationHistory.size() - commonSuffix - 1;
+        if (conversationHistory.size() < 2 || candidate.size() < commonSuffix + 3
+                || removedEndIndex < 1) {
+            throw new SessionPersistenceException("unsupported compaction shape", null);
+        }
+        List<SessionProjection.SurfaceNode> nodes = sessionHandle.projection().activeSurface();
+        long startSequence = nodes.get(1).sequence();
+        long endSequence = nodes.get(removedEndIndex).sequence();
+        String compactionId = UUID.randomUUID().toString();
+
+        ObjectNode start = JSON.createObjectNode()
+                .put("compactionId", compactionId)
+                .put("source", source)
+                .put("beforeTokens", beforeTokens);
+        persistEvent(SessionEvent.Types.COMPACTION_START,
+                SessionEvent.SurfaceOperation.none(), start);
+
+        ObjectNode summary = JSON.createObjectNode()
+                .put("compactionId", compactionId)
+                .put("afterTokens", com.codeagent.memory.TokenBudget.estimateMessagesTokens(candidate));
+        persistEvent(SessionEvent.Types.COMPACTION_SUMMARY,
+                SessionEvent.SurfaceOperation.none(), summary);
+
+        persistCompactionMessage(candidate.get(1), SessionEvent.Types.USER_MESSAGE,
+                SessionEvent.SurfaceOperation.replace(startSequence, endSequence), compactionId);
+        persistCompactionMessage(candidate.get(2), SessionEvent.Types.ASSISTANT_MESSAGE,
+                SessionEvent.SurfaceOperation.append(), compactionId);
+        ObjectNode end = JSON.createObjectNode()
+                .put("compactionId", compactionId)
+                .put("status", "completed");
+        persistEvent(SessionEvent.Types.COMPACTION_END,
+                SessionEvent.SurfaceOperation.none(), end);
+
+        conversationHistory.clear();
+        conversationHistory.addAll(sessionHandle.projection().messages());
+        historyVersion = sessionHandle.projection().historyVersion();
+        contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
+    }
+
+    private void persistCompactionMessage(LlmClient.Message message, String type,
+                                          SessionEvent.SurfaceOperation operation,
+                                          String compactionId) {
+        ObjectNode payload = JSON.createObjectNode().put("compactionId", compactionId);
+        payload.set("message", JSON.valueToTree(message));
+        persistEvent(type, operation, payload);
+    }
+
+    private static int commonSuffixLength(List<LlmClient.Message> before,
+                                          List<LlmClient.Message> after) {
+        int count = 0;
+        while (count < before.size() && count < after.size()
+                && before.get(before.size() - 1 - count)
+                .equals(after.get(after.size() - 1 - count))) {
+            count++;
+        }
+        return count;
     }
 
     private String formatUserFacingResponse(String reasoningContent, String answer) {

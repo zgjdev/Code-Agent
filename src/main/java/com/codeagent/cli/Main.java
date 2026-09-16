@@ -16,6 +16,8 @@ import com.codeagent.hitl.SwitchableHitlHandler;
 import com.codeagent.hitl.RendererHitlHandler;
 import com.codeagent.hitl.TerminalHitlHandler;
 import com.codeagent.history.ConversationLedger;
+import com.codeagent.history.SessionStore;
+import com.codeagent.history.SessionSummary;
 import com.codeagent.harness.BetterHarnessOptions;
 import com.codeagent.harness.BetterHarnessRunner;
 import com.codeagent.llm.LlmClient;
@@ -89,6 +91,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
@@ -239,6 +242,7 @@ public class Main {
             hitlToolRegistry.setBrowserGuard(new BrowserGuard(browserSession, new SensitivePagePolicy()));
             McpServerManager mcpServerManager = new McpServerManager(hitlToolRegistry, Path.of("."));
             AtomicReference<SkillRegistry> skillRegistryRef = new AtomicReference<>();
+            AtomicReference<List<String>> sessionIdCandidates = new AtomicReference<>(List.of());
             hitlToolRegistry.setBrowserConnector(new com.codeagent.browser.BrowserConnector() {
                 @Override
                 public String status() {
@@ -263,7 +267,8 @@ public class Main {
                     .terminal(terminal)
                     .history(new CodeAgentHistory())
                     .completer(new CodeAgentCompleter(mcpServerManager::resourceCandidates,
-                            () -> skillRegistryRef.get() == null ? List.of() : skillRegistryRef.get().allSkills()))
+                            () -> skillRegistryRef.get() == null ? List.of() : skillRegistryRef.get().allSkills(),
+                            sessionIdCandidates::get))
                     .highlighter(new CodeAgentHighlighter())
                     .build();
             lineReader.option(LineReader.Option.BRACKETED_PASTE, true);
@@ -334,6 +339,38 @@ public class Main {
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
+            Path workspace = Path.of(".").toRealPath().normalize();
+            SessionStore openedSessionStore = null;
+            AtomicReference<SessionStore.SessionHandle> activeSession = new AtomicReference<>();
+            try {
+                openedSessionStore = SessionStore.open(home.resolve(".codeagent").resolve("history"));
+                SessionStore.SessionHandle initialSession;
+                var latest = isAutomaticSessionResumeEnabled(
+                        System.getProperty("codeagent.session.resume"),
+                        System.getenv("CODEAGENT_SESSION_RESUME"))
+                        ? openedSessionStore.latestUnclosed(workspace)
+                        : Optional.<SessionSummary>empty();
+                if (latest.isPresent()) {
+                    initialSession = openedSessionStore.resumeWritable(latest.get().sessionId(), workspace);
+                    startupNote = appendStartupNote(startupNote,
+                            "已恢复会话 " + initialSession.sessionId());
+                } else {
+                    initialSession = openedSessionStore.create(new SessionStore.SessionCreateRequest(
+                            workspace, llmClient.getProviderName(), llmClient.getModelName(),
+                            null, "react", "agent"));
+                }
+                reactAgent.attachSession(initialSession);
+                activeSession.set(initialSession);
+                sessionIdCandidates.set(sessionIds(openedSessionStore, workspace));
+            } catch (Exception e) {
+                startupNote = appendStartupNote(startupNote,
+                        "可恢复会话初始化失败，当前仅使用内存上下文: " + e.getMessage());
+            }
+            final SessionStore sessionStore = openedSessionStore;
+            if (sessionStore != null) {
+                Runtime.getRuntime().addShutdownHook(new Thread(() ->
+                        closeSessionQuietly(activeSession.get()), "codeagent-session-shutdown"));
+            }
             DurableTaskManager taskManager = openTaskManager(llmClientRef);
             taskManager.start();
             Runtime.getRuntime().addShutdownHook(new Thread(taskManager::close, "codeagent-task-shutdown"));
@@ -424,6 +461,7 @@ public class Main {
                         continue;
                     }
                     case EXIT -> {
+                        closeSessionNormally(activeSession.get(), "exit");
                         ui.println("\n👋 再见!");
                         wechatRuntime.stop();
                         renderer.close();
@@ -464,6 +502,71 @@ public class Main {
                                     result.beforeTokens(), result.afterTokens());
                         } else {
                             ui.println("📭 当前没有需要压缩的历史上下文\n");
+                        }
+                        continue;
+                    }
+                    case SESSIONS -> {
+                        if (sessionStore == null) {
+                            ui.println("❌ 可恢复会话存储不可用\n");
+                            continue;
+                        }
+                        List<SessionSummary> sessions = sessionStore.list(workspace, 20);
+                        if (sessions.isEmpty()) {
+                            ui.println("📭 当前项目没有持久化会话\n");
+                        } else {
+                            ui.println("持久化会话：");
+                            for (SessionSummary summary : sessions) {
+                                String current = activeSession.get() != null
+                                        && activeSession.get().sessionId().equals(summary.sessionId()) ? " *" : "";
+                                ui.printf("- %s%s · %s · seq %,d%n", summary.sessionId(), current,
+                                        summary.closed() ? "closed" : "open", summary.lastEventSequence());
+                            }
+                            ui.println();
+                        }
+                        continue;
+                    }
+                    case RESUME_SESSION -> {
+                        if (sessionStore == null || command.payload() == null || command.payload().isBlank()) {
+                            ui.println("❌ 用法: /resume <session-id>\n");
+                            continue;
+                        }
+                        SessionStore.SessionHandle prepared = null;
+                        try {
+                            String targetSessionId = "last".equalsIgnoreCase(command.payload())
+                                    ? sessionStore.latest(workspace)
+                                            .orElseThrow(() -> new IOException("当前项目没有持久化会话"))
+                                            .sessionId()
+                                    : command.payload();
+                            prepared = sessionStore.resumeWritable(targetSessionId, workspace);
+                            reactAgent.attachSession(prepared);
+                            SessionStore.SessionHandle previous = activeSession.getAndSet(prepared);
+                            closeSessionQuietly(previous);
+                            sessionIdCandidates.set(sessionIds(sessionStore, workspace));
+                            ui.println("✅ 已恢复会话 " + prepared.sessionId() + "\n");
+                        } catch (Exception e) {
+                            closeSessionQuietly(prepared);
+                            ui.println("❌ 恢复会话失败，当前会话保持不变: " + e.getMessage() + "\n");
+                        }
+                        continue;
+                    }
+                    case NEW_SESSION -> {
+                        if (sessionStore == null) {
+                            ui.println("❌ 可恢复会话存储不可用\n");
+                            continue;
+                        }
+                        SessionStore.SessionHandle prepared = null;
+                        try {
+                            prepared = sessionStore.create(new SessionStore.SessionCreateRequest(
+                                    workspace, llmClient.getProviderName(), llmClient.getModelName(),
+                                    null, "react", "agent"));
+                            reactAgent.attachSession(prepared);
+                            SessionStore.SessionHandle previous = activeSession.getAndSet(prepared);
+                            closeSessionNormally(previous, "new-session");
+                            sessionIdCandidates.set(sessionIds(sessionStore, workspace));
+                            ui.println("✅ 已创建新会话 " + prepared.sessionId() + "\n");
+                        } catch (Exception e) {
+                            closeSessionQuietly(prepared);
+                            ui.println("❌ 创建新会话失败，当前会话保持不变: " + e.getMessage() + "\n");
                         }
                         continue;
                     }
@@ -937,6 +1040,7 @@ public class Main {
                     ui.println();
                 }
             }
+            closeSessionNormally(activeSession.get(), "eof");
             ui.println("\n👋 再见!");
             wechatRuntime.stop();
             renderer.close();
@@ -952,6 +1056,40 @@ public class Main {
                 && args.length >= 1
                 && "serve".equalsIgnoreCase(args[0])
                 && java.util.Arrays.stream(args).anyMatch("--http"::equalsIgnoreCase);
+    }
+
+    private static List<String> sessionIds(SessionStore store, Path workspace) {
+        if (store == null) return List.of();
+        try {
+            return store.list(workspace, 50).stream().map(SessionSummary::sessionId).toList();
+        } catch (IOException e) {
+            return List.of();
+        }
+    }
+
+    static boolean isAutomaticSessionResumeEnabled(String propertyValue, String environmentValue) {
+        String configured = firstNonBlank(propertyValue, environmentValue);
+        return configured == null || !"off".equalsIgnoreCase(configured.trim());
+    }
+
+    private static void closeSessionNormally(SessionStore.SessionHandle handle, String reason) {
+        if (handle == null) return;
+        try {
+            handle.markClosed(reason);
+        } catch (Exception ignored) {
+            // The event log remains recoverable as interrupted if normal close cannot be recorded.
+        } finally {
+            closeSessionQuietly(handle);
+        }
+    }
+
+    private static void closeSessionQuietly(SessionStore.SessionHandle handle) {
+        if (handle == null) return;
+        try {
+            handle.close();
+        } catch (Exception ignored) {
+            // Best effort during shutdown or failed prepare-then-swap.
+        }
     }
 
     private static void startRuntimeApiAndBlock(String[] args) {
@@ -1186,6 +1324,7 @@ public class Main {
                 System.out
         );
         planAgent.setConversationLedger(reactAgent.getConversationLedger());
+        planAgent.setParentSession(reactAgent.getSessionHandle());
         return planAgent;
     }
 
@@ -1200,6 +1339,7 @@ public class Main {
                 out
         );
         planAgent.setConversationLedger(reactAgent.getConversationLedger());
+        planAgent.setParentSession(reactAgent.getSessionHandle());
         return planAgent;
     }
 
@@ -1208,6 +1348,7 @@ public class Main {
         AgentOrchestrator orchestrator =
                 new AgentOrchestrator(llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
         orchestrator.setConversationLedger(reactAgent.getConversationLedger());
+        orchestrator.setParentSession(reactAgent.getSessionHandle());
         return orchestrator;
     }
 
@@ -1704,6 +1845,9 @@ public class Main {
                 new SlashCommandHint("/graph ", "/graph <类名>", "查看代码关系图谱"),
                 new SlashCommandHint("/clear", "/clear", "清空当前对话历史"),
                 new SlashCommandHint("/compact", "/compact", "手动压缩当前对话历史"),
+                new SlashCommandHint("/sessions", "/sessions", "列出当前项目的持久化会话"),
+                new SlashCommandHint("/resume ", "/resume <session-id>", "恢复指定会话"),
+                new SlashCommandHint("/new", "/new", "关闭当前会话并创建新会话"),
                 new SlashCommandHint("/init", "/init", "生成项目级记忆 CODEAGENT.md"),
                 new SlashCommandHint("/init --force", "/init --force", "重写项目级记忆 CODEAGENT.md"),
                 new SlashCommandHint("/history clear", "/history clear", "清空本机输入历史"),

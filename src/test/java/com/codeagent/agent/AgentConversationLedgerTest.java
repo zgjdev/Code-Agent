@@ -175,12 +175,9 @@ class AgentConversationLedgerTest {
 
         List<ConversationLedger.Entry> entries = ledger.readAll();
         assertTrue(entries.stream().anyMatch(entry -> "orchestrator".equals(entry.actor())));
-        assertTrue(entries.stream().anyMatch(entry -> "planner".equals(entry.actor())));
-        assertTrue(entries.stream().anyMatch(entry -> "worker-1".equals(entry.actor())));
-        assertTrue(entries.stream().anyMatch(entry -> "reviewer".equals(entry.actor())));
-        assertTrue(entries.stream()
-                .filter(entry -> "assistant".equals(entry.event()))
-                .anyMatch(entry -> "reviewer reasoning".equals(entry.message().reasoningContent())));
+        assertTrue(entries.stream().noneMatch(entry -> "planner".equals(entry.actor())));
+        assertTrue(entries.stream().noneMatch(entry -> "worker-1".equals(entry.actor())));
+        assertTrue(entries.stream().noneMatch(entry -> "reviewer".equals(entry.actor())));
     }
 
     private static final class StubToolRegistry extends ToolRegistry {

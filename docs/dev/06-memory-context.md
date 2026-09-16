@@ -520,3 +520,4 @@ ReAct、Plan task 和 SubAgent 每次调用 LLM 前都会冻结实际 `messages 
 3. **长期记忆条目 tokenCount**：保存于每个 `MemoryEntry`，主要用于构建“相关长期记忆”注入预算，不代表一次 LLM 请求的完整输入 token。
 
 `TokenBudget` 的消息估算包括文本 part、图片近似成本、tool-call arguments，以及每条消息固定约 4 token 的角色/分隔开销；contentParts 非 null 时只计算 parts。`estimateToolsTokens` 单独估算工具 schema，`estimateRequestTokens` 将消息与工具两部分合并。DeepSeek 和 GLM 已通过真实 API 验证：`prompt_tokens` 包含 system 和 tools schema，`completion_tokens` 包含 reasoning / assistant tool call，因此 tool call 不能额外重复相加；DeepSeek 的 cached prefix 已包含在 prompt 总量中，也不能重复相加。其他 provider 仍走完整本地估算。上下文可用预算默认按 `window - 500(system) - 800(tools) - 2000(response)` 计算；`ContextProfile` 的自动压缩阈值则使用独立的“摘要输出预留 + 安全缓冲”公式，不能把二者视为同一个数字。
+\n> Durable session note: `SessionStore` persists the short-term context as append-only events; `conversationHistory` is the replay surface. Checkpoints are hash-validated accelerators and `/clear`/compaction never rewrite source events.

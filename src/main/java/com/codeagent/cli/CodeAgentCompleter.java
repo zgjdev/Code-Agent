@@ -15,15 +15,23 @@ import java.util.function.Supplier;
 final class CodeAgentCompleter implements Completer {
     private final Supplier<List<McpResourceDescriptor>> resourceSupplier;
     private final Supplier<List<Skill>> skillSupplier;
+    private final Supplier<List<String>> sessionSupplier;
 
     CodeAgentCompleter(Supplier<List<McpResourceDescriptor>> resourceSupplier) {
-        this(resourceSupplier, List::of);
+        this(resourceSupplier, List::of, List::of);
     }
 
     CodeAgentCompleter(Supplier<List<McpResourceDescriptor>> resourceSupplier,
                     Supplier<List<Skill>> skillSupplier) {
+        this(resourceSupplier, skillSupplier, List::of);
+    }
+
+    CodeAgentCompleter(Supplier<List<McpResourceDescriptor>> resourceSupplier,
+                    Supplier<List<Skill>> skillSupplier,
+                    Supplier<List<String>> sessionSupplier) {
         this.resourceSupplier = resourceSupplier;
         this.skillSupplier = skillSupplier == null ? List::of : skillSupplier;
+        this.sessionSupplier = sessionSupplier == null ? List::of : sessionSupplier;
     }
 
     @Override
@@ -48,6 +56,7 @@ final class CodeAgentCompleter implements Completer {
     private void completeSlashCommand(ParsedLine line, List<Candidate> candidates) {
         String input = line.line() == null ? "" : line.line();
         if (completeModel(input, candidates)
+                || completeResume(input, candidates)
                 || completeConfig(input, candidates)
                 || completeMcp(input, candidates)
                 || completeSkill(input, candidates)
@@ -78,6 +87,24 @@ final class CodeAgentCompleter implements Completer {
                     true
             ));
         }
+    }
+
+    private boolean completeResume(String input, List<Candidate> candidates) {
+        if (!input.regionMatches(true, 0, "/resume", 0, Math.min(7, input.length()))) {
+            return false;
+        }
+        if (!input.equalsIgnoreCase("/resume")
+                && !input.regionMatches(true, 0, "/resume ", 0, 8)) {
+            return false;
+        }
+        String prefix = input.length() <= 8 ? "" : input.substring(8).trim();
+        for (String sessionId : sessionSupplier.get()) {
+            if (sessionId != null && sessionId.startsWith(prefix)) {
+                candidates.add(new Candidate(sessionId, sessionId, "Sessions",
+                        "Resume session", null, null, true));
+            }
+        }
+        return true;
     }
 
     private boolean completeModel(String input, List<Candidate> candidates) {

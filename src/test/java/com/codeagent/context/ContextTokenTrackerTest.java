@@ -71,4 +71,18 @@ class ContextTokenTrackerTest {
 
         assertFalse(tracker.hasUsableAnchor(snapshot("s2", "t1", 2)));
     }
+
+    @Test
+    void restoredSessionRequiresANewUsageAnchor() {
+        ContextTokenTracker tracker = new ContextTokenTracker();
+        tracker.recordSuccessfulCall(snapshot("s1", "t1", 1), 100,
+                new MeasuredUsage(1_200, 100, 0,
+                        MeasuredUsage.InputScope.TOTAL_PROMPT,
+                        true, true, true, Instant.now()));
+
+        tracker.invalidate(InvalidationReason.SESSION_RESTORED);
+
+        assertEquals(ContextTokenTracker.Mode.FULL_ESTIMATE,
+                tracker.predict(snapshot("s2", "t1", 2)).mode());
+    }
 }

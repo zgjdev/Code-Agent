@@ -10,6 +10,9 @@ final class CliCommandParser {
         EXIT,
         CLEAR,
         COMPACT,
+        SESSIONS,
+        RESUME_SESSION,
+        NEW_SESSION,
         HISTORY_CLEAR,
         SWITCH_MODEL,
         SWITCH_PLAN,
@@ -85,6 +88,22 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/compact")) {
             return new ParsedCommand(CommandType.COMPACT, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/sessions")) {
+            return new ParsedCommand(CommandType.SESSIONS, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/new")) {
+            return new ParsedCommand(CommandType.NEW_SESSION, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/resume")) {
+            return new ParsedCommand(CommandType.RESUME_SESSION, "last");
+        }
+
+        if (trimmed.regionMatches(true, 0, "/resume ", 0, 8)) {
+            return new ParsedCommand(CommandType.RESUME_SESSION, trimmed.substring(8).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/history clear")) {

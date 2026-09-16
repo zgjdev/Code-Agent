@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class AgentOrchestratorTest {
 
     @Test
-    void shouldShareOneLedgerAcrossPlannerWorkersAndReviewer(@TempDir Path tempDir)
+    void shouldNotShareOneWritableLedgerAcrossPlannerWorkersAndReviewer(@TempDir Path tempDir)
             throws Exception {
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
         ConversationLedger ledger =
@@ -39,13 +39,13 @@ class AgentOrchestratorTest {
         orchestrator.setConversationLedger(ledger);
 
         assertSame(ledger, readField(orchestrator, "conversationLedger"));
-        assertSame(ledger, readField(readField(orchestrator, "planner"), "conversationLedger"));
+        assertNotSame(ledger, readField(readField(orchestrator, "planner"), "conversationLedger"));
         @SuppressWarnings("unchecked")
         List<SubAgent> workers = (List<SubAgent>) readField(orchestrator, "workers");
         for (SubAgent worker : workers) {
-            assertSame(ledger, readField(worker, "conversationLedger"));
+            assertNotSame(ledger, readField(worker, "conversationLedger"));
         }
-        assertSame(ledger, readField(readField(orchestrator, "reviewer"), "conversationLedger"));
+        assertNotSame(ledger, readField(readField(orchestrator, "reviewer"), "conversationLedger"));
     }
 
     @Test

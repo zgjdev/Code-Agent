@@ -804,3 +804,4 @@ margin = clamp(P95(max(error, 0)), minMargin, maxMargin)
 - 压缩不写长期记忆、不删除 ledger 原始事件、不维护影子短期 history。
 - 任务 A-F 的定向测试和 `mvn test -Pquick` 全部通过。
 - `docs/dev/06-memory-context.md`、本文与 `08-harness-token-context-survey.md` 的描述一致。
+\n> Durable session note: after restart, the first request uses `FULL_ESTIMATE`; a trusted provider usage response is required before rebuilding the token anchor.

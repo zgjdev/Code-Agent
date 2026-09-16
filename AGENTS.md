@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Durable session behavior
+
+Short-term context is persisted as `~/.codeagent/history/sessions/<session-id>/events.jsonl` and replayed into `conversationHistory`; checkpoints are disposable and hash-validated. Startup resumes the latest unfinished session in the current workspace unless `CODEAGENT_SESSION_RESUME=off`. `/sessions`, `/resume [last|<id>]`, and `/new` manage sessions. ReAct owns the root session; Plan tasks and Team agents write isolated child sessions and return explicit `child/result` events instead of sharing a concurrent writer.
+
 仓库给 Agent / 新线程使用的首读入口。详细行为描述见 `docs/agents-reference.md`。
 
 ## 信息优先级
@@ -121,7 +125,7 @@ src/main/java/com/codeagent/
 - `/init` 会根据当前项目生成短 `CODEAGENT.md`，只放 commands / project positioning / architecture / pitfalls / don'ts；默认不覆盖已有文件。
 - `/export` 导出当前 ReAct `conversationHistory` 为 Markdown 到 `~/.codeagent/exports/session-*.md`；只支持无参数命令，包含完整 system prompt，便于检查 LLM 实际接收前的指令。
 - `/better-harness` 走 CodeAgent 原生四阶段审查：确定性脱敏证据快照 → 三路无工具 specialist 并行分析 → lead 汇总 → Java 确定性渲染。终端必须实时显示 5 个确定性工作单元、先完成先反馈的三路审查进度、累计耗时和 ESC 取消提示，不能只打印启动文案后静默等待；最终 Markdown 必须经过 `TerminalMarkdownRenderer` 按当前终端宽度渲染，不能直接输出 `#` / `**` 等源码标记。默认只读取当前 ledger 元数据和项目内公开工程资产，不读取消息正文、工具参数/结果、Memory 正文或用户目录配置；`--inline` 不写文件。
-- 默认 CLI 会创建一个 `ConversationLedger` 并在 ReAct / Plan / Team 三条路径间共享，原始 `LlmClient.Message` 以 append-only JSONL 写入 `~/.codeagent/history/raw/session-*.jsonl`。记录包含 mode / actor / source，以及完整 system / user / assistant / tool_call / tool_result（含 reasoning、工具参数和结果、图片 payload）；`/clear`、图片裁剪和 conversationHistory 压缩只改发送视图，只能向账本追加边界事件，不能改写或删除旧行。该目录在 POSIX 上使用 0700、文件使用 0600；内容可能敏感，不要提交或随意分享。
+- 默认 CLI 为 ReAct 创建 root session；Plan task、Team planner/worker/reviewer 和 SubAgent 使用独立 child session，不能共享可写 ledger。每个 session 的完整事件以 append-only JSONL 写入 `~/.codeagent/history/sessions/<id>/events.jsonl`，父 session 仅追加 `child/result` 引用。旧 `raw/session-*.jsonl` 仅作兼容读取和幂等迁移来源，不再作为新写入目标。事件包含 mode / actor / source，以及完整 system / user / assistant / tool_call / tool_result（含 reasoning、工具参数和结果、图片 payload）；`/clear`、图片裁剪和 conversationHistory 压缩只改发送视图，只能向事件日志追加边界事件，不能改写或删除旧事件。该目录在 POSIX 上使用 0700、文件使用 0600；内容可能敏感，不要提交或随意分享。
 - JLine 交互升级计划记录在 `docs/phase-22-jline-interaction-upgrade.md`。
 
 ## 关键行为约束（Agent 必读）

@@ -196,6 +196,20 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesSessionCommands() {
+        assertEquals(CliCommandParser.CommandType.SESSIONS,
+                CliCommandParser.parse("/sessions").type());
+        assertEquals(CliCommandParser.CommandType.NEW_SESSION,
+                CliCommandParser.parse("/new").type());
+        CliCommandParser.ParsedCommand resume = CliCommandParser.parse("/resume session-123");
+        assertEquals(CliCommandParser.CommandType.RESUME_SESSION, resume.type());
+        assertEquals("session-123", resume.payload());
+        CliCommandParser.ParsedCommand resumeLast = CliCommandParser.parse("/resume");
+        assertEquals(CliCommandParser.CommandType.RESUME_SESSION, resumeLast.type());
+        assertEquals("last", resumeLast.payload());
+    }
+
+    @Test
     void parsesExportSlashCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/export");
 

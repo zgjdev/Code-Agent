@@ -168,6 +168,17 @@ class CodeAgentCompleterTest {
     }
 
     @Test
+    void completesSessionIdsForResume() {
+        CodeAgentCompleter completer = new CodeAgentCompleter(
+                List::of, List::of, () -> List.of("session-123", "session-456"));
+        List<Candidate> candidates = new ArrayList<>();
+
+        completer.complete(null, parsed("/resume session-1", "session-1"), candidates);
+
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("session-123")));
+    }
+
+    @Test
     void completesLocalPathMentions() {
         CodeAgentCompleter completer = new CodeAgentCompleter(List::of);
         List<Candidate> candidates = new ArrayList<>();

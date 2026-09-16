@@ -1,9 +1,11 @@
 package com.codeagent.history;
 
+import com.codeagent.context.MeasuredUsage;
 import com.codeagent.llm.LlmClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -100,11 +102,20 @@ public final class SessionReplayer {
             state.compactions.get(compactionId).add(event);
             return;
         }
+        String requestId = text(payload, "requestId");
+        if (SessionEvent.Types.ASSISTANT_MESSAGE.equals(event.type()) && requestId != null) {
+            if (!state.incompleteRequests.contains(requestId)) {
+                throw new CorruptSessionException("assistant event has no active request: " + requestId);
+            }
+            state.requestAssistants.computeIfAbsent(requestId, ignored -> new ArrayList<>()).add(event);
+            return;
+        }
 
         switch (event.type()) {
             case SessionEvent.Types.REQUEST_STARTED -> state.incompleteRequests.add(requiredText(payload, "requestId"));
-            case SessionEvent.Types.REQUEST_FINISHED, SessionEvent.Types.REQUEST_FAILED ->
-                    state.incompleteRequests.remove(requiredText(payload, "requestId"));
+            case SessionEvent.Types.REQUEST_FINISHED -> finishRequest(state, requiredText(payload, "requestId"));
+            case SessionEvent.Types.REQUEST_FAILED -> failRequest(state, requiredText(payload, "requestId"));
+            case SessionEvent.Types.PROVIDER_USAGE -> stageUsage(state, payload);
             case SessionEvent.Types.TOOL_CALL -> {
                 String invocationId = requiredText(payload, "invocationId");
                 state.pendingTools.put(invocationId, new SessionProjection.PendingToolInvocation(
@@ -122,6 +133,50 @@ public final class SessionReplayer {
             default -> {
                 // Lifecycle and diagnostic events do not directly change the active surface.
             }
+        }
+    }
+
+    private static void finishRequest(MutableProjection state, String requestId) {
+        if (!state.incompleteRequests.remove(requestId)) {
+            throw new CorruptSessionException("request finished without start: " + requestId);
+        }
+        for (SessionEvent assistant : state.requestAssistants.getOrDefault(requestId, List.of())) {
+            applySurface(state, assistant);
+        }
+        state.requestAssistants.remove(requestId);
+        SessionProjection.MeasuredUsageFact usage = state.requestUsages.remove(requestId);
+        if (usage != null) {
+            state.lastCompletedUsage = usage;
+        }
+    }
+
+    private static void failRequest(MutableProjection state, String requestId) {
+        state.incompleteRequests.remove(requestId);
+        state.requestAssistants.remove(requestId);
+        state.requestUsages.remove(requestId);
+    }
+
+    private static void stageUsage(MutableProjection state, JsonNode payload) {
+        String requestId = requiredText(payload, "requestId");
+        if (!state.incompleteRequests.contains(requestId)) {
+            throw new CorruptSessionException("usage event has no active request: " + requestId);
+        }
+        JsonNode value = payload == null ? null : payload.get("usage");
+        if (value == null || value.isNull()) {
+            throw new CorruptSessionException("provider usage event has no usage");
+        }
+        try {
+            MeasuredUsage usage = new MeasuredUsage(
+                    value.path("inputTokens").asInt(), value.path("outputTokens").asInt(),
+                    value.path("cachedInputTokens").asInt(),
+                    MeasuredUsage.InputScope.valueOf(requiredText(value, "inputScope")),
+                    value.path("includesTools").asBoolean(), value.path("includesSystem").asBoolean(),
+                    value.path("trusted").asBoolean(),
+                    Instant.ofEpochMilli(value.path("measuredAtEpochMilli").asLong()));
+            state.requestUsages.put(requestId, new SessionProjection.MeasuredUsageFact(
+                    requestId, text(payload, "provider"), text(payload, "model"), usage));
+        } catch (RuntimeException e) {
+            throw new CorruptSessionException("invalid provider usage for request " + requestId, e);
         }
     }
 
@@ -224,10 +279,13 @@ public final class SessionReplayer {
         private final Set<String> incompleteRequests = new LinkedHashSet<>();
         private final Map<String, SessionProjection.PendingToolInvocation> pendingTools = new LinkedHashMap<>();
         private final Map<String, List<SessionEvent>> compactions = new LinkedHashMap<>();
+        private final Map<String, List<SessionEvent>> requestAssistants = new LinkedHashMap<>();
+        private final Map<String, SessionProjection.MeasuredUsageFact> requestUsages = new LinkedHashMap<>();
         private final List<String> warnings = new ArrayList<>();
         private long lastAppliedSequence = -1;
         private long historyVersion;
         private long compactionGeneration;
+        private SessionProjection.MeasuredUsageFact lastCompletedUsage;
         private boolean cleanlyClosed;
 
         private MutableProjection(boolean cleanlyClosed) {
@@ -236,7 +294,7 @@ public final class SessionReplayer {
 
         private SessionProjection freeze() {
             return new SessionProjection(surface, lastAppliedSequence, historyVersion,
-                    compactionGeneration, null, incompleteRequests, pendingTools,
+                    compactionGeneration, lastCompletedUsage, incompleteRequests, pendingTools,
                     cleanlyClosed, warnings);
         }
     }

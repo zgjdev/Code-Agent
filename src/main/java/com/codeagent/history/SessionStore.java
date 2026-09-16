@@ -93,7 +93,15 @@ public final class SessionStore implements AutoCloseable {
                     "session workspace does not match: expected " + manifest.workspace()
                             + " but got " + expectedWorkspace);
         }
-        return openHandle(directory, manifest, null, "incomplete final line ignored during recovery");
+        SessionHandle handle = openHandle(
+                directory, manifest, null, "incomplete final line ignored during recovery");
+        try {
+            handle.recoverInterruptedState();
+            return handle;
+        } catch (Exception e) {
+            handle.close();
+            throw e;
+        }
     }
 
     public Optional<SessionSummary> latestUnclosed(Path workspace) throws IOException {
@@ -363,6 +371,7 @@ public final class SessionStore implements AutoCloseable {
         private final List<SessionEvent> events;
         private SessionManifest manifest;
         private SessionProjection projection;
+        private SessionResumeResult resumeResult;
         private boolean released;
 
         private SessionHandle(Path directory, SessionManifest manifest, List<SessionEvent> events,
@@ -373,6 +382,8 @@ public final class SessionStore implements AutoCloseable {
             this.projection = projection;
             this.lockChannel = lockChannel;
             this.lock = lock;
+            this.resumeResult = new SessionResumeResult(
+                    manifest.sessionId(), false, 0, 0, projection.warnings());
         }
 
         public String sessionId() {
@@ -385,6 +396,48 @@ public final class SessionStore implements AutoCloseable {
 
         public SessionProjection projection() {
             return projection;
+        }
+
+        public SessionResumeResult resumeResult() {
+            return resumeResult;
+        }
+
+        private void recoverInterruptedState() throws IOException {
+            List<String> requestIds = List.copyOf(projection.incompleteRequestIds());
+            List<SessionProjection.PendingToolInvocation> pendingTools =
+                    List.copyOf(projection.pendingTools().values());
+            boolean interrupted = !requestIds.isEmpty() || !pendingTools.isEmpty();
+            if (!interrupted) {
+                return;
+            }
+            ObjectNode interrupt = JSON.createObjectNode()
+                    .put("incompleteRequests", requestIds.size())
+                    .put("pendingTools", pendingTools.size());
+            append(new SessionEventDraft(SessionEvent.Types.SESSION_INTERRUPT,
+                    "react", "session", "resume", false,
+                    SessionEvent.SurfaceOperation.none(), interrupt));
+            for (String requestId : requestIds) {
+                ObjectNode failed = JSON.createObjectNode()
+                        .put("requestId", requestId)
+                        .put("reason", "interrupted before recovery");
+                append(new SessionEventDraft(SessionEvent.Types.REQUEST_FAILED,
+                        "react", "session", "resume", false,
+                        SessionEvent.SurfaceOperation.none(), failed));
+            }
+            for (SessionProjection.PendingToolInvocation pending : pendingTools) {
+                String content = "Tool call was interrupted before completion and was not retried: "
+                        + pending.name();
+                ObjectNode result = JSON.createObjectNode()
+                        .put("invocationId", pending.invocationId())
+                        .put("status", "interrupted");
+                result.set("message", JSON.valueToTree(
+                        com.codeagent.llm.LlmClient.Message.tool(pending.invocationId(), content)));
+                append(new SessionEventDraft(SessionEvent.Types.TOOL_RESULT,
+                        "react", "session", "resume", false,
+                        SessionEvent.SurfaceOperation.append(), result));
+            }
+            resumeResult = new SessionResumeResult(manifest.sessionId(), true,
+                    requestIds.size(), pendingTools.size(), projection.warnings());
         }
 
         public synchronized SessionEvent append(SessionEventDraft draft) throws IOException {

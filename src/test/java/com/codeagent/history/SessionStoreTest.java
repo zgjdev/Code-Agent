@@ -135,6 +135,42 @@ class SessionStoreTest {
         }
     }
 
+    @Test
+    void resumeClosesInterruptedRequestsAndPairsPendingToolCalls() throws Exception {
+        Path workspace = Files.createDirectory(tempDir.resolve("workspace"));
+        String id;
+        try (SessionStore store = SessionStore.open(tempDir);
+             SessionStore.SessionHandle handle = store.create(request(workspace))) {
+            id = handle.sessionId();
+            handle.append(lifecycle(SessionEvent.Types.REQUEST_STARTED, "request-1"));
+            ObjectNode assistant = JSON.createObjectNode().put("requestId", "request-1");
+            assistant.set("message", JSON.valueToTree(LlmClient.Message.assistant(
+                    "calling", List.of(new LlmClient.ToolCall("call-1",
+                            new LlmClient.ToolCall.Function("write_file", "{}"))))));
+            handle.append(new SessionEventDraft(SessionEvent.Types.ASSISTANT_MESSAGE,
+                    "react", "agent", "test", false,
+                    SessionEvent.SurfaceOperation.append(), assistant));
+            handle.append(lifecycle(SessionEvent.Types.REQUEST_FINISHED, "request-1"));
+            ObjectNode tool = JSON.createObjectNode().put("invocationId", "call-1")
+                    .put("name", "write_file").put("arguments", "{}");
+            handle.append(new SessionEventDraft(SessionEvent.Types.TOOL_CALL,
+                    "react", "agent", "test", false,
+                    SessionEvent.SurfaceOperation.none(), tool));
+            handle.append(lifecycle(SessionEvent.Types.REQUEST_STARTED, "request-2"));
+        }
+
+        try (SessionStore store = SessionStore.open(tempDir);
+             SessionStore.SessionHandle resumed = store.resumeWritable(id, workspace)) {
+            assertTrue(resumed.projection().incompleteRequestIds().isEmpty());
+            assertTrue(resumed.projection().pendingTools().isEmpty());
+            assertEquals(List.of("assistant", "tool"), resumed.projection().messages().stream()
+                    .map(LlmClient.Message::role).toList());
+            assertTrue(resumed.projection().messages().get(1).content().contains("not retried"));
+            assertTrue(resumed.resumeResult().interrupted());
+            assertEquals(1, resumed.resumeResult().recoveredToolCalls());
+        }
+    }
+
     private SessionStore.SessionCreateRequest request(Path workspace) {
         return new SessionStore.SessionCreateRequest(workspace, "deepseek", "deepseek-chat",
                 null, "react", "agent");
@@ -145,5 +181,11 @@ class SessionStoreTest {
         payload.set("message", JSON.valueToTree(LlmClient.Message.user(text)));
         return new SessionEventDraft(SessionEvent.Types.USER_MESSAGE, "react", "agent", "test",
                 false, SessionEvent.SurfaceOperation.append(), payload);
+    }
+
+    private SessionEventDraft lifecycle(String type, String requestId) {
+        return new SessionEventDraft(type, "react", "agent", "test", false,
+                SessionEvent.SurfaceOperation.none(),
+                JSON.createObjectNode().put("requestId", requestId));
     }
 }

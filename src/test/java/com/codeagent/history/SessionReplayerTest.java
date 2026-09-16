@@ -1,6 +1,7 @@
 package com.codeagent.history;
 
 import com.codeagent.llm.LlmClient;
+import com.codeagent.context.MeasuredUsage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -94,6 +95,39 @@ class SessionReplayerTest {
         assertTrue(projection.incompleteRequestIds().contains("request-1"));
         assertTrue(projection.pendingTools().containsKey("call-1"));
         assertFalse(projection.cleanlyClosed());
+    }
+
+    @Test
+    void commitsAssistantAndUsageOnlyAfterRequestFinishes() {
+        ObjectNode started = JSON.createObjectNode().put("requestId", "request-1");
+        ObjectNode assistant = JSON.createObjectNode().put("requestId", "request-1");
+        assistant.set("message", JSON.valueToTree(LlmClient.Message.assistant("answer")));
+        ObjectNode usage = JSON.createObjectNode()
+                .put("requestId", "request-1")
+                .put("provider", "deepseek")
+                .put("model", "deepseek-chat");
+        ObjectNode measured = usage.putObject("usage");
+        measured.put("inputTokens", 100).put("outputTokens", 20).put("cachedInputTokens", 0)
+                .put("inputScope", MeasuredUsage.InputScope.TOTAL_PROMPT.name())
+                .put("includesTools", true).put("includesSystem", true).put("trusted", true)
+                .put("measuredAtEpochMilli", 1_767_225_600_000L);
+
+        SessionProjection incomplete = replay(
+                event(0, SessionEvent.Types.REQUEST_STARTED, SessionEvent.SurfaceOperation.none(), started),
+                event(1, SessionEvent.Types.ASSISTANT_MESSAGE, SessionEvent.SurfaceOperation.append(), assistant),
+                event(2, SessionEvent.Types.PROVIDER_USAGE, SessionEvent.SurfaceOperation.none(), usage));
+        assertTrue(incomplete.messages().isEmpty());
+        assertEquals(null, incomplete.lastCompletedUsage());
+
+        ObjectNode finished = JSON.createObjectNode().put("requestId", "request-1");
+        SessionProjection complete = replay(
+                event(0, SessionEvent.Types.REQUEST_STARTED, SessionEvent.SurfaceOperation.none(), started),
+                event(1, SessionEvent.Types.ASSISTANT_MESSAGE, SessionEvent.SurfaceOperation.append(), assistant),
+                event(2, SessionEvent.Types.PROVIDER_USAGE, SessionEvent.SurfaceOperation.none(), usage),
+                event(3, SessionEvent.Types.REQUEST_FINISHED, SessionEvent.SurfaceOperation.none(), finished));
+        assertEquals(List.of("answer"),
+                complete.messages().stream().map(LlmClient.Message::content).toList());
+        assertEquals(120, complete.lastCompletedUsage().usage().usageAnchorTokens());
     }
 
     @Test

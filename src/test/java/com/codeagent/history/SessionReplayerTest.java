@@ -163,7 +163,7 @@ class SessionReplayerTest {
 
     private SessionManifest manifest() {
         return new SessionManifest(SessionEvent.CURRENT_SCHEMA_VERSION, SESSION_ID, "C:\\workspace",
-                null, null, 1, 1, null, false, -1, false, null);
+                null, null, 1, 1, null, "react", "agent", false, -1, false, null);
     }
 
     private SessionEvent message(long sequence, String type, LlmClient.Message message,

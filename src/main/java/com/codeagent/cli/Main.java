@@ -1324,6 +1324,7 @@ public class Main {
                 System.out
         );
         planAgent.setConversationLedger(reactAgent.getConversationLedger());
+        planAgent.setParentSession(reactAgent.getSessionHandle());
         return planAgent;
     }
 
@@ -1338,6 +1339,7 @@ public class Main {
                 out
         );
         planAgent.setConversationLedger(reactAgent.getConversationLedger());
+        planAgent.setParentSession(reactAgent.getSessionHandle());
         return planAgent;
     }
 
@@ -1346,6 +1348,7 @@ public class Main {
         AgentOrchestrator orchestrator =
                 new AgentOrchestrator(llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
         orchestrator.setConversationLedger(reactAgent.getConversationLedger());
+        orchestrator.setParentSession(reactAgent.getSessionHandle());
         return orchestrator;
     }
 

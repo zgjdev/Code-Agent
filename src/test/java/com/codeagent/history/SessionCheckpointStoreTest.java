@@ -112,6 +112,6 @@ class SessionCheckpointStoreTest {
 
     private SessionManifest manifest(String id) {
         return new SessionManifest(2, id, tempDir.toString(), null, null,
-                1, 1, null, false, -1, false, null);
+                1, 1, null, "react", "agent", false, -1, false, null);
     }
 }

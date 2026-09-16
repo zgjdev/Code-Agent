@@ -2,7 +2,11 @@ package com.codeagent.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.codeagent.history.ConversationLedger;
+import com.codeagent.history.SessionEvent;
+import com.codeagent.history.SessionEventDraft;
+import com.codeagent.history.SessionStore;
 import com.codeagent.context.ContextTokenTracker;
 import com.codeagent.context.InvalidationReason;
 import com.codeagent.context.RequestSnapshot;
@@ -62,6 +66,8 @@ public class SubAgent {
     private final RequestSnapshotFactory requestSnapshotFactory = new RequestSnapshotFactory();
     private long historyVersion;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
+    private SessionStore.SessionHandle parentSession;
+    private final ThreadLocal<SessionStore.SessionHandle> childSession = new ThreadLocal<>();
     private TurnToolPolicy turnToolPolicy;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
 
@@ -102,6 +108,10 @@ public class SubAgent {
             this.conversationLedger.appendMessage(
                     "team", name, "session_attach", conversationHistory.get(0));
         }
+    }
+
+    public void setParentSession(SessionStore.SessionHandle parentSession) {
+        this.parentSession = parentSession;
     }
 
     public void setTurnToolPolicy(TurnToolPolicy turnToolPolicy) {
@@ -205,6 +215,7 @@ public class SubAgent {
             historyVersion++;
             conversationLedger.appendMessage(
                     "team", name, "system_prompt_refresh", systemMessage);
+            persistChildMessage(systemMessage, "system_prompt_refresh");
         }
     }
 
@@ -258,6 +269,32 @@ public class SubAgent {
     /** Caller-owned branch policy; the same instance may span reviewer retries. */
     AgentMessage executeWithPolicy(AgentMessage task, PrintStream out,
                                    TurnToolPolicy activeToolPolicy) {
+        if (parentSession == null) {
+            return executeWithPolicyCore(task, out, activeToolPolicy);
+        }
+        SessionStore.SessionHandle child = null;
+        AgentMessage result = null;
+        try {
+            child = parentSession.createChild("team", name);
+            childSession.set(child);
+            result = executeWithPolicyCore(task, out, activeToolPolicy);
+            parentSession.recordChildResult(child, result.content(), result.type().name().toLowerCase());
+            child.markClosed("completed");
+            return result;
+        } catch (IOException e) {
+            throw new IllegalStateException("unable to persist child session for " + name, e);
+        } finally {
+            childSession.remove();
+            if (child != null) {
+                try { child.close(); } catch (IOException closeError) {
+                    log.warn("[{}] failed to close child session", name, closeError);
+                }
+            }
+        }
+    }
+
+    private AgentMessage executeWithPolicyCore(AgentMessage task, PrintStream out,
+                                                TurnToolPolicy activeToolPolicy) {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
         Objects.requireNonNull(activeToolPolicy, "activeToolPolicy");
         pruneHistoricalImagePayloads();
@@ -353,7 +390,9 @@ public class SubAgent {
                 }
 
                 // 没有工具调用，返回最终结果
-                conversationHistory.add(LlmClient.Message.assistant(response.content()));
+                LlmClient.Message finalMessage = LlmClient.Message.assistant(
+                        response.reasoningContent(), response.content());
+                conversationHistory.add(finalMessage);
                 historyVersion++;
                 conversationLedger.appendMessage(
                         "team",
@@ -362,6 +401,7 @@ public class SubAgent {
                         LlmClient.Message.assistant(
                                 response.reasoningContent(),
                                 response.content()));
+                persistChildMessage(finalMessage, "llm_response");
 
                 streamRenderer.finish();
 
@@ -405,6 +445,8 @@ public class SubAgent {
                     name,
                     "budget_finalization_response",
                     LlmClient.Message.assistant(response.reasoningContent(), partialResult));
+            persistChildMessage(LlmClient.Message.assistant(response.reasoningContent(), partialResult),
+                    "budget_finalization_response");
             streamRenderer.finish();
             return AgentMessage.result(name, role, partialResult);
         } catch (IOException e) {
@@ -570,6 +612,29 @@ public class SubAgent {
         conversationHistory.add(message);
         historyVersion++;
         conversationLedger.appendMessage("team", name, source, message);
+        persistChildMessage(message, source);
+    }
+
+    private void persistChildMessage(LlmClient.Message message, String source) {
+        SessionStore.SessionHandle child = childSession.get();
+        if (child == null || message == null) return;
+        String type = switch (message.role()) {
+            case "system" -> SessionEvent.Types.SYSTEM_MESSAGE;
+            case "assistant" -> SessionEvent.Types.ASSISTANT_MESSAGE;
+            case "tool" -> SessionEvent.Types.TOOL_RESULT;
+            default -> SessionEvent.Types.USER_MESSAGE;
+        };
+        ObjectNode payload = JSON_MAPPER.createObjectNode().put("source", source);
+        payload.set("message", JSON_MAPPER.valueToTree(message));
+        if ("tool".equals(message.role())) {
+            payload.put("invocationId", message.toolCallId() == null ? "unknown" : message.toolCallId());
+        }
+        try {
+            child.append(new SessionEventDraft(type, "team", name, source, false,
+                    SessionEvent.SurfaceOperation.append(), payload));
+        } catch (IOException e) {
+            throw new IllegalStateException("unable to append child message", e);
+        }
     }
 
     private static void printToolCalls(PrintStream out, List<LlmClient.ToolCall> toolCalls) {

@@ -40,7 +40,8 @@ public final class SessionReplayer {
             SessionEvent.Types.COMPACTION_END,
             SessionEvent.Types.RETRY_START,
             SessionEvent.Types.RETRY_END,
-            SessionEvent.Types.LEGACY_EVENT);
+            SessionEvent.Types.LEGACY_EVENT,
+            SessionEvent.Types.CHILD_RESULT);
 
     public SessionProjection replay(SessionManifest manifest, List<SessionEvent> events) {
         if (manifest == null) {

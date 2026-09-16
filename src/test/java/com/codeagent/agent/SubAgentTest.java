@@ -1,15 +1,19 @@
 package com.codeagent.agent;
 
+import com.codeagent.history.SessionStore;
 import com.codeagent.llm.GLMClient;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.tool.ToolRegistry;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -18,6 +22,28 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SubAgentTest {
+
+    @Test
+    void executionUsesAChildSessionAndRecordsItsResult(@TempDir Path tempDir) throws Exception {
+        Path workspace = Files.createDirectory(tempDir.resolve("workspace"));
+        try (SessionStore store = SessionStore.open(tempDir);
+             SessionStore.SessionHandle parent = store.create(new SessionStore.SessionCreateRequest(
+                     workspace, "glm", "test", null, "react", "agent"))) {
+            SubAgent worker = new SubAgent("worker", AgentRole.WORKER,
+                    new ScriptedStreamClient(listener -> listener.onContentDelta("done")), new ToolRegistry());
+            worker.setParentSession(parent);
+
+            worker.execute(AgentMessage.task("orchestrator", "task"),
+                    new PrintStream(new ByteArrayOutputStream()));
+
+            var child = store.list(workspace, 20).stream()
+                    .filter(summary -> !summary.sessionId().equals(parent.sessionId())).findFirst().orElseThrow();
+            assertTrue(child.closed());
+            assertTrue(parent.readAll().stream().anyMatch(event ->
+                    event.payload() != null && child.sessionId().equals(
+                            event.payload().path("childSessionId").asText())));
+        }
+    }
 
     @Test
     void shouldOnlyEnableToolsForWorker() throws Exception {

@@ -149,6 +149,10 @@ public class Agent {
         }
     }
 
+    public SessionStore.SessionHandle getSessionHandle() {
+        return sessionHandle;
+    }
+
     public void setLlmClient(LlmClient llmClient) {
         this.llmClient = llmClient;
         this.contextTokenTracker.invalidate(InvalidationReason.PROVIDER_CHANGED);

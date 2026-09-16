@@ -53,6 +53,7 @@ public record SessionEvent(
         public static final String RETRY_START = "retry/start";
         public static final String RETRY_END = "retry/end";
         public static final String LEGACY_EVENT = "legacy/event";
+        public static final String CHILD_RESULT = "child/result";
 
         private Types() {
         }

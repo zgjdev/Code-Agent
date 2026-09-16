@@ -172,6 +172,27 @@ class SessionStoreTest {
         }
     }
 
+    @Test
+    void createsIsolatedChildSessionsAndRecordsResultOnParent() throws Exception {
+        Path workspace = Files.createDirectory(tempDir.resolve("workspace-child"));
+        try (SessionStore store = SessionStore.open(tempDir);
+             SessionStore.SessionHandle parent = store.create(request(workspace));
+             SessionStore.SessionHandle first = parent.createChild("team", "worker-1");
+             SessionStore.SessionHandle second = parent.createChild("team", "worker-2")) {
+            assertEquals(parent.sessionId(), first.manifest().parentSessionId());
+            assertEquals(parent.sessionId(), second.manifest().parentSessionId());
+            assertFalse(first.sessionId().equals(second.sessionId()));
+
+            parent.recordChildResult(first, "done", "completed");
+
+            assertTrue(parent.readAll().stream().anyMatch(event ->
+                    SessionEvent.Types.CHILD_RESULT.equals(event.type())
+                            && first.sessionId().equals(event.payload().path("childSessionId").asText())));
+            assertTrue(parent.projection().messages().isEmpty(),
+                    "child audit metadata must not merge child history into parent surface");
+        }
+    }
+
     private SessionStore.SessionCreateRequest request(Path workspace) {
         return new SessionStore.SessionCreateRequest(workspace, "deepseek", "deepseek-chat",
                 null, "react", "agent");

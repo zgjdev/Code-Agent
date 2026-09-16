@@ -66,7 +66,8 @@ public final class SessionStore implements AutoCloseable {
         SessionManifest manifest = new SessionManifest(
                 SessionEvent.CURRENT_SCHEMA_VERSION, sessionId, workspace.toString(),
                 normalize(request.provider()), normalize(request.model()), now, now,
-                normalize(request.parentSessionId()), false, -1, false, null);
+                normalize(request.parentSessionId()), normalize(request.mode()), normalize(request.actor()),
+                false, -1, false, null);
         writeManifest(directory, manifest);
 
         SessionHandle handle = openHandle(directory, manifest, List.of(), null);
@@ -89,7 +90,8 @@ public final class SessionStore implements AutoCloseable {
         handle.manifest = new SessionManifest(handle.manifest.schemaVersion(), handle.manifest.sessionId(),
                 handle.manifest.workspace(), handle.manifest.provider(), handle.manifest.model(),
                 handle.manifest.createdAt(), handle.manifest.updatedAt(), handle.manifest.parentSessionId(),
-                handle.manifest.closed(), handle.manifest.lastEventSequence(), resumeUnsafe, sourceSha256);
+                handle.manifest.mode(), handle.manifest.actor(), handle.manifest.closed(),
+                handle.manifest.lastEventSequence(), resumeUnsafe, sourceSha256);
         writeManifest(handle.directory, handle.manifest);
         return handle;
     }
@@ -334,7 +336,7 @@ public final class SessionStore implements AutoCloseable {
                                              long sequence, long updatedAt) {
         return new SessionManifest(manifest.schemaVersion(), manifest.sessionId(),
                 manifest.workspace(), manifest.provider(), manifest.model(), manifest.createdAt(),
-                updatedAt, manifest.parentSessionId(), closed, sequence,
+                updatedAt, manifest.parentSessionId(), manifest.mode(), manifest.actor(), closed, sequence,
                 manifest.resumeUnsafe(), manifest.legacySourceSha256());
     }
 
@@ -450,6 +452,31 @@ public final class SessionStore implements AutoCloseable {
 
         public SessionResumeResult resumeResult() {
             return resumeResult;
+        }
+
+        public synchronized List<SessionEvent> readAll() {
+            return List.copyOf(events);
+        }
+
+        public SessionHandle createChild(String mode, String actor) throws IOException {
+            return SessionStore.this.create(new SessionCreateRequest(Path.of(manifest.workspace()),
+                    manifest.provider(), manifest.model(), manifest.sessionId(), mode, actor));
+        }
+
+        public void recordChildResult(SessionHandle child, String result, String status) throws IOException {
+            Objects.requireNonNull(child, "child");
+            if (!manifest.sessionId().equals(child.manifest.parentSessionId())) {
+                throw new IllegalArgumentException("child session does not belong to parent");
+            }
+            ObjectNode payload = JSON.createObjectNode()
+                    .put("childSessionId", child.sessionId())
+                    .put("mode", child.manifest.mode())
+                    .put("actor", child.manifest.actor())
+                    .put("status", status == null ? "unknown" : status)
+                    .put("result", result == null ? "" : result);
+            append(new SessionEventDraft(SessionEvent.Types.CHILD_RESULT,
+                    child.manifest.mode(), child.manifest.actor(), "child_result", true,
+                    SessionEvent.SurfaceOperation.none(), payload));
         }
 
         private void recoverInterruptedState() throws IOException {

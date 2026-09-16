@@ -13,6 +13,8 @@ public record SessionManifest(
         long createdAt,
         long updatedAt,
         String parentSessionId,
+        String mode,
+        String actor,
         boolean closed,
         long lastEventSequence,
         boolean resumeUnsafe,

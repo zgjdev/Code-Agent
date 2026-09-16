@@ -3,6 +3,7 @@ package com.codeagent.agent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.codeagent.history.ConversationLedger;
+import com.codeagent.history.SessionStore;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.memory.MemoryManager;
 import com.codeagent.runtime.CancellationContext;
@@ -55,6 +56,7 @@ public class AgentOrchestrator {
     private final ToolRegistry toolRegistry;
     private final PrintStream out;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
+    private SessionStore.SessionHandle parentSession;
     private Supplier<String> externalContextSupplier = () -> "";
 
     // 执行步骤的数据结构（package-private 供测试访问）
@@ -140,9 +142,13 @@ public class AgentOrchestrator {
         this.conversationLedger = conversationLedger == null
                 ? ConversationLedger.disabled()
                 : conversationLedger;
-        planner.setConversationLedger(this.conversationLedger);
-        workers.forEach(worker -> worker.setConversationLedger(this.conversationLedger));
-        reviewer.setConversationLedger(this.conversationLedger);
+    }
+
+    public void setParentSession(SessionStore.SessionHandle parentSession) {
+        this.parentSession = parentSession;
+        planner.setParentSession(parentSession);
+        workers.forEach(worker -> worker.setParentSession(parentSession));
+        reviewer.setParentSession(parentSession);
     }
 
     /**
@@ -474,7 +480,7 @@ public class AgentOrchestrator {
                 SubAgent worker = null;
                 SubAgent localReviewer = new SubAgent(
                         "reviewer-" + step.id(), AgentRole.REVIEWER, llmClient, toolRegistry);
-                localReviewer.setConversationLedger(conversationLedger);
+                localReviewer.setParentSession(parentSession);
                 try {
                     worker = workerPool.take();
                     runStep(step, steps, retryCount, worker, localReviewer, context, stepOut,

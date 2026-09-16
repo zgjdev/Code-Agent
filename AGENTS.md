@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Durable session behavior
+
+Short-term context is persisted as `~/.codeagent/history/sessions/<session-id>/events.jsonl` and replayed into `conversationHistory`; checkpoints are disposable and hash-validated. Startup resumes the latest unfinished session in the current workspace unless `CODEAGENT_SESSION_RESUME=off`. `/sessions`, `/resume [last|<id>]`, and `/new` manage sessions. ReAct owns the root session; Plan tasks and Team agents write isolated child sessions and return explicit `child/result` events instead of sharing a concurrent writer.
+
 仓库给 Agent / 新线程使用的首读入口。详细行为描述见 `docs/agents-reference.md`。
 
 ## 信息优先级

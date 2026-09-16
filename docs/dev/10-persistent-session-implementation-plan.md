@@ -836,3 +836,4 @@ git commit -m "docs: document persistent session recovery"
 - 对日志内容做透明加密；第一版沿用本机权限隔离，后续可单独设计 OS keychain 加密。
 - 从旧 `compaction` 元数据反推出已丢失的摘要文本。
 - 跨 workspace 静默恢复；跨项目恢复必须由后续显式导入/确认功能处理。
+\n> Implementation status: Tasks 1-7 are now implemented in the persistent-sessions worktree. The remaining acceptance work is regression verification and documentation maintenance; do not interpret the historical "not implemented" boundary text below as current code state.

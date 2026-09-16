@@ -130,6 +130,7 @@ class SessionStoreTest {
             assertEquals(handle.sessionId(), store.latestUnclosed(workspace).orElseThrow().sessionId());
             handle.markClosed("exit");
             assertFalse(store.latestUnclosed(workspace).isPresent());
+            assertEquals(handle.sessionId(), store.latest(workspace).orElseThrow().sessionId());
             assertTrue(store.list(workspace, 20).get(0).closed());
             assertTrue(handle.projection().cleanlyClosed());
         }

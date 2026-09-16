@@ -116,20 +116,37 @@ public class Agent {
 
     /** Attaches either a new durable session or a projection restored from disk. */
     public void attachSession(SessionStore.SessionHandle handle) throws IOException {
-        this.sessionHandle = Objects.requireNonNull(handle, "handle");
-        SessionProjection projection = handle.projection();
-        if (projection.messages().isEmpty()) {
-            LlmClient.Message system = conversationHistory.get(0);
-            persistMessage(system, SessionEvent.Types.SYSTEM_MESSAGE,
-                    SessionEvent.SurfaceOperation.append(), null);
-            historyVersion = handle.projection().historyVersion();
-            conversationLedger.appendMessage("react", "agent", "session_attach", system);
-        } else {
+        SessionStore.SessionHandle next = Objects.requireNonNull(handle, "handle");
+        SessionStore.SessionHandle previous = this.sessionHandle;
+        List<LlmClient.Message> previousHistory = new ArrayList<>(conversationHistory);
+        long previousVersion = historyVersion;
+        this.sessionHandle = next;
+        try {
+            SessionProjection projection = next.projection();
+            if (projection.messages().isEmpty()) {
+                LlmClient.Message system = LlmClient.Message.system(buildSystemPrompt(""));
+                persistMessage(system, SessionEvent.Types.SYSTEM_MESSAGE,
+                        SessionEvent.SurfaceOperation.append(), null);
+                conversationHistory.clear();
+                conversationHistory.add(system);
+                historyVersion = next.projection().historyVersion();
+                conversationLedger.appendMessage("react", "agent", "session_attach", system);
+            } else {
+                conversationHistory.clear();
+                conversationHistory.addAll(projection.messages());
+                historyVersion = projection.historyVersion();
+            }
+            contextTokenTracker.invalidate(InvalidationReason.SESSION_RESTORED);
+        } catch (RuntimeException e) {
+            this.sessionHandle = previous;
             conversationHistory.clear();
-            conversationHistory.addAll(projection.messages());
-            historyVersion = projection.historyVersion();
+            conversationHistory.addAll(previousHistory);
+            historyVersion = previousVersion;
+            if (e.getCause() instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw e;
         }
-        contextTokenTracker.invalidate(InvalidationReason.SESSION_RESTORED);
     }
 
     public void setLlmClient(LlmClient llmClient) {

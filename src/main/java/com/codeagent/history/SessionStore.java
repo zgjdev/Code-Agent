@@ -108,6 +108,10 @@ public final class SessionStore implements AutoCloseable {
         return list(workspace, Integer.MAX_VALUE).stream().filter(summary -> !summary.closed()).findFirst();
     }
 
+    public Optional<SessionSummary> latest(Path workspace) throws IOException {
+        return list(workspace, 1).stream().findFirst();
+    }
+
     public List<SessionSummary> list(Path workspace, int limit) throws IOException {
         if (limit <= 0 || Files.notExists(sessionsDirectory)) {
             return List.of();

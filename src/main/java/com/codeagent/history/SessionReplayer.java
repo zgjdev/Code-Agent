@@ -128,7 +128,8 @@ public final class SessionReplayer {
             case SessionEvent.Types.SESSION_END -> state.cleanlyClosed = true;
             case SessionEvent.Types.SYSTEM_MESSAGE,
                  SessionEvent.Types.USER_MESSAGE,
-                 SessionEvent.Types.ASSISTANT_MESSAGE -> applySurface(state, event);
+                 SessionEvent.Types.ASSISTANT_MESSAGE,
+                 SessionEvent.Types.IMAGE_PRUNED -> applySurface(state, event);
             case SessionEvent.Types.SURFACE_CLEAR -> applySurface(state, event);
             default -> {
                 // Lifecycle and diagnostic events do not directly change the active surface.
@@ -189,8 +190,18 @@ public final class SessionReplayer {
         if (!"completed".equals(text(event.payload(), "status"))) {
             return;
         }
+        int insertionIndex = -1;
         for (SessionEvent stagedEvent : staged) {
-            applySurface(state, stagedEvent);
+            if ("replace".equals(stagedEvent.surface().op())) {
+                Long startSequence = stagedEvent.surface().startSequence();
+                applySurface(state, stagedEvent);
+                insertionIndex = indexOf(state.surface, stagedEvent.sequence()) + 1;
+            } else if ("append".equals(stagedEvent.surface().op()) && insertionIndex >= 0) {
+                state.surface.add(insertionIndex++, messageNode(stagedEvent));
+                state.historyVersion++;
+            } else {
+                applySurface(state, stagedEvent);
+            }
         }
         state.compactionGeneration++;
     }
@@ -251,7 +262,8 @@ public final class SessionReplayer {
         return SessionEvent.Types.SYSTEM_MESSAGE.equals(type)
                 || SessionEvent.Types.USER_MESSAGE.equals(type)
                 || SessionEvent.Types.ASSISTANT_MESSAGE.equals(type)
-                || SessionEvent.Types.TOOL_RESULT.equals(type);
+                || SessionEvent.Types.TOOL_RESULT.equals(type)
+                || SessionEvent.Types.IMAGE_PRUNED.equals(type);
     }
 
     private static String requiredText(JsonNode payload, String field) {

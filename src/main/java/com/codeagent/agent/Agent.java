@@ -456,12 +456,19 @@ public class Agent {
                 "agent",
                 "slash_clear",
                 java.util.Map.of("discardedViewMessages", conversationHistory.size()));
+        LlmClient.Message freshSystem = LlmClient.Message.system(buildSystemPrompt(""));
+        if (sessionHandle != null) {
+            persistEvent(SessionEvent.Types.SURFACE_CLEAR,
+                    SessionEvent.SurfaceOperation.clear(), JSON.createObjectNode());
+            persistMessage(freshSystem, SessionEvent.Types.SYSTEM_MESSAGE,
+                    SessionEvent.SurfaceOperation.append(), null);
+        }
         conversationHistory.clear();
         historyVersion++;
         contextTokenTracker.invalidate(InvalidationReason.CLEAR);
-        appendConversationMessage(
-                LlmClient.Message.system(buildSystemPrompt("")),
-                "history_reset");
+        conversationHistory.add(freshSystem);
+        historyVersion++;
+        conversationLedger.appendMessage("react", "agent", "history_reset", freshSystem);
 
         if (skillContextBuffer != null) {
             skillContextBuffer.clear();
@@ -475,8 +482,10 @@ public class Agent {
         long beforeTokens = estimateCurrentContextTokens();
         int beforeMessages = conversationHistory.size();
         try {
-            AutoCompactionManager.Result result = autoCompactionManager.compactNow(conversationHistory);
+            List<LlmClient.Message> candidate = new ArrayList<>(conversationHistory);
+            AutoCompactionManager.Result result = autoCompactionManager.compactNow(candidate);
             if (result.compacted()) {
+                commitCompaction(candidate, "manual", beforeTokens);
                 recordCompaction("manual", beforeMessages, beforeTokens);
             }
             return new CompactionResult(result.compacted(), beforeTokens, estimateCurrentContextTokens(), null);
@@ -545,10 +554,12 @@ public class Agent {
             return false;
         }
         try {
+            List<LlmClient.Message> candidate = new ArrayList<>(conversationHistory);
             AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(
-                    conversationHistory, trigger, prediction.effectiveTokens());
+                    candidate, trigger, prediction.effectiveTokens());
             if (result.compacted()) {
-                historyVersion++;
+                commitCompaction(candidate,
+                        "automatic:" + result.strategy().name().toLowerCase(), beforeTokens);
                 contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
                 recordCompaction("automatic:" + result.strategy().name().toLowerCase(), beforeMessages, beforeTokens);
                 String strategy = result.strategy() == AutoCompactionManager.Strategy.SESSION_MEMORY
@@ -572,7 +583,13 @@ public class Agent {
             if (images <= 0) {
                 continue;
             }
-            conversationHistory.set(i, message.withoutImageContent());
+            LlmClient.Message pruned = message.withoutImageContent();
+            if (sessionHandle != null) {
+                long sequence = sessionHandle.projection().activeSurface().get(i).sequence();
+                persistMessage(pruned, SessionEvent.Types.IMAGE_PRUNED,
+                        SessionEvent.SurfaceOperation.replace(sequence, sequence), null);
+            }
+            conversationHistory.set(i, pruned);
             historyVersion++;
             contextTokenTracker.invalidate(InvalidationReason.IMAGE_PAYLOAD_PRUNED);
             messageCount++;
@@ -1183,6 +1200,78 @@ public class Agent {
                         "afterMessages", conversationHistory.size(),
                         "beforeTokens", beforeTokens,
                         "afterTokens", estimateCurrentContextTokens()));
+    }
+
+    private void commitCompaction(List<LlmClient.Message> candidate,
+                                  String source, long beforeTokens) {
+        if (candidate.equals(conversationHistory)) {
+            return;
+        }
+        if (sessionHandle == null) {
+            conversationHistory.clear();
+            conversationHistory.addAll(candidate);
+            historyVersion++;
+            contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
+            return;
+        }
+
+        int commonSuffix = commonSuffixLength(conversationHistory, candidate);
+        int removedEndIndex = conversationHistory.size() - commonSuffix - 1;
+        if (conversationHistory.size() < 2 || candidate.size() < commonSuffix + 3
+                || removedEndIndex < 1) {
+            throw new SessionPersistenceException("unsupported compaction shape", null);
+        }
+        List<SessionProjection.SurfaceNode> nodes = sessionHandle.projection().activeSurface();
+        long startSequence = nodes.get(1).sequence();
+        long endSequence = nodes.get(removedEndIndex).sequence();
+        String compactionId = UUID.randomUUID().toString();
+
+        ObjectNode start = JSON.createObjectNode()
+                .put("compactionId", compactionId)
+                .put("source", source)
+                .put("beforeTokens", beforeTokens);
+        persistEvent(SessionEvent.Types.COMPACTION_START,
+                SessionEvent.SurfaceOperation.none(), start);
+
+        ObjectNode summary = JSON.createObjectNode()
+                .put("compactionId", compactionId)
+                .put("afterTokens", com.codeagent.memory.TokenBudget.estimateMessagesTokens(candidate));
+        persistEvent(SessionEvent.Types.COMPACTION_SUMMARY,
+                SessionEvent.SurfaceOperation.none(), summary);
+
+        persistCompactionMessage(candidate.get(1), SessionEvent.Types.USER_MESSAGE,
+                SessionEvent.SurfaceOperation.replace(startSequence, endSequence), compactionId);
+        persistCompactionMessage(candidate.get(2), SessionEvent.Types.ASSISTANT_MESSAGE,
+                SessionEvent.SurfaceOperation.append(), compactionId);
+        ObjectNode end = JSON.createObjectNode()
+                .put("compactionId", compactionId)
+                .put("status", "completed");
+        persistEvent(SessionEvent.Types.COMPACTION_END,
+                SessionEvent.SurfaceOperation.none(), end);
+
+        conversationHistory.clear();
+        conversationHistory.addAll(sessionHandle.projection().messages());
+        historyVersion = sessionHandle.projection().historyVersion();
+        contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
+    }
+
+    private void persistCompactionMessage(LlmClient.Message message, String type,
+                                          SessionEvent.SurfaceOperation operation,
+                                          String compactionId) {
+        ObjectNode payload = JSON.createObjectNode().put("compactionId", compactionId);
+        payload.set("message", JSON.valueToTree(message));
+        persistEvent(type, operation, payload);
+    }
+
+    private static int commonSuffixLength(List<LlmClient.Message> before,
+                                          List<LlmClient.Message> after) {
+        int count = 0;
+        while (count < before.size() && count < after.size()
+                && before.get(before.size() - 1 - count)
+                .equals(after.get(after.size() - 1 - count))) {
+            count++;
+        }
+        return count;
     }
 
     private String formatUserFacingResponse(String reasoningContent, String answer) {

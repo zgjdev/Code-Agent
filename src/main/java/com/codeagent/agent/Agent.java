@@ -92,7 +92,7 @@ public class Agent {
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
         this.toolRegistry.setScopedMemorySaver(memoryManager::storeFact);
-        conversationHistory.add(LlmClient.Message.system(buildSystemPrompt("")));
+        conversationHistory.add(LlmClient.Message.system(buildSystemPrompt()));
     }
 
     /**
@@ -124,7 +124,7 @@ public class Agent {
         try {
             SessionProjection projection = next.projection();
             if (projection.messages().isEmpty()) {
-                LlmClient.Message system = LlmClient.Message.system(buildSystemPrompt(""));
+                LlmClient.Message system = LlmClient.Message.system(buildSystemPrompt());
                 persistMessage(system, SessionEvent.Types.SYSTEM_MESSAGE,
                         SessionEvent.SurfaceOperation.append(), null);
                 conversationHistory.clear();
@@ -222,13 +222,17 @@ public class Agent {
             pruneHistoricalImagePayloads();
             storeExplicitBrowserMemoryHint(userInput);
 
-            // 检索相关长期记忆，注入到 system prompt
+            // 检索相关长期记忆；结果注入本轮用户消息，不进 system prompt，
+            // 否则每轮变化的检索文本会中断 provider 的自动前缀缓存。
             ContextProfile contextProfile = memoryManager.getContextProfile();
             String memoryContext = memoryManager.buildContextForQuery(userInput, contextProfile.memoryContextTokens());
-            updateSystemPromptWithMemory(memoryContext);
+            refreshSystemPrompt();
 
-            // 添加用户输入到历史（如有 skill body 注入，前置到原文之前）
+            // 添加用户输入到历史（如有 skill body 注入，前置到原文之前；长期记忆追加到同一消息末尾）
             String userMessageContent = prependSkillBodies(userInput);
+            if (!memoryContext.isEmpty()) {
+                userMessageContent = userMessageContent + "\n\n" + memoryContext;
+            }
             appendConversationMessage(ImageReferenceParser.userMessage(
                     userMessageContent,
                     Path.of(toolRegistry.getProjectPath())), "user_input");
@@ -477,7 +481,7 @@ public class Agent {
                 "agent",
                 "slash_clear",
                 java.util.Map.of("discardedViewMessages", conversationHistory.size()));
-        LlmClient.Message freshSystem = LlmClient.Message.system(buildSystemPrompt(""));
+        LlmClient.Message freshSystem = LlmClient.Message.system(buildSystemPrompt());
         if (sessionHandle != null) {
             persistEvent(SessionEvent.Types.SURFACE_CLEAR,
                     SessionEvent.SurfaceOperation.clear(), JSON.createObjectNode());
@@ -533,10 +537,11 @@ public class Agent {
     }
 
     /**
-     * 将记忆上下文注入到 system prompt 中（替换 conversationHistory[0]）
+     * 刷新 system prompt（仅会话级稳定内容）。每轮检索到的长期记忆不在这里注入，
+     * 而是随本轮用户消息发送，以免每轮改写消息 0 而使整段历史的前缀缓存失效。
      */
-    private void updateSystemPromptWithMemory(String memoryContext) {
-        LlmClient.Message systemMessage = LlmClient.Message.system(buildSystemPrompt(memoryContext));
+    private void refreshSystemPrompt() {
+        LlmClient.Message systemMessage = LlmClient.Message.system(buildSystemPrompt());
         if (systemMessage.equals(conversationHistory.get(0))) {
             return;
         }
@@ -556,10 +561,9 @@ public class Agent {
                 "react", "agent", "memory_context_refresh", systemMessage);
     }
 
-    private String buildSystemPrompt(String memoryContext) {
+    private String buildSystemPrompt() {
         return promptAssembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .projectMemoryContext(buildProjectMemoryContext())
-                .memoryContext(memoryContext)
                 .externalContext(buildExternalContext())
                 .skillIndex(buildSkillIndex())
                 .toolsEnabled(llmClient == null || llmClient.supportsTools())

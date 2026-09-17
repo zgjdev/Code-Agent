@@ -35,12 +35,12 @@ public class PromptAssembler {
         append(prompt, repository.loadRequired("personalities/calm.md"));
         append(prompt, applyVariables(repository.loadRequired(mode.resourcePath()), ctx));
         append(prompt, repository.loadRequired("approvals/" + approvalMode(ctx) + ".md"));
-        append(prompt, runtimeContext());
-        append(prompt, dynamicSection("Project Context", ctx.projectMemoryContext(), ctx.memoryContext(),
-                ctx.externalContext()));
+        append(prompt, dynamicSection("Project Context", ctx.projectMemoryContext(), ctx.externalContext()));
         append(prompt, dynamicSection("Skills", ctx.skillIndex()));
         append(prompt, repository.loadRequired("context/context-management.md"));
         append(prompt, repository.loadRequired("handoff.md"));
+        // 运行时上下文（含当前日期）随自然日变化，放在末尾以缩小前缀缓存的失效半径。
+        append(prompt, runtimeContext());
 
         String assembled = prompt.toString().trim();
         validateLanguageSection(assembled, "assembled prompt");

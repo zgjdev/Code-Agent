@@ -36,8 +36,10 @@ class AgentClearHistoryTest {
 
             agent.run("CLEAR_MARKER");
 
-            assertTrue(llmClient.firstSystemPrompt().contains("CLEAR_MARKER"),
+            assertTrue(llmClient.firstUserMessage().contains("CLEAR_MARKER"),
                     "sanity check: the first turn should inject query-specific long-term memory");
+            assertFalse(llmClient.firstSystemPrompt().contains("CLEAR_MARKER"),
+                    "retrieved memory must stay out of the system prompt to keep the cache prefix stable");
             long beforeClearTokens = agent.currentStatus("idle").totalTokens();
 
             skillContextBuffer.push("demo", "pending skill body");
@@ -51,6 +53,42 @@ class AgentClearHistoryTest {
             assertEquals("", skillContextBuffer.drain(), "/clear should drop pending skill injection");
             assertTrue(agent.currentStatus("idle").totalTokens() < beforeClearTokens,
                     "status ctx should reflect the cleared conversation instead of the previous LLM usage");
+        } finally {
+            if (oldMemoryDir == null) {
+                System.clearProperty("codeagent.memory.dir");
+            } else {
+                System.setProperty("codeagent.memory.dir", oldMemoryDir);
+            }
+        }
+    }
+
+    @Test
+    void systemPromptStaysIdenticalAcrossTurnsWhileRetrievedMemoryVaries() {
+        String oldMemoryDir = System.getProperty("codeagent.memory.dir");
+        System.setProperty("codeagent.memory.dir", tempDir.toString());
+        try {
+            RecordingClient llmClient = new RecordingClient(List.of(
+                    new LlmClient.ChatResponse("assistant", "ok", null, 50_000, 1_000),
+                    new LlmClient.ChatResponse("assistant", "ok", null, 50_000, 1_000)
+            ));
+            Agent agent = new Agent(llmClient);
+            agent.getMemoryManager().storeFact("ALPHA_PROBE 检索探针：偏好 RETRIEVED_TABS 缩进", "project");
+            agent.getMemoryManager().storeFact("BETA_PROBE 检索探针：偏好 RETRIEVED_SPACES 缩进", "project");
+
+            agent.run("ALPHA_PROBE");
+            agent.run("BETA_PROBE");
+
+            assertEquals(llmClient.systemPromptOf(0), llmClient.systemPromptOf(1),
+                    "a per-turn memory rewrite of the system prompt would break the cache prefix");
+            assertTrue(llmClient.lastUserMessageOf(0).contains("RETRIEVED_TABS"),
+                    "the first turn must carry its own retrieved memory");
+            assertTrue(llmClient.lastUserMessageOf(1).contains("RETRIEVED_SPACES"),
+                    "the second turn must carry its own retrieved memory");
+
+            List<LlmClient.Message> firstRequest = llmClient.messagesOf(0);
+            List<LlmClient.Message> secondRequest = llmClient.messagesOf(1);
+            assertEquals(firstRequest, secondRequest.subList(0, firstRequest.size()),
+                    "the previous request must remain a verbatim cache prefix of the next one");
         } finally {
             if (oldMemoryDir == null) {
                 System.clearProperty("codeagent.memory.dir");
@@ -99,7 +137,27 @@ class AgentClearHistoryTest {
         }
 
         private String firstSystemPrompt() {
-            return capturedMessages.get(0).get(0).content();
+            return systemPromptOf(0);
+        }
+
+        private String firstUserMessage() {
+            return lastUserMessageOf(0);
+        }
+
+        private List<Message> messagesOf(int requestIndex) {
+            return capturedMessages.get(requestIndex);
+        }
+
+        private String systemPromptOf(int requestIndex) {
+            return capturedMessages.get(requestIndex).get(0).content();
+        }
+
+        private String lastUserMessageOf(int requestIndex) {
+            return capturedMessages.get(requestIndex).stream()
+                    .filter(message -> "user".equals(message.role()))
+                    .map(Message::content)
+                    .reduce((first, second) -> second)
+                    .orElseThrow(() -> new AssertionError("request carried no user message"));
         }
     }
 }

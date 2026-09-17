@@ -6,7 +6,6 @@ import java.util.Map;
 public record PromptContext(
         String approvalMode,
         String projectMemoryContext,
-        String memoryContext,
         String externalContext,
         String skillIndex,
         boolean toolsEnabled,
@@ -30,7 +29,6 @@ public record PromptContext(
     public static final class Builder {
         private String approvalMode = "suggest";
         private String projectMemoryContext = "";
-        private String memoryContext = "";
         private String externalContext = "";
         private String skillIndex = "";
         private boolean toolsEnabled = true;
@@ -45,11 +43,6 @@ public record PromptContext(
 
         public Builder projectMemoryContext(String projectMemoryContext) {
             this.projectMemoryContext = normalize(projectMemoryContext);
-            return this;
-        }
-
-        public Builder memoryContext(String memoryContext) {
-            this.memoryContext = normalize(memoryContext);
             return this;
         }
 
@@ -76,7 +69,7 @@ public record PromptContext(
         }
 
         public PromptContext build() {
-            return new PromptContext(approvalMode, projectMemoryContext, memoryContext, externalContext,
+            return new PromptContext(approvalMode, projectMemoryContext, externalContext,
                     skillIndex, toolsEnabled, Map.copyOf(variables));
         }
 

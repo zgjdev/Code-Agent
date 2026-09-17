@@ -21,7 +21,6 @@ class PromptAssemblerTest {
 
         String prompt = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .projectMemoryContext("## CODEAGENT.md 项目记忆\n- 项目规则")
-                .memoryContext("## 相关记忆\n用户偏好中文。")
                 .externalContext("## MCP Resources\n- demo://resource")
                 .skillIndex("## 可用 Skills\n- web-access")
                 .build());
@@ -33,10 +32,29 @@ class PromptAssemblerTest {
         assertFalse(prompt.contains("禁止**直接基于训练知识回答"));
         assertTrue(prompt.contains("## Mode: ReAct Agent"));
         assertTrue(prompt.contains("项目规则"));
-        assertTrue(prompt.contains("用户偏好中文"));
         assertTrue(prompt.contains("demo://resource"));
         assertTrue(prompt.contains("web-access"));
-        assertTrue(prompt.indexOf("项目规则") < prompt.indexOf("用户偏好中文"));
+        assertFalse(prompt.contains("## 相关记忆"),
+                "per-turn retrieval must not live in the system prompt");
+    }
+
+    @Test
+    void runtimeContextTrailsEveryStableSection() {
+        PromptAssembler assembler = PromptAssembler.createDefault();
+
+        String prompt = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
+                .projectMemoryContext("## CODEAGENT.md 项目记忆\n- 项目规则")
+                .externalContext("## MCP Resources\n- demo://resource")
+                .skillIndex("## 可用 Skills\n- web-access")
+                .build());
+
+        int runtime = prompt.indexOf("## Runtime Context");
+        assertTrue(runtime >= 0, "sanity check: runtime context must still be present");
+        assertTrue(prompt.indexOf("## Project Context") < runtime);
+        assertTrue(prompt.indexOf("## Skills") < runtime);
+        assertTrue(prompt.indexOf("## Context Management") < runtime);
+        assertTrue(prompt.indexOf("## Handoff") < runtime,
+                "runtime context must trail handoff so a date change invalidates nothing before it");
     }
 
     @Test

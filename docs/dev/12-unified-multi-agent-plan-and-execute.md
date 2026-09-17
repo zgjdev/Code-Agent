@@ -163,6 +163,8 @@ flowchart TD
 
 **串联的理由**：`stepReview=false` 时 `retryCount` 恒为 0，控制流直接落到 replan 分支，等价于今天 Plan 的行为；`stepReview=true` 时先做步内重试，重试耗尽再重规划，等价于 Team 的行为加一层保护。两侧语义都被保留，且不需额外开关。
 
+**注意流程图里 `F` 判断的第二个条件**（「且本计划未重规划」）不是装饰：没有它，replan 会不断触发自身，因为触发条件只看进度、不看已经重规划过几次。落地时这条约束一度缺失并导致栈溢出，见 §3.4 的实现后修订。
+
 ### 3.2 主子 Agent 消息契约
 
 统一后，编排器与步骤执行体之间的传递收敛为**下行简报 / 上行结果**两条显式契约，替代今天的两处字符串拼接与三份重复渲染。
@@ -288,6 +290,8 @@ graph LR
 - **授权链不变**。统一后步骤仍通过 `TurnToolPolicy.forkWithTrustedUrls(dependencyUrls)` 分叉（`PlanExecuteAgent.java:553`），URL 凭据继承规则与今天一致。
 - **账本契约变更**。Team 路径的 `team` / `<name>` actor 不再产生，统一为 `plan` / `task:<id>`。raw session 是 append-only，旧记录不受影响，但解析账本的下游需要同步（见 §3.5）。
 - **循环检测纯增益**。Team 路径此前无循环检测，统一后获得 `Planner.java:155-157` 的保护。
+- **实现后修订（2026-09-18）：并行步骤评审曾共享一个 Reviewer 实例，已修复。** 本设计的初版落地把 `SubAgentStepReviewer` 建成 `PlanExecuteAgent` 的构造期字段，于是**所有并行任务共用一个 `SubAgent` 实例**；而 `SubAgent.conversationHistory` 是普通 `ArrayList`（`SubAgent.java:80`）、`historyVersion` 是普通 `long`（`:67`），类内没有任何 `synchronized`，并行批次同时进入 `applyStepReview` 即构成数据竞争（并发修改异常、审查输入串台、历史被别的线程清空）。§2.2 记录的旧实现「为每个并行步骤各建一个 reviewer」正是为避免这一点，合并时该保护没有随代码搬移。现状改为任务内现建实例：开关读 `pipelineOptions.stepReview()`（`PlanExecuteAgent.java:587`），实例在 `applyStepReview` 内构造（`:610-611`），任务内的重试串行复用该实例（`SubAgentStepReviewer.review` 每轮 `clearHistory()`，跨任务干净）。回归测试 `PlanExecuteAgentTest.parallelStepReviewDoesNotShareReviewerHistory`（`:432`）。
+- **实现后修订（2026-09-18）：失败重规划曾无深度上限，已封顶。** §3.1.3 的失败恢复流程图已把「本计划未重规划」写成重规划的前提，但落地时该约束缺失：`executePlan` 失败后调 `replan` 再回到 `reviewAndExecutePlan`，深度无界；每轮真实打一次 LLM，且 `Planner.replan` 拼出的 goal 含旧 goal 原文而逐层嵌套，触发条件（`getProgress() < 0.5`）又不随失败次数改变，实测可把栈打穿。现由 `MAX_REPLANS_PER_RUN`（`PlanExecuteAgent.java:136`）封顶为每轮 1 次（`:442-445`），达到上限后把失败记进摘要并继续推进剩余可执行任务。回归测试 `PlanExecuteAgentTest.capsReplanningWhenEarlyFailureKeepsRecurring`（`:484`）。
 - **已知限制：并行写冲突未处理**。Plan 侧 4 线程、Team 侧 2 worker 今天都已并行且都没有写冲突保护；统一后并行度取 Plan 侧动态批，暴露面从 2 略增到 4。本次**不新增**防护（超出需求范围），但需在文档中显式登记为已知限制。
 - **已知限制：上行结果无长度约束**（§3.2.2）。子 Agent 返回全文，Plan 侧再全文注入下游，长链任务的简报体积随依赖数线性叠加。今天两侧都已如此，本次不引入摘要或 token 预算约束；若实际出现上下文放大问题，优先在下游 `maybeCompactHistory` 侧处理，而非在上行强制截断。
 - **单步 ReAct 循环的溢出恢复语义不动**（`PlanExecuteAgent` 现有路径）。
@@ -342,7 +346,7 @@ sequenceDiagram
                 P->>W: 带反馈重跑同一步
             end
         end
-        opt 仍失败 且 progress 小于 0.5
+        opt 仍失败 且 progress 小于 0.5 且未达重规划上限
             P->>PL: replan(plan, error)
         end
     end
@@ -388,7 +392,9 @@ sequenceDiagram
 
 ### 4.2 实现级细化
 
-**串联恢复不需要新增分支。** §3.1.3 的失败恢复流程图暗示串联需要分支代码；实际把重试循环放进 `executeTask` 内部后，`stepReview=false` 时 `stepReviewer == null`，循环不进入，控制流自然落到既有 replan 分支（`PlanExecuteAgent.java:417-421`），行为逐字节不变。
+**串联恢复不需要新增分支。** §3.1.3 的失败恢复流程图暗示串联需要分支代码；实际把重试循环放进 `executeTask` 内部后，`stepReview=false` 时开关为假、`applyStepReview` 整体不被调用，控制流自然落到既有 replan 分支，行为逐字节不变。
+
+**实现后修订（2026-09-18）**：初版用「构造期 `stepReviewer` 字段是否为 `null`」表达这个开关。该字段的问题不在于表达力，而在于它是**实例级共享状态**——并行批次会同时进入 `applyStepReview`，多条线程写同一个 `SubAgent` 会话历史（详见 §3.4）。现已改为任务内在 `applyStepReview` 里现建实例（`PlanExecuteAgent.java:587`、`:610-611`），开关本身仍只是那一个布尔。
 
 ### 4.3 验证命令
 
@@ -443,3 +449,5 @@ sequenceDiagram
 10. **是否让测试路径的 WORKER `SubAgent` 补注入 `{{taskType}}`**（§3.3）。生产路径不受影响（唯一消费者是已注入的 `PlanExecuteAgent` worker 路径），本项只关乎 `SubAgentTest` 中 WORKER 用例的语义自洽。替代方案是把 `plan.md` 的两处占位符改为静态表述，代价是失去「按类型分支」的指令能力，与 §3.3 的收益相冲突。
 11. **删除 `/team` 入口**（§3.1.1 修订）为定稿后的决策，替代方案是保留 `/team` 映射 `TEAM_PRESET`，或引入 `/plan --review` flag。当前选择的代价是 `PLAN_PRESET` / `TEAM_PRESET` 在 CLI 不可触达、步骤评审无法单独关闭；若后续要恢复单开关入口，需改 `CliCommandParser` 的 payload 约定（现有实现把 `/plan ` 之后的内容整体当作任务文本）。
 12. **`SubAgent` 内的 `"team"` 字面量未清理**（`SubAgent.java:109,163,217,278,398,444,520,548,614,633`）。生产路径下唯一存活的 `SubAgent` 是 Reviewer（`PlanExecuteAgent.java:186-187`），其 `conversationLedger` 保持 `ConversationLedger.disabled()` 且未注入 `parentSession`，因此这些 origin 串不可达，§3.4 的账本结论仍成立。本次**不清理**：改动零功能收益，且会让 session 事件 origin 出现新旧两种取值。`PromptMode.TEAM_REVIEWER`（`PromptMode.java:7` → `modes/team-reviewer.md`）是活路径，改名涉及提示词文件重命名，同样不在本次范围。
+13. **【已关闭，实现后补充】并行步骤评审的实例共享**。设计阶段未识别这一项：它不属于两侧任一既有实现（旧 Team 实现每并行步骤各建一个 reviewer），是合并过程中丢掉的保护。已在 2026-09-18 修复为「每任务现建 Reviewer」并补回归测试，结论见 §3.4。
+14. **【已关闭，实现后补充】失败重规划的次数上限**。§3.1.3 的流程图原本就把「本计划未重规划」写进前提，但落地时未实现，导致递归无界、实测栈溢出。已在 2026-09-18 补上 `MAX_REPLANS_PER_RUN` 并加回归测试，结论见 §3.4。

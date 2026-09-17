@@ -476,6 +476,31 @@ class PlanExecuteAgentTest {
                 "前置任务失败后，被阻塞的任务不应执行");
     }
 
+    /**
+     * 早期失败会触发重规划，但重规划必须有次数上限：每轮重规划都会真实调用 LLM，
+     * 失败原因不变时会一轮套一轮地递归下去，直到栈溢出。
+     */
+    @Test
+    void capsReplanningWhenEarlyFailureKeepsRecurring() throws Exception {
+        AlwaysFailingGLMClient llmClient = new AlwaysFailingGLMClient();
+        ReplanningFailingPlanner planner = new ReplanningFailingPlanner(llmClient);
+        PlanExecuteAgent agent = new PlanExecuteAgent(
+                llmClient,
+                new ToolRegistry(),
+                planner,
+                null,
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()),
+                PipelineOptions.PLAN_PRESET
+        );
+
+        String result = agent.run("注定失败的任务");
+
+        assertEquals(1, planner.replanCalls.get(), "重规划必须封顶，不得无限递归");
+        assertTrue(result.contains("task_1"), "重规划不得丢掉外层已发生的失败: " + result);
+        assertTrue(result.contains("task_2"), "重规划后的计划结果应进入最终汇总: " + result);
+    }
+
     private record StubResponse(LlmClient.ChatResponse response, boolean streamContent,
                                 java.util.function.Consumer<LlmClient.StreamListener> streamScript) {
         private static StubResponse plain(LlmClient.ChatResponse response) {
@@ -590,6 +615,48 @@ class PlanExecuteAgentTest {
                 currentConcurrency.decrementAndGet();
             }
             return new ChatResponse("assistant", "任务完成", null, 10, 2);
+        }
+    }
+
+    /** 每次规划产出一个只含单个任务的计划，任务 id 带序号以便区分外层与重规划后的结果。 */
+    private static final class ReplanningFailingPlanner extends Planner {
+        private final AtomicInteger planCalls = new AtomicInteger();
+        private final AtomicInteger replanCalls = new AtomicInteger();
+
+        private ReplanningFailingPlanner(LlmClient llmClient) {
+            super(llmClient);
+        }
+
+        @Override
+        public ExecutionPlan createPlan(String goal) {
+            int index = planCalls.incrementAndGet();
+            ExecutionPlan plan = new ExecutionPlan("plan-" + index, goal);
+            plan.addTask(new Task("task_" + index, "注定失败的任务 " + index, Task.TaskType.ANALYSIS));
+            plan.computeExecutionOrder();
+            return plan;
+        }
+
+        @Override
+        public ExecutionPlan replan(ExecutionPlan failedPlan, String failureReason) {
+            replanCalls.incrementAndGet();
+            return createPlan(failedPlan.getGoal() + " / 重规划");
+        }
+    }
+
+    private static final class AlwaysFailingGLMClient extends GLMClient {
+        private AlwaysFailingGLMClient() {
+            super("test-key");
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException {
+            throw new IOException("LLM 不可用");
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener)
+                throws IOException {
+            throw new IOException("LLM 不可用");
         }
     }
 

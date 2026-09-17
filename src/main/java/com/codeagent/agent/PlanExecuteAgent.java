@@ -133,6 +133,7 @@ public class PlanExecuteAgent {
     private String submittedPolicyInput = "";
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private static final int MAX_RETRIES_PER_STEP = 2;
+    private static final int MAX_REPLANS_PER_RUN = 1;
     private final PipelineOptions pipelineOptions;
 
     public PlanExecuteAgent(LlmClient llmClient) {
@@ -357,14 +358,15 @@ public class PlanExecuteAgent {
      */
     private PlanRunOutcome runWithPlan(String goal, StreamState streamState) throws IOException {
         ExecutionPlan plan = planner.createPlan(goal);
-        return reviewAndExecutePlan(plan, streamState);
+        return reviewAndExecutePlan(plan, streamState, 0);
     }
 
-    private PlanRunOutcome reviewAndExecutePlan(ExecutionPlan plan, StreamState streamState) throws IOException {
+    private PlanRunOutcome reviewAndExecutePlan(ExecutionPlan plan, StreamState streamState,
+                                                int replanDepth) throws IOException {
         while (true) {
             PlanReviewDecision decision = reviewHandler.review(plan.getGoal(), plan);
             if (decision == null || decision.action() == PlanReviewAction.EXECUTE) {
-                return PlanRunOutcome.executed(executePlan(plan, streamState));
+                return PlanRunOutcome.executed(executePlan(plan, streamState, replanDepth));
             }
 
             if (decision.action() == PlanReviewAction.CANCEL) {
@@ -373,7 +375,7 @@ public class PlanExecuteAgent {
 
             String feedback = decision.feedback() == null ? "" : decision.feedback().trim();
             if (feedback.isEmpty()) {
-                return PlanRunOutcome.executed(executePlan(plan, streamState));
+                return PlanRunOutcome.executed(executePlan(plan, streamState, replanDepth));
             }
 
             out.println("📝 已收到补充要求，正在重新规划...\n");
@@ -387,7 +389,8 @@ public class PlanExecuteAgent {
         }
     }
 
-    private String executePlan(ExecutionPlan plan, StreamState streamState) throws IOException {
+    private String executePlan(ExecutionPlan plan, StreamState streamState, int replanDepth)
+            throws IOException {
         log.info("Executing plan: goal='{}', taskCount={}", plan.getGoal(), plan.getAllTasks().size());
         out.println("🚀 开始执行计划...\n");
 
@@ -430,16 +433,22 @@ public class PlanExecuteAgent {
                 log.warn("Task failed: {} error={}", task.getId(), error.getMessage());
                 out.println("❌ 失败 [" + task.getId() + "]: " + error.getMessage() + "\n");
 
-                if (plan.getProgress() < 0.5) {
-                    out.println("🔄 尝试重新规划...\n");
-                    ExecutionPlan replanned = planner.replan(plan, error.getMessage());
-                    return reviewAndExecutePlan(replanned, streamState).result();
-                }
-
                 if (!finalResult.isEmpty()) {
                     finalResult.append("\n");
                 }
                 finalResult.append("任务 ").append(task.getId()).append(" 失败: ").append(error.getMessage());
+
+                if (plan.getProgress() < 0.5) {
+                    if (replanDepth >= MAX_REPLANS_PER_RUN) {
+                        out.println("⚠️ 已达到最大重规划次数，保留当前结果\n");
+                        continue;
+                    }
+                    out.println("🔄 尝试重新规划...\n");
+                    ExecutionPlan replanned = planner.replan(plan, error.getMessage());
+                    return "⚠️ 原计划有任务失败，已按重规划结果继续执行。\n"
+                            + finalResult + "\n"
+                            + reviewAndExecutePlan(replanned, streamState, replanDepth + 1).result();
+                }
             }
         }
 

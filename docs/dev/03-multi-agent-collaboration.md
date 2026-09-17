@@ -24,7 +24,7 @@
 > **本文怎么读**
 >
 > - 读者假设：会写 Java、懂工程常识，但**没有接触过「多智能体协作」**。第 0 部分从概念讲起，有相关经验的读者可以直接跳到第 1 部分。
-> - 本文描述的是**代码实际做了什么**，包括「定义了但没人读」「审查调用失败反而算通过」「并行批次下 Reviewer 有数据竞争」这类真实落差。它不是「多 Agent 架构最佳实践」，也不会把将来可能做的共享黑板、分布式 Worker、持久化调度写成已交付能力。
+> - 本文描述的是**代码实际做了什么**，包括「定义了但没人读」「审查调用失败反而算通过」这类真实落差，也记录**已经修掉的缺陷**（并行审查的数据竞争、失败重规划的无限递归）及其修法与回归测试。它不是「多 Agent 架构最佳实践」，也不会把将来可能做的共享黑板、分布式 Worker、持久化调度写成已交付能力。
 > - 所有 `file:line` 对应当前源码。正文有意**不写具体常量数值**（数值会随代码调整而过期），需要精确值时按行号自行核对。**例外**是简历原句里出现过的数字，那几个面试必被追问，全文保留。
 > - 与姊妹篇的分工：本文聚焦**跨角色的协作闭环**——谁规划、谁执行、谁评审、产物怎么传递、凭据怎么隔离、审查怎么回灌。计划解析、拓扑排序、批次调度、任务内 ReAct 循环、预算兜底等**执行器内部细节**留给 [02-dag-orchestration.md](02-dag-orchestration.md)，本文只做交叉引用。
 
@@ -74,9 +74,9 @@
 | 通路 | 载体 | 方向 | 代码位置 |
 |---|---|---|---|
 | 规划请求 | 一次性 `List<Message>`（system 提示词 + user 目标） | `Planner` ← 目标 | `Planner.java:67-72` |
-| 任务下发 | `StepBriefing`（一个 record）渲染出的字符串 | 编排器 → 任务执行体 | `StepBriefing.java:20-55`、`PlanExecuteAgent.java:642` |
+| 任务下发 | `StepBriefing`（一个 record）渲染出的字符串 | 编排器 → 任务执行体 | `StepBriefing.java:20-55`、`PlanExecuteAgent.java:649` |
 | 审查请求 | 两段字符串拼接 | 编排器 → Reviewer | `SubAgentStepReviewer.java:24`、`SubAgent.java:507` |
-| 审查结论 | `StepReviewDecision`（一个 record） | Reviewer → 编排器 → 同一任务的下一轮 | `StepReviewDecision.java:6-15`、`PlanExecuteAgent.java:608-620` |
+| 审查结论 | `StepReviewDecision`（一个 record） | Reviewer → 编排器 → 同一任务的下一轮 | `StepReviewDecision.java:6-15`、`PlanExecuteAgent.java:614-628` |
 
 和合并前的关键区别：**审查结论不再走自由文本 + 二次解析**。合并前，`approved` 与 `issues` 由两个独立方法（`parseReviewApproval` / `parseReviewIssues`）从同一段文本分别解析，理论上可以给出互相矛盾的结论；现在 `ReviewResponseParser` 在 `SubAgentStepReviewer` 内部一次解析出 `StepReviewDecision`，交给编排器的已经是结构化结论。
 
@@ -90,11 +90,11 @@
 |---|---|
 | 三个角色互相迭代 | **规划者只在每次规划时被调用一次**，全程不参与后续任务执行，也不看审查反馈 |
 | 角色之间来回对话 | 角色之间**没有直接对话**。每一跳都经过编排器中转，且传递的是拼好的字符串 |
-| 检查者把结果退回执行者 | **成立**。这是唯一一处真正的回环（`PlanExecuteAgent.java:600-622`） |
+| 检查者把结果退回执行者 | **成立**。这是唯一一处真正的回环（`PlanExecuteAgent.java:603-629`） |
 | 三个角色是三个独立实现 | **不成立**。只有 Reviewer 是独立类（`SubAgent`）；规划是 `Planner` 类，执行是编排器自己的方法 |
-| 规划者会因执行失败而重规划 | **部分成立**。只在「进度 < 一半」时触发一次重规划（`PlanExecuteAgent.java:439-443`），且**不受审查反馈驱动** |
+| 规划者会因执行失败而重规划 | **部分成立**。只在「进度 < 一半」时触发（`PlanExecuteAgent.java:441-451`），且**不受审查反馈驱动**；整轮最多重规划 1 次（`MAX_REPLANS_PER_RUN`，`:136`） |
 
-还有一层容易忽略：**`SubAgent` 不继承 `Agent`**。`SubAgent` 的类声明处没有 `extends`（`SubAgent.java:52`），它是另写一份的 ReAct 循环。所以项目里存在**两套平行的 ReAct 实现**——一套给主 Agent（ReAct 模式、计划任务执行）用，一套给 `SubAgent`（当前只有 Reviewer）用。区别在于：**计划任务执行走的是第三套实现**——`PlanExecuteAgent.executeTaskWithPolicy` 里自己写了一遍类似的循环（`PlanExecuteAgent.java:663-786`）。所以严谨地说，这个项目里有**三处 ReAct 循环**，共享的只有底层的 `LlmClient`、`ToolRegistry`、`TurnToolPolicy` 和上下文压缩工具，主循环代码各自维护。
+还有一层容易忽略：**`SubAgent` 不继承 `Agent`**。`SubAgent` 的类声明处没有 `extends`（`SubAgent.java:52`），它是另写一份的 ReAct 循环。所以项目里存在**两套平行的 ReAct 实现**——一套给主 Agent（ReAct 模式、计划任务执行）用，一套给 `SubAgent`（当前只有 Reviewer）用。区别在于：**计划任务执行走的是第三套实现**——`PlanExecuteAgent.executeTaskWithPolicy` 里自己写了一遍类似的循环（`PlanExecuteAgent.java:631-794`）。所以严谨地说，这个项目里有**三处 ReAct 循环**，共享的只有底层的 `LlmClient`、`ToolRegistry`、`TurnToolPolicy` 和上下文压缩工具，主循环代码各自维护。
 
 ## 0.5 名词速查
 
@@ -238,20 +238,20 @@ CLI 的派发条件是「上一条设了标志 **或** 本次命令是 `SWITCH_P
 | 开关 | 取值 | 生效方式 |
 |---|---|---|
 | `humanPlanGate` | true | 计划生成后调用注入的 `PlanReviewHandler`，由它决定执行 / 补充重规划 / 取消 |
-| `stepReview` | true | 构造期创建 `SubAgentStepReviewer`，每个任务执行完都过一遍审查 |
+| `stepReview` | true | 每个任务执行完都调一次 `applyStepReview`，任务内部现建 `SubAgentStepReviewer` |
 
 ## 2.2 两个开关各自真正的闸门在哪（重要落差）
 
 **`humanPlanGate` 这个字段在 `src/main` 里从未被读取。**
 
 ```bash
-# 只有 PipelineOptions 自身、PlanExecuteAgent 构造 stepReviewer、以及单测
+# 只有 PipelineOptions 自身、以及单测（PlanExecuteAgent 一次都没读过它）
 $ grep -rn "humanPlanGate" src/main/java src/test/java
 src/main/java/com/codeagent/agent/PipelineOptions.java:7:public record PipelineOptions(boolean humanPlanGate, boolean stepReview) {
 src/test/java/com/codeagent/agent/PipelineOptionsTest.java:12:        assertTrue(PipelineOptions.PLAN_PRESET.humanPlanGate());
 ```
 
-`PlanExecuteAgent` 读到 `pipelineOptions` 后只用了 `.stepReview()`（`PlanExecuteAgent.java:185`）。人工计划门是否真的拦人，取决于**注入的 `PlanReviewHandler` 是什么实现**，而 `reviewAndExecutePlan` 无条件调用它（`PlanExecuteAgent.java:371`）：
+`PlanExecuteAgent` 读到 `pipelineOptions` 后只用了 `.stepReview()`（`PlanExecuteAgent.java:587`）。人工计划门是否真的拦人，取决于**注入的 `PlanReviewHandler` 是什么实现**，而 `reviewAndExecutePlan` 无条件调用它（`PlanExecuteAgent.java:367`）：
 
 | 调用方 | 注入的 `PlanReviewHandler` | 实际行为 |
 |---|---|---|
@@ -264,7 +264,7 @@ src/test/java/com/codeagent/agent/PipelineOptionsTest.java:12:        assertTrue
 - `humanPlanGate` 目前是**声明性元数据**，不是可执行的开关。想让它真正生效，得让构造器根据它决定包一层默认 handler（或干脆删掉这个字段，只留 `PlanReviewHandler` 一个真相来源）。
 - **TUI 路径下「计划门」实际上是关的**，尽管它传的是 `FULL_PRESET`。用户按 `/plan` 会直接开始执行，看不到计划。CLI 与 TUI 在这里**不等价**。
 
-`stepReview` 这个开关是真的：它直接决定 `stepReviewer` 字段是不是 `null`（`PlanExecuteAgent.java:185-189`），而 `applyStepReview` 只在非 `null` 时被调用（`PlanExecuteAgent.java:584-587`）。
+`stepReview` 这个开关是真的：它直接决定 `executeTask` 里要不要调 `applyStepReview`（`PlanExecuteAgent.java:587-590`）。为 `false` 时任务只执行一次、不进审查；为 `true` 时任务内部现建一个 Reviewer（`PlanExecuteAgent.java:610-611`），用完即弃。
 
 ## 2.3 为什么删掉 `/team`
 
@@ -339,7 +339,7 @@ LlmClient.ChatResponse response = llmClient.chat(messages, null, streamRenderer)
 | `SUPPLEMENT(feedback)` | 补充要求后重新规划 | 拼进 goal 与策略输入，重新 `createPlan`，**再次过计划门** |
 | `CANCEL` | 取消 | 返回「⏹️ 已取消本次计划执行。」，不写 `run_result` |
 
-`reviewAndExecutePlan` 是一个 `while(true)`（`PlanExecuteAgent.java:369-394`），所以「补充 → 重新规划 → 再问」可以反复进行，**没有次数上限**。`feedback` 为空字符串时会被当成 `EXECUTE` 处理（`PlanExecuteAgent.java:380-383`）——这是一个静默降级：用户说了「补充」但没写内容，计划会直接开始执行。
+`reviewAndExecutePlan` 是一个 `while(true)`（`PlanExecuteAgent.java:364-390`），所以「补充 → 重新规划 → 再问」可以反复进行，**没有次数上限**。这是合理的：这条循环由**人**驱动，每转一圈都要用户主动按「补充」并给出文本，与 4.1 里那条**自动**触发的重规划链（已加封顶，见 5.8）不是一回事。`feedback` 为空字符串时会被当成 `EXECUTE` 处理（`PlanExecuteAgent.java:376-379`）——这是一个静默降级：用户说了「补充」但没写内容，计划会直接开始执行。
 
 CLI 上的三种输入对应：回车 → `EXECUTE`；`I` → 读一行补充要求 → `SUPPLEMENT`；ESC → 折叠或 `CANCEL`（`Main.java:1551+`）。
 
@@ -359,11 +359,11 @@ turnToolPolicy = TurnToolPolicy.fromUserInput(
 plan = planner.createPlan(revisedGoal);
 ```
 
-（`PlanExecuteAgent.java:385-392`。）
+（`PlanExecuteAgent.java:383-389`。）
 
 **为什么必须重建**：`TurnToolPolicy` 决定这次任务允许访问哪些 URL。补充要求是**用户新输入的自然语言**，属于「顶层用户原文」——按 CLAUDE.md §6 的授权规则，用户原文里的 URL 应当获得授权。如果不重建，用户在补充要求里写的 URL 会被当成「来自模型输出的 URL」而拒绝，体验上就是「我明明给了链接它却说没权限」。
 
-反方向也成立：补充要求**只会扩大**授权集合（把新原文加进 `submittedPolicyInput`），不会撤销原有授权。这有测试钉住：`supplementRebuildsToolPolicyBeforeReplanning` 与 `noWebSupplementTightensToolPolicyBeforeReplanning`（`PlanExecuteAgentTest.java:229`、`:263`）。
+反方向也成立：补充要求**只会扩大**授权集合（把新原文加进 `submittedPolicyInput`），不会撤销原有授权。这有测试钉住：`supplementRebuildsToolPolicyBeforeReplanning` 与 `noWebSupplementTightensToolPolicyBeforeReplanning`（`PlanExecuteAgentTest.java:231`、`:265`）。
 
 ---
 
@@ -387,23 +387,24 @@ flowchart TD
     H --> J[逐结果回填任务状态]
     I --> J
     J --> K{有任务失败?}
-    K -- 是 且 progress < 0.5 --> L[replan → 回到 reviewAndExecutePlan]
-    K -- 是 且 progress ≥ 0.5 --> M[累加失败摘要，继续下一批]
+    K -- 是 且 progress < 0.5 且未超重规划上限 --> L[replan → 回到 reviewAndExecutePlan]
+    K -- 是 且 progress < 0.5 但已达上限 --> M[累加失败摘要，继续下一批]
+    K -- 是 且 progress ≥ 0.5 --> M
     K -- 否 --> B
     E --> N[buildFinalResult，只取叶子任务]
 ```
 
-（`PlanExecuteAgent.java:396-474`。）
+（`PlanExecuteAgent.java:392-477`。）
 
 三个要点：
 
-1. **可执行集合的语义是「依赖已全部 COMPLETED」**，不是「依赖已完成或失败」。所以一个任务失败后，它的后继任务会**永远保持 PENDING**，最终被报告成「计划未能继续推进」而不是「跳过」（`PlanExecuteAgent.java:452-455`）。
-2. **重规划是「重新开始」而不是「接着跑」**：`planner.replan` 生成一个全新的 `ExecutionPlan`，然后 `reviewAndExecutePlan(replanned, ...)` 会**再次过人工计划门**（`PlanExecuteAgent.java:441-442`）。所以用户在长任务中途可能被问第二次计划。
+1. **可执行集合的语义是「依赖已全部 COMPLETED」**，不是「依赖已完成或失败」。所以一个任务失败后，它的后继任务会**永远保持 PENDING**，最终被报告成「计划未能继续推进」而不是「跳过」（`PlanExecuteAgent.java:455-458`）。
+2. **重规划是「重新开始」而不是「接着跑」，而且有次数上限**：`planner.replan` 生成一个全新的 `ExecutionPlan`，然后 `reviewAndExecutePlan(replanned, streamState, depth + 1)` 会**再次过人工计划门**（`PlanExecuteAgent.java:447-450`）。所以用户在长任务中途可能被问第二次计划。上限由 `MAX_REPLANS_PER_RUN` 决定（`PlanExecuteAgent.java:136`）；达到上限后终端打一行「⚠️ 已达到最大重规划次数，保留当前结果」并回到失败摘要路径（`PlanExecuteAgent.java:442-445`）。**这条上限是后补的——在此之前这里的递归没有边界**，详见 5.8。
 3. **重规划的触发条件是 `plan.getProgress() < 0.5`**，而 `getProgress` 只统计 `COMPLETED` 占比（`ExecutionPlan.java:150-156`）。也就是说：一个 3 任务计划里第 1 个就失败（进度 0）时，会重规划；已经完成 2/3 再失败（进度 0.67）时，**不会重规划**，只累加失败摘要。
 
 ## 4.2 任务执行体不是 SubAgent
 
-合并前后差异最大的一处。现在每个任务的执行就是 `PlanExecuteAgent` 的一个方法（`executeTaskWithPolicy`，`PlanExecuteAgent.java:624-787`），里面写着一段完整的 ReAct 循环：
+合并前后差异最大的一处。现在每个任务的执行就是 `PlanExecuteAgent` 的一个方法（`executeTaskWithPolicy`，`PlanExecuteAgent.java:631-794`），里面写着一段完整的 ReAct 循环：
 
 | 环节 | 合并前（`SubAgent`） | 合并后（`PlanExecuteAgent`） |
 |---|---|---|
@@ -414,17 +415,17 @@ flowchart TD
 | 流式渲染 | `SubAgentStreamRenderer` | `TaskStreamRenderer`（带 taskId 标签） |
 | 上下文压缩 | 共享 `AutoCompactionManager` | 同左 |
 
-**每个任务一个新建的 `messages` 列表**（`PlanExecuteAgent.java:649`）是这一层最重要的性质：它从结构上消除了「上一个任务的工具输出污染下一个任务上下文」这类问题，代价是任务之间**完全不能共享会话记忆**——能传下去的只有 `StepBriefing` 里显式写的依赖结果。
+**每个任务一个新建的 `messages` 列表**（`PlanExecuteAgent.java:656`）是这一层最重要的性质：它从结构上消除了「上一个任务的工具输出污染下一个任务上下文」这类问题，代价是任务之间**完全不能共享会话记忆**——能传下去的只有 `StepBriefing` 里显式写的依赖结果。
 
 ## 4.3 child session 与输出缓冲
 
-并行批次里每个任务有**两个隔离机制**（`PlanExecuteAgent.java:510-563`、`:568-598`）：
+并行批次里每个任务有**两个隔离机制**（`PlanExecuteAgent.java:513-566`、`:571-601`）：
 
-- **输出隔离**：每个任务一个 `ByteArrayOutputStream` + `PrintStream`，批内并行时互不交错；批次结束后按 `executableTasks` 的顺序统一 `flush` 到真实 `out`（`PlanExecuteAgent.java:550-557`）。所以用户看到的是「按任务顺序连续输出」，而不是「谁先跑完谁先打印」。
-- **凭据隔离**：每个任务 `turnToolPolicy.forkWithTrustedUrls(直接依赖的 URL)`（`PlanExecuteAgent.java:571-575`），详见第 6 部分。
-- **会话隔离**：任务开始时 `parentSession.createChild("plan", "task:" + id)`，任务结束 `recordChildResult` 并关闭（`PlanExecuteAgent.java:578-590`）。child session 句柄存在 `ThreadLocal` 里（`PlanExecuteAgent.java:128`），所以并行线程各自指向自己的 child。
+- **输出隔离**：每个任务一个 `ByteArrayOutputStream` + `PrintStream`，批内并行时互不交错；批次结束后按 `executableTasks` 的顺序统一 `flush` 到真实 `out`（`PlanExecuteAgent.java:553-560`）。所以用户看到的是「按任务顺序连续输出」，而不是「谁先跑完谁先打印」。
+- **凭据隔离**：每个任务 `turnToolPolicy.forkWithTrustedUrls(直接依赖的 URL)`（`PlanExecuteAgent.java:574-578`），详见第 6 部分。
+- **会话隔离**：任务开始时 `parentSession.createChild("plan", "task:" + id)`，任务结束 `recordChildResult` 并关闭（`PlanExecuteAgent.java:581-595`）。child session 句柄存在 `ThreadLocal` 里（`PlanExecuteAgent.java:128`），所以并行线程各自指向自己的 child。
 
-**注意 `finally` 里做了两件事**：`taskToolPolicy.releaseBrowserLease()`（`PlanExecuteAgent.java:596`）——浏览器租约必须成对释放，否则下一个任务拿不到浏览器；以及 `childSession.remove()` 防 `ThreadLocal` 泄漏（线程池里的线程会被复用）。
+**注意 `finally` 里做了两件事**：`taskToolPolicy.releaseBrowserLease()`（`PlanExecuteAgent.java:599`）——浏览器租约必须成对释放，否则下一个任务拿不到浏览器；以及 `childSession.remove()` 防 `ThreadLocal` 泄漏（线程池里的线程会被复用）。
 
 ---
 
@@ -466,7 +467,7 @@ sequenceDiagram
     end
 ```
 
-关键代码：（`PlanExecuteAgent.java:600-622`、`SubAgentStepReviewer.java:23-35`。）
+关键代码：（`PlanExecuteAgent.java:603-629`、`SubAgentStepReviewer.java:23-35`。）
 
 ## 5.2 Reviewer 拿到什么、拿不到什么
 
@@ -483,7 +484,7 @@ AgentMessage reviewResult = reviewer.review(originalTask, stepResult, out);
 |---|---|---|
 | 总目标（含补充要求） | ✅ | 合并后新增——旧实现只给 `step.description()`，字段名叫 `originalTask` 却传步骤描述 |
 | 当前任务描述 | ✅ | |
-| 该任务最终文本结果 | ✅ | 如果是工具型任务，这里可能是工具输出的拼接（`PlanExecuteAgent.java:753-756`） |
+| 该任务最终文本结果 | ✅ | 如果是工具型任务，这里可能是工具输出的拼接（`PlanExecuteAgent.java:760-766`） |
 | 依赖任务的结论 | ❌ | 全部依赖结果都进了执行体简报，**没有进审查输入** |
 | 工具调用记录（谁调了哪个工具、参数、原始返回） | ❌ | 只有最终文本 |
 | 该任务实际产生的文件内容 / diff | ❌ | 若执行体没把内容写进最终文本，Reviewer 看不到 |
@@ -491,7 +492,7 @@ AgentMessage reviewResult = reviewer.review(originalTask, stepResult, out);
 
 **结论**：Reviewer 是**纯文本审查器**。它无法执行「去读一下那个文件确认改对了没」这种验证，只能基于「任务描述 + 一段文本」做判断。所以它能发现的是「结果明显不满足描述」「格式不完整」「与描述无关」，发现不了「文件写坏了但汇报说成功」。这是当前审查能力的硬边界，面试时必须主动说。
 
-另外，`SubAgentStepReviewer` 的 `goal` 参数传入的是 `plan.getGoal()`；在「补充要求」场景下 goal 已经被拼成 `原目标 + "\n补充要求：" + feedback`（`PlanExecuteAgent.java:386`），所以 Reviewer 能看到补充要求——这是合并后修好的一处。
+另外，`SubAgentStepReviewer` 的 `goal` 参数传入的是 `plan.getGoal()`；在「补充要求」场景下 goal 已经被拼成 `原目标 + "\n补充要求：" + feedback`（`PlanExecuteAgent.java:388`），所以 Reviewer 能看到补充要求——这是合并后修好的一处。
 
 ## 5.3 两层失败策略：调用失败放行，结论不可解析拒绝
 
@@ -528,7 +529,7 @@ flowchart TD
     H --> I
 ```
 
-两条路径最终都落到 `task.markCompleted(...)`（`PlanExecuteAgent.java:419-421`），**区别只在终端上有没有一句警告**。这就是接下来几个落差的根源。
+两条路径最终都落到 `task.markCompleted(...)`（`PlanExecuteAgent.java:416-427`），**区别只在终端上有没有一句警告**。这就是接下来几个落差的根源。
 
 **与合并前的对比**：旧实现把「审查报错」分成两处分别处理（首次报错标 `COMPLETED`、重试期间报错无条件 `approved = true` 并打印「✅ 重试后审查通过」）。合并后统一成单点 `approve()`，不再有「宣称重试后通过」这种误导性输出——但**「未验证却记为已完成」这个本质问题仍然存在**，因为它没有被建模成一个独立状态。
 
@@ -553,7 +554,7 @@ flowchart TD
 ```java
 int retries = 0;
 while (true) {
-    StepReviewDecision decision = stepReviewer.review(goal, task, result.result());
+    StepReviewDecision decision = reviewer.review(goal, task, result.result());
     if (decision.approved()) {
         return result;
     }
@@ -567,7 +568,7 @@ while (true) {
 }
 ```
 
-（`PlanExecuteAgent.java:605-621`，`MAX_RETRIES_PER_STEP` 定义在 `:135`。）
+（`PlanExecuteAgent.java:614-628`，`MAX_RETRIES_PER_STEP` 定义在 `:135`。）
 
 语义要精确：`retries` 计的是**首次执行之后的额外尝试数**，所以一个任务最多被执行体执行 3 次、被审查 3 次。注意首次审查发生在 `retries = 0` 时，所以「拒绝 → 重试」这个配对是 3 组中的前 2 组 + 最后一次拒绝直接耗尽。
 
@@ -575,15 +576,15 @@ while (true) {
 
 1. **重试反馈不含上一次的结果本身。** 传给执行体的是 `decision.feedback()`，它会以「之前的结果被审查拒绝，原因：…」的形式进简报（`StepBriefing.java:49-52`）；上一次的结果**不在简报里**。重试之所以有效，靠的是别的机制——但合并后每个任务用的是**新建的 `messages`**，重试之间**没有**共享历史……
 
-   ⚠️ 这是合并引入的一处**能力退化**，必须讲。合并前，重试复用同一个 `SubAgent`，它的常驻 `conversationHistory` 未被清空，所以执行体能「记得」自己上一轮做了什么（旧文档把这一点列为「重试生效的真实原因」）。现在 `executeTaskWithPolicy` 每次调用都新建 `messages`（`PlanExecuteAgent.java:649`），**重试是在完全干净的上下文里重跑的**。它能改进的唯一依据就是那句 `feedback`。而 `feedback` 在极端情况下可能是硬编码文案（见 5.4）。结论：**当前的「审查-重试」闭环在信息量上比合并前更弱。**
-2. **重试期间没有取消检查。** `CancellationContext.isCancelled()` 在 `executeTaskWithPolicy` 的循环里有检查（`PlanExecuteAgent.java:664`、`:718`），但 `applyStepReview` 的 `while` 里一次都没有。用户按 ESC 后，当前任务的「审查 + 重试」会继续跑完（最多 2 次额外执行），直到下一次回到 `executeTaskWithPolicy` 的循环开头才生效。
-3. **每次重试都新建一份 `AgentBudget`**（`PlanExecuteAgent.java:661`）。所以「预算耗尽 → 收尾返回部分完成」的结果如果被审查拒绝，重试会拿到**全新的预算**继续烧 token。最坏情况下，一个任务的 token 消耗是最初预算的 3 倍。
+   ⚠️ 这是合并引入的一处**能力退化**，必须讲。合并前，重试复用同一个 `SubAgent`，它的常驻 `conversationHistory` 未被清空，所以执行体能「记得」自己上一轮做了什么（旧文档把这一点列为「重试生效的真实原因」）。现在 `executeTaskWithPolicy` 每次调用都新建 `messages`（`PlanExecuteAgent.java:656`），**重试是在完全干净的上下文里重跑的**。它能改进的唯一依据就是那句 `feedback`。而 `feedback` 在极端情况下可能是硬编码文案（见 5.4）。结论：**当前的「审查-重试」闭环在信息量上比合并前更弱。**
+2. **重试期间没有取消检查。** `CancellationContext.isCancelled()` 在 `executeTaskWithPolicy` 的循环里有检查（`PlanExecuteAgent.java:671`、`:725`），但 `applyStepReview` 的 `while` 里一次都没有。用户按 ESC 后，当前任务的「审查 + 重试」会继续跑完（最多 2 次额外执行），直到下一次回到 `executeTaskWithPolicy` 的循环开头才生效。
+3. **每次重试都新建一份 `AgentBudget`**（`PlanExecuteAgent.java:668`）。所以「预算耗尽 → 收尾返回部分完成」的结果如果被审查拒绝，重试会拿到**全新的预算**继续烧 token。最坏情况下，一个任务的 token 消耗是最初预算的 3 倍。
 
-## 5.6 并行批次下 Reviewer 的数据竞争（未修复）
+## 5.6 并行批次下 Reviewer 的数据竞争（已修复）
 
-这是 2026-09-17 重写本文时新发现的一处**真实缺陷**，必须单独列出来。
+这是 2026-09-17 重写本文时新发现、2026-09-18 修复的一处**真实缺陷**。
 
-构造器只创建一个 `SubAgent` 实例，包在一个 `SubAgentStepReviewer` 里：
+**缺陷**：构造器只创建一个 `SubAgent` 实例，包在一个 `SubAgentStepReviewer` 里，由**所有任务共用**：
 
 ```java
 this.stepReviewer = this.pipelineOptions.stepReview()
@@ -593,9 +594,9 @@ this.stepReviewer = this.pipelineOptions.stepReview()
         : null;
 ```
 
-（`PlanExecuteAgent.java:185-189`。）
+（这段代码**已经不在源码里**，见本节末尾的修法。）
 
-这个**唯一实例**被所有任务共享。而 `executeTaskBatch` 在可执行任务多于一个时会开线程池并行（`PlanExecuteAgent.java:510-531`）。于是并行批次里，多个线程会同时进入 `applyStepReview` → `stepReviewer.review(...)` → `reviewer.execute(...)` → `reviewer.review(...)`，而 `SubAgent` 内部：
+而 `executeTaskBatch` 在可执行任务多于一个时会开线程池并行（`PlanExecuteAgent.java:513`）。于是并行批次里，多个线程会同时进入 `applyStepReview` → `reviewer.review(...)` → `reviewer.execute(...)` → `reviewer.review(...)`，而 `SubAgent` 内部：
 
 - `conversationHistory` 是**普通 `ArrayList`**（`SubAgent.java:80`），不是线程安全集合；
 - `clearHistory()` 直接对它 `clear()` + `add()`（`SubAgent.java:515-528`）；
@@ -604,13 +605,22 @@ this.stepReviewer = this.pipelineOptions.stepReview()
 
 结论：**这是数据竞争**（并发写同一个 `ArrayList`），后果可能是数组越界/`ConcurrentModificationException`、审查输入串台（A 任务的执行结果被送去审查 B 任务的结论）、或历史被另一个线程清空导致上下文错乱。
 
-为什么之前没被发现：
+为什么合并时没被发现：
 
 - 旧 `/team` 实现**为每个并行步骤新建 `reviewer-{stepId}`**，专门避免这一点；合并时这个保护没有跟着搬过来。
-- 唯一覆盖并行的测试 `runsIndependentTasksInParallel`（`PlanExecuteAgentTest.java:403`）用的是 `PLAN_PRESET`，`stepReview = false`，所以并行路径根本不进审查。
+- 唯一覆盖并行的测试 `runsIndependentTasksInParallel`（`PlanExecuteAgentTest.java:405`）用的是 `PLAN_PRESET`，`stepReview = false`，所以并行路径根本不进审查。
 - 而 `/plan` 现在是 `FULL_PRESET`，**并行 + 审查是这个入口的默认路径**。
 
-**这是一处需要修复的回归**：最小修法是给 `SubAgentStepReviewer` 加同步（串行化所有审查调用），或者回到「每个任务一个 Reviewer 实例」。本文只报告，不在本次文档任务里顺手改代码——修复要单独走一遍「先写触发竞争的测试 → 再改」的流程。
+**修法：改回「每个任务一个 Reviewer 实例」。** 开关不再依赖「字段是否为 null」，而是直接读 `pipelineOptions.stepReview()`（`PlanExecuteAgent.java:587`），实例在 `applyStepReview` 内部现建（`PlanExecuteAgent.java:610-611`）：
+
+```java
+StepReviewer reviewer = new SubAgentStepReviewer(
+        new SubAgent("reviewer", AgentRole.REVIEWER, llmClient, toolRegistry), out);
+```
+
+任务内的重试串行复用同一个实例，这不会引入竞争——`SubAgentStepReviewer.review` 每次结束都会 `clearHistory()`（`SubAgentStepReviewer.java:26`），跨任务是干净的，旧实现也是这个语义。
+
+**回归测试**：`parallelStepReviewDoesNotShareReviewerHistory`（`PlanExecuteAgentTest.java:432`）跑一个两任务的独立计划（`FULL_PRESET`，于是并行与审查同时发生），用 `CountDownLatch` 把两个审查调用**同时摁在 LLM 调用里**，再断言两次审查收到的 `messages` 不是同一个对象。修复前该断言必失败（两个调用拿到同一份 `ArrayList`，内容已被两条线程写重复）；修复后通过。
 
 ## 5.7 审查失败的三种降级路径
 
@@ -618,9 +628,42 @@ this.stepReviewer = this.pipelineOptions.stepReview()
 |---|---|---|---|---|
 | 审查调用报错（`AgentMessage.ERROR`） | `SubAgentStepReviewer.java:28` | `approve()`，不重试 | `COMPLETED` | **无任何警告** |
 | 审查结论无法确认通过 | `ReviewResponseParser.java:19-49` | `reject(...)`，进重试 | 重试耗尽后仍 `COMPLETED` | 「审查未通过，重新执行…」+「达到最大重试次数，保留当前结果」 |
-| 重试耗尽仍不通过 | `PlanExecuteAgent.java:612-615` | 保留最后一次结果 | `COMPLETED` | 同上 |
+| 重试耗尽仍不通过 | `PlanExecuteAgent.java:619-622` | 保留最后一次结果 | `COMPLETED` | 同上 |
 
 三种情形下 `buildFinalResult` 都不会区分「真通过」与「未验证/被拒绝后放行」，最终都可能输出「✅ 计划执行完成！」。**审查结论不进入最终状态**——它只影响「要不要再跑一次」，不影响汇总的措辞。
+
+## 5.8 失败重规划的无限递归（已修复）
+
+和 5.6 同类：一处「能跑通全部既有测试、但在真实失败路径上会崩」的缺陷，2026-09-18 发现并修复。
+
+**缺陷**：任务失败且 `plan.getProgress() < 0.5` 时，`executePlan` 会 `replan` 然后**递归**调回 `reviewAndExecutePlan`，后者又直接进 `executePlan`。整条链没有任何计数：
+
+```java
+if (plan.getProgress() < 0.5) {
+    out.println("🔄 尝试重新规划...\n");
+    ExecutionPlan replanned = planner.replan(plan, error.getMessage());
+    return reviewAndExecutePlan(replanned, streamState).result();   // 无上限
+}
+```
+
+三个放大效应叠加，使这不是「多花几次调用」而是「停不下来」：
+
+1. **每一轮都真实打一次 LLM**：`Planner.replan` → `createPlan` 是一次规划请求（`Planner.java:186-204`）。
+2. **goal 文本逐轮嵌套**：`replan` 拼出的新 goal 里含旧 goal 原文（`Planner.java:190-193`），而 `createPlan` 把它原样设成新计划的 goal（`Planner.java:115`）。于是「原任务: 原任务: …」一层层套下去，token 成本递增。
+3. **触发条件不随失败次数改变**：判定只看 `getProgress() < 0.5`（`ExecutionPlan.java:150-156`）。失败原因不变时，每一轮都重新满足条件。
+
+实测证据：并行批次里一次偶发失败触发了这条链，日志连续出现 20+ 行「🔄 重新规划，原因: …」，随后是 `StackOverflowError`，栈顶在两个方法之间无限交替：
+
+```
+at com.codeagent.agent.PlanExecuteAgent.reviewAndExecutePlan(PlanExecuteAgent.java:367)
+at com.codeagent.agent.PlanExecuteAgent.executePlan(PlanExecuteAgent.java:436)
+```
+
+（同样的代码也存在于合并前的提交里，所以这是**旧缺陷**，不是本次合并引入的。）
+
+**修法**：给这条链加一个深度参数并封顶（`PlanExecuteAgent.java:136`、`:441-451`）。达到上限后不再重规划，把本次失败记进失败摘要、继续推进剩余可执行任务；重规划成功时把**外层已经发生的失败**一并拼进最终报告（`PlanExecuteAgent.java:436-439`、`:448-450`）——修复前那句 `return reviewAndExecutePlan(replanned, …)` 会把外层攒好的 `finalResult` 直接丢掉。
+
+**回归测试**：`capsReplanningWhenEarlyFailureKeepsRecurring`（`PlanExecuteAgentTest.java:484`）让 `Planner.createPlan` / `replan` 每次产出一个只有一个任务、且该任务必然失败的计划，于是「失败 → 重规划 → 再失败」必然重复。断言两件事：`replan` 只被调用一次（封顶），且最终结果里同时出现外层任务与重规划后任务的失败（不丢账）。修复前该测试以 `StackOverflowError` 失败。
 
 ---
 
@@ -638,9 +681,9 @@ graph TB
     REV[Reviewer 策略<br/>每次调用现建，不在 DAG 上]
 ```
 
-- 顶层策略由**用户提交态原文**构造（`PlanExecuteAgent.java:324-327`），不是展开后的任务文本。CLI 传的是 `run(taskInput, submittedInput)` 两个参数——`taskInput` 是展开过 `@path` / MCP resource 的版本，`submittedInput` 是用户原样输入（`Main.java:1000`）。策略只看后者，避免「展开进来的路径/URL」被当成用户授权。
-- 每个任务派生自己的分支：`turnToolPolicy.forkWithTrustedUrls(直接依赖的 URL)`（`PlanExecuteAgent.java:571-575`）。
-- 传给下游的 URL 来自**直接依赖**分支的 `trustedUrlContext()`（`PlanExecuteAgent.java:571-574`），不展开传递依赖——所以长链条中间的 URL 会断掉。这个边界有测试：`dependentTaskInheritsOnlyTypedSearchUrlProvenance`（`PlanExecuteAgentTest.java:291`）。
+- 顶层策略由**用户提交态原文**构造（`PlanExecuteAgent.java:318-322`），不是展开后的任务文本。CLI 传的是 `run(taskInput, submittedInput)` 两个参数——`taskInput` 是展开过 `@path` / MCP resource 的版本，`submittedInput` 是用户原样输入（`Main.java:1000`）。策略只看后者，避免「展开进来的路径/URL」被当成用户授权。
+- 每个任务派生自己的分支：`turnToolPolicy.forkWithTrustedUrls(直接依赖的 URL)`（`PlanExecuteAgent.java:574-578`）。
+- 传给下游的 URL 来自**直接依赖**分支的 `trustedUrlContext()`（`PlanExecuteAgent.java:574-577`），不展开传递依赖——所以长链条中间的 URL 会断掉。这个边界有测试：`dependentTaskInheritsOnlyTypedSearchUrlProvenance`（`PlanExecuteAgentTest.java:293`）。
 - `SUPPLEMENT` 会重建顶层策略并**扩大**授权集合（见 3.3）。
 
 ## 6.2 Reviewer 不在凭据链上——但它也没有工具
@@ -662,7 +705,7 @@ TurnToolPolicy activeToolPolicy = turnToolPolicy == null
 
 ## 6.3 浏览器租约
 
-`executeTask` 的 `finally` 里 `taskToolPolicy.releaseBrowserLease()`（`PlanExecuteAgent.java:593-597`）。这一点在并行批次下是关键：浏览器是**共享资源**，租约必须成对释放，否则后续任务会拿不到浏览器而失败。合并前旧实现也在每步释放。**当前没有测试覆盖「并行批次的租约是否成对释放」**（见 11.6）。
+`executeTask` 的 `finally` 里 `taskToolPolicy.releaseBrowserLease()`（`PlanExecuteAgent.java:596-600`）。这一点在并行批次下是关键：浏览器是**共享资源**，租约必须成对释放，否则后续任务会拿不到浏览器而失败。合并前旧实现也在每步释放。**当前没有测试覆盖「并行批次的租约是否成对释放」**（见 11.6）。
 
 ## 6.4 账本：plan 模式条目 + child session
 
@@ -670,13 +713,13 @@ TurnToolPolicy activeToolPolicy = turnToolPolicy == null
 
 | actor | 写什么 | 位置 |
 |---|---|---|
-| `plan-agent` | `user_input`、`run_result`、`run_error`、`run_cancelled` | `PlanExecuteAgent.java:328-329`、`:339-343`、`:352-356`、`:333-335` |
+| `plan-agent` | `user_input`、`run_result`、`run_error`、`run_cancelled` | `PlanExecuteAgent.java:328-329`、`:334-338`、`:347-351`、`:333-339` |
 | `planner` | `system_prompt`、`planning_request`、`llm_response` | `Planner.java:73-74`、`:79-83` |
-| `task:<id>` | `system_prompt`、`task_input`、`llm_response`、`tool_execution`、`lsp_diagnostics`、`image_tool_result`、`budget_finalization*` | `PlanExecuteAgent.java:650-657`、`:742-748`、`:765-769`、`:779-784`、`:871-875` |
+| `task:<id>` | `system_prompt`、`task_input`、`llm_response`、`tool_execution`、`lsp_diagnostics`、`image_tool_result`、`budget_finalization*` | `PlanExecuteAgent.java:657-664`、`:749-753`、`:772-776`、`:789`、`:881` |
 
-`appendTaskMessage` 是任务侧的唯一写入口（`PlanExecuteAgent.java:935-941`），它同时做三件事：进本地 `messages`、`historyVersion++`、写账本。**账本是 append-only 的原始流水，不是发送视图**——压缩和清空只影响 `messages`，不回写账本（压缩事件以 `compaction` 事件追加，`PlanExecuteAgent.java:263-271`）。
+`appendTaskMessage` 是任务侧的唯一写入口（`PlanExecuteAgent.java:942-948`），它同时做三件事：进本地 `messages`、`historyVersion++`、写账本。**账本是 append-only 的原始流水，不是发送视图**——压缩和清空只影响 `messages`，不回写账本（压缩事件以 `compaction` 事件追加，`PlanExecuteAgent.java:258-269`）。
 
-任务的详细消息还会写进 child session（`persistChildMessage`，`PlanExecuteAgent.java:943-963`），前提是注入了 `parentSession`：
+任务的详细消息还会写进 child session（`persistChildMessage`，`PlanExecuteAgent.java:950-970`），前提是注入了 `parentSession`：
 
 | 入口 | `setParentSession`？ | 结果 |
 |---|---|---|
@@ -740,26 +783,26 @@ TurnToolPolicy activeToolPolicy = turnToolPolicy == null
 
 | 主题 | 设计意图 / 常见理解 | 实际实现 | 源码位置 |
 |---|---|---|---|
-| `humanPlanGate` 开关 | 以为它控制要不要停下问人 | **`src/main` 里从未被读取**；真正决定的是注入的 `PlanReviewHandler` 实现 | `PipelineOptions.java:7`、`PlanExecuteAgent.java:184-185`、`:371` |
+| `humanPlanGate` 开关 | 以为它控制要不要停下问人 | **`src/main` 里从未被读取**；真正决定的是注入的 `PlanReviewHandler` 实现 | `PipelineOptions.java:7`、`PlanExecuteAgent.java:184`、`:367` |
 | TUI 的计划门 | 以为 `FULL_PRESET` ⇒ 会停下等人 | TUI 注入的是 `(goal, plan) -> execute()`，**从不询问用户** | `TuiSessionController.java:250-257` |
 | TUI 的审计粒度 | 以为 CLI/TUI 等价 | TUI **不调用 `setParentSession`**，没有任务级 child session | `TuiSessionController.java:259` vs `Main.java:1305`、`:1321` |
-| 并行批次的 Reviewer | 以为每步独占一个 Reviewer（旧实现如此） | **单个 `SubAgent` 实例被所有并行任务共享**，无任何同步 → 数据竞争 | `PlanExecuteAgent.java:185-189`、`:510-531` vs `SubAgent.java:80`、`:67` |
+| 并行批次的 Reviewer | 以为每步独占一个 Reviewer（旧实现如此） | **曾经**是单个 `SubAgent` 实例被所有并行任务共享，无同步 → 数据竞争；**已修复**为每任务现建一个实例 | `PlanExecuteAgent.java:610-611`、`:513-517` vs `SubAgent.java:80`、`:67`；详见 5.6 |
 | Reviewer 的输入 | 以为含依赖上下文与工具证据 | 只有「总目标 + 当前任务 + 最终文本」；无依赖结果、无工具记录、无工具 | `SubAgentStepReviewer.java:24`、`SubAgent.java:507`、`:557-562` |
-| 重试的上下文 | 以为重试能利用上一轮的执行轨迹 | 每次 `executeTaskWithPolicy` **新建 `messages`**，重试在干净上下文里重跑，只能靠 `feedback` | `PlanExecuteAgent.java:649`、`:619-620` |
+| 重试的上下文 | 以为重试能利用上一轮的执行轨迹 | 每次 `executeTaskWithPolicy` **新建 `messages`**，重试在干净上下文里重跑，只能靠 `feedback` | `PlanExecuteAgent.java:656`、`:626-627` |
 | 审查意见的兜底 | 以为解析不出结构就保留原文当反馈 | 三级结构都取不到时返回**硬编码文案**，Reviewer 原文被丢弃 | `ReviewResponseParser.java:69-72` |
-| 审查调用失败 | 以为至少会标记「未验证」 | `StepReviewDecision.approve()`，**无警告**，任务标 `COMPLETED` | `SubAgentStepReviewer.java:28-30`、`PlanExecuteAgent.java:419-421` |
-| 重试耗尽 | 以为会标 `FAILED` | 保留最后结果并 `markCompleted`，拒绝结论被覆盖 | `PlanExecuteAgent.java:612-615` |
-| 取消语义 | 以为执行期间随时可中断 | 重试 `while` 内**无取消检查**，只在 `executeTaskWithPolicy` 循环首尾检查 | `PlanExecuteAgent.java:664`、`:718` vs `:607-621` |
-| 预算与重试的交互 | 以为预算耗尽就结束 | 每次重试**新建 `AgentBudget`**，最坏消耗 3 倍预算 | `PlanExecuteAgent.java:661` |
+| 审查调用失败 | 以为至少会标记「未验证」 | `StepReviewDecision.approve()`，**无警告**，任务标 `COMPLETED` | `SubAgentStepReviewer.java:28-30`、`PlanExecuteAgent.java:416-427` |
+| 重试耗尽 | 以为会标 `FAILED` | 保留最后结果并 `markCompleted`，拒绝结论被覆盖 | `PlanExecuteAgent.java:619-622` |
+| 取消语义 | 以为执行期间随时可中断 | 重试 `while` 内**无取消检查**，只在 `executeTaskWithPolicy` 循环首尾检查 | `PlanExecuteAgent.java:671`、`:725` vs `:614-628` |
+| 预算与重试的交互 | 以为预算耗尽就结束 | 每次重试**新建 `AgentBudget`**，最坏消耗 3 倍预算 | `PlanExecuteAgent.java:668` |
 | 结果传递的完整性 | 旧文档称「依赖结果只传预览、有固定字符上限」 | **合并后改为全文注入，无截断** | `StepBriefing.java:37-39`、`StepBriefingTest.java:24` |
-| Planner 是否重规划 | 以为执行失败会带审查反馈重规划 | 只在 `progress < 0.5` 时触发，且**与审查反馈无关** | `PlanExecuteAgent.java:439-443` |
-| `AgentRole.PLANNER` / `WORKER` | 以为三个角色都在生产路径上 | `src/main` 里**只在 Reviewer 处实例化 `SubAgent`**；`shouldUseTools()` 的 WORKER 分支生产不可达 | `PlanExecuteAgent.java:187`、`SubAgent.java:557-562` |
+| Planner 是否重规划 | 以为执行失败会带审查反馈重规划 | 只在 `progress < 0.5` 时触发，**与审查反馈无关**，且整轮最多 1 次 | `PlanExecuteAgent.java:441-451`、`:136` |
+| `AgentRole.PLANNER` / `WORKER` | 以为三个角色都在生产路径上 | `src/main` 里**只在 Reviewer 处实例化 `SubAgent`**；`shouldUseTools()` 的 WORKER 分支生产不可达 | `PlanExecuteAgent.java:611`、`SubAgent.java:557-562` |
 | `AgentMessage` 类型 | 旧文档称六种类型、三种从未被调用 | **已收敛为三种**（`TASK`/`RESULT`/`ERROR`），三种都有调用点 | `AgentMessage.java:19-23` vs `SubAgent.java:408`、`:413`、`:451` |
 | 审查结论的传递 | 旧实现是「自由文本 + 两个独立方法分别解析」 | 现在是 `ReviewResponseParser` 一次解析出 `StepReviewDecision` | `StepReviewDecision.java:6-15`、`SubAgentStepReviewer.java:31-34` |
-| `Task.TaskStatus.RUNNING` | 旧实现里该状态不可达（`started()` 无调用点） | **可达**：批次执行前会 `task.markStarted()` | `PlanExecuteAgent.java:494`、`:520`、`Task.java:80-83` |
+| `Task.TaskStatus.RUNNING` | 旧实现里该状态不可达（`started()` 无调用点） | **可达**：批次执行前会 `task.markStarted()` | `PlanExecuteAgent.java:497`、`:523`、`Task.java:80-83` |
 | `parsePlan` 的未知依赖 | 以为解析期会校验 | `idMapping.getOrDefault` 静默回退原始串 → 该任务永久 PENDING | `Planner.java:144-150`（详见 doc 02） |
-| `StepBriefing` 里的 URL | 以为继承传递依赖 | 只注入**直接依赖**分支的 URL | `PlanExecuteAgent.java:571-575`、`:1181-1183` |
-| `turnToolPolicy` 的补充分支 | 以为策略只建一次 | `SUPPLEMENT` 会重建并**扩大**授权集合 | `PlanExecuteAgent.java:387-391` |
+| `StepBriefing` 里的 URL | 以为继承传递依赖 | 只注入**直接依赖**分支的 URL | `PlanExecuteAgent.java:574-578`、`:1180-1191` |
+| `turnToolPolicy` 的补充分支 | 以为策略只建一次 | `SUPPLEMENT` 会重建并**扩大**授权集合 | `PlanExecuteAgent.java:383-389` |
 | Reviewer 的 URL 策略 | 以为它在某条凭据链上 | 每次调用现建，输入含执行结果文本（潜在越权点，但无工具故无害） | `SubAgent.java:255-261` |
 
 ---
@@ -787,54 +830,57 @@ TurnToolPolicy activeToolPolicy = turnToolPolicy == null
 
 | 场景 | 检测点 | 当前处理 | 最终状态 |
 |---|---|---|---|
-| 规划前取消 | `CancellationContext`（`PlanExecuteAgent.java:332`） | 写 `run_cancelled` 并返回取消提示 | 任务取消，不写 `run_result` |
-| 计划门 CANCEL | `PlanExecuteAgent.java:376-378` | 返回取消提示 | 任务取消，不写 `run_result` |
-| 计划门 SUPPLEMENT 但 feedback 为空 | `PlanExecuteAgent.java:380-383` | **静默降级为 EXECUTE** | 开始执行 |
+| 规划前取消 | `CancellationContext`（`PlanExecuteAgent.java:327`） | 写 `run_cancelled` 并返回取消提示 | 任务取消，不写 `run_result` |
+| 计划门 CANCEL | `PlanExecuteAgent.java:376-379` | 返回取消提示 | 任务取消，不写 `run_result` |
+| 计划门 SUPPLEMENT 但 feedback 为空 | `PlanExecuteAgent.java:376-379` | **静默降级为 EXECUTE** | 开始执行 |
 | 计划 JSON 非法 / 缺 `tasks` | `Planner.java:111-113` | `tasksNode` 为空 → 计划零任务 | `isAllCompleted()` 对空集合返回 true → 汇总可能报「完成」 |
 | 计划存在循环依赖 | `Planner.java:155-157` | 抛 `IOException("计划中存在循环依赖")` | 由 `run` 捕获 → 「❌ 执行失败」 |
 | 依赖引用未知 ID | `Planner.java:144-150` | 静默丢弃该依赖边 | 该任务不被阻塞（与旧文档描述的「永久 PENDING」相反） |
-| 任务内取消 | `PlanExecuteAgent.java:664`、`:718` | 返回「⏹️ 已取消任务 […]」 | 任务视为完成（`markCompleted`），文本是取消提示 |
-| 批次之间取消 | `PlanExecuteAgent.java:406-408` | 退出调度循环 | 「⏹️ 已取消当前计划执行。」 |
-| 任务执行抛异常 | `PlanExecuteAgent.java:499-501`、`:528-530` | `TaskExecutionResult.failure` → `markFailed` | FAILED，**跳过审查** |
+| 任务内取消 | `PlanExecuteAgent.java:671`、`:725` | 返回「⏹️ 已取消任务 […]」 | 任务视为完成（`markCompleted`），文本是取消提示 |
+| 批次之间取消 | `PlanExecuteAgent.java:403-405` | 退出调度循环 | 「⏹️ 已取消当前计划执行。」 |
+| 任务执行抛异常 | `PlanExecuteAgent.java:499-504`、`:531-533` | `TaskExecutionResult.failure` → `markFailed` | FAILED，**跳过审查** |
 | 后续任务依赖 FAILED | `Task.isExecutable`（`Task.java:114-123`） | 依赖必须 `COMPLETED` → 后续保持 PENDING | PENDING，汇总报「计划未能继续推进」 |
-| 任务失败且进度 < 0.5 | `PlanExecuteAgent.java:439-443` | 重新规划 → 回到计划门 | 重规划（可能反复） |
-| 任务失败且进度 ≥ 0.5 | `PlanExecuteAgent.java:445-448` | 累加失败摘要 | 「⚠️ 计划部分完成，有任务失败。」 |
-| 预算耗尽 | `finalizePartialTask`（`PlanExecuteAgent.java:790-836`） | 无工具收尾调用，返回「⚠️ 部分完成」 | 视为成功 → **进审查** |
+| 任务失败且进度 < 0.5 | `PlanExecuteAgent.java:441-451` | 重新规划 → 回到计划门 | 重规划，但整轮最多 1 次 |
+| 任务失败且已达重规划上限 | `PlanExecuteAgent.java:442-445`、`:136` | 打印「⚠️ 已达到最大重规划次数」并累加失败摘要 | 「⚠️ 计划部分完成，有任务失败。」 |
+| 任务失败且进度 ≥ 0.5 | `PlanExecuteAgent.java:436-439` | 累加失败摘要 | 「⚠️ 计划部分完成，有任务失败。」 |
+| 预算耗尽 | `finalizePartialTask`（`PlanExecuteAgent.java:797-843`） | 无工具收尾调用，返回「⚠️ 部分完成」 | 视为成功 → **进审查** |
 | 审查调用报 ERROR | `SubAgentStepReviewer.java:28-30` | `approve()` | COMPLETED，无警告 |
 | 审查返回空 / 非法 JSON | `ReviewResponseParser.java:19-49` | fail-closed 判拒绝 | 进重试 |
 | 审查 JSON 缺 `approved` | `ReviewResponseParser.java:27-30` | 判拒绝 | 进重试 |
 | 审查结论无法取到任何 issues | `ReviewResponseParser.java:69-72` | 硬编码文案 | 进重试（反馈可能是套话） |
-| 重试期间执行体抛异常 | `PlanExecuteAgent.java:619-620` 抛到 `executeTask` | 该异常从 `applyStepReview` 冒出 → 被批次捕获 → `failure` | FAILED |
-| 重试次数耗尽 | `PlanExecuteAgent.java:612-615` | 保留最后结果 + 警告 | COMPLETED |
+| 重试期间执行体抛异常 | `PlanExecuteAgent.java:626-627` 抛到 `executeTask` | 该异常从 `applyStepReview` 冒出 → 被批次捕获 → `failure` | FAILED |
+| 重试次数耗尽 | `PlanExecuteAgent.java:619-622` | 保留最后结果 + 警告 | COMPLETED |
 | 重试期间用户取消 | **无检查点** | 审查 + 重试继续跑完 | 不受影响 |
 | 并行批次多个任务同时进审查 | **同一 `SubAgent` 实例** | 并发写 `ArrayList` | **未定义**：可能异常、串台或历史错乱 |
-| 并行任务被中断 | `PlanExecuteAgent.java:538-540` | 恢复中断位，记为 failure | 单任务 FAILED |
-| 并行输出为空 | `PlanExecuteAgent.java:553` | 跳过 flush | 该任务无终端输出 |
+| 并行任务被中断 | `PlanExecuteAgent.java:538-543` | 恢复中断位，记为 failure | 单任务 FAILED |
+| 并行输出为空 | `PlanExecuteAgent.java:556` | 跳过 flush | 该任务无终端输出 |
 | 并行写同一文件 | 无冲突检测 | 依赖规划者避免冲突（`planner.md` 第 9-10 条） | 可能互相覆盖 |
-| 浏览器租约未释放 | `finally` 释放（`PlanExecuteAgent.java:596`） | 正常路径成对 | 无测试覆盖 |
+| 浏览器租约未释放 | `finally` 释放（`PlanExecuteAgent.java:599`） | 正常路径成对 | 无测试覆盖 |
 | 进程退出 | 无持久化调度状态 | 内存中的 `Task` 全丢 | 不可恢复（child session 只有消息流水） |
 
 ---
 
 # 第 11 部分　测试策略与证据
 
-## 11.1 端到端编排（`src/test/java/com/codeagent/agent/PlanExecuteAgentTest.java`，13 个用例）
+## 11.1 端到端编排（`src/test/java/com/codeagent/agent/PlanExecuteAgentTest.java`，15 个用例）
 
 | 测试 | 覆盖内容 | 行 |
 |---|---|---|
-| `shouldKeepPlanExecutionArtifactsInTheTaskConversationOnly` | 任务产物只留在任务会话里 | `:40` |
-| `shouldContinuePlanTaskBeyondLegacyFiveIterationLimit` | 任务内轮数上限放宽后能继续 | `:90` |
-| `shouldNotExtractFactsWhenPlanIsCanceled` | 取消不触发长期记忆写入 | `:136` |
-| `shouldNotRepeatStreamedTaskOutputInFinalPlanSummary` | 已流式输出的任务不再重复出现在汇总 | `:160` |
-| `shouldNotPrintEmptyTaskReasoningHeadingAndShouldUseOutputLabel` | 纯空白 reasoning 不打印空标题；标签用「输出」 | `:185` |
-| `supplementRebuildsToolPolicyBeforeReplanning` | 补充要求后重建策略（含新 URL 授权） | `:229` |
-| `noWebSupplementTightensToolPolicyBeforeReplanning` | 补充要求不含 URL 时策略收紧 | `:263` |
-| `dependentTaskInheritsOnlyTypedSearchUrlProvenance` | 只继承直接依赖的 typed URL，下游首轮 schema 出现 `web_fetch` | `:291` |
-| `stepReviewRetriesUntilReviewerApproves` | 连续被拒后重试至通过 | `:323` |
-| `stepReviewDisabledKeepsSingleAttemptPerTask` | **`stepReview = false` 时每任务只跑一次**（用 `PLAN_PRESET`） | `:351` |
-| `fallsBackToExistingOutcomeAfterRetriesExhausted` | 重试耗尽保留既有结果 | `:375` |
-| `runsIndependentTasksInParallel` | 并发峰值 = 2（用 `PLAN_PRESET`，**不进审查**） | `:403` |
-| `reportsIncompleteRunWhenFailureBlocksRemainingTasks` | 前置失败导致后续 PENDING，汇总区分 | `:426` |
+| `shouldKeepPlanExecutionArtifactsInTheTaskConversationOnly` | 任务产物只留在任务会话里 | `:42` |
+| `shouldContinuePlanTaskBeyondLegacyFiveIterationLimit` | 任务内轮数上限放宽后能继续 | `:92` |
+| `shouldNotExtractFactsWhenPlanIsCanceled` | 取消不触发长期记忆写入 | `:138` |
+| `shouldNotRepeatStreamedTaskOutputInFinalPlanSummary` | 已流式输出的任务不再重复出现在汇总 | `:162` |
+| `shouldNotPrintEmptyTaskReasoningHeadingAndShouldUseOutputLabel` | 纯空白 reasoning 不打印空标题；标签用「输出」 | `:187` |
+| `supplementRebuildsToolPolicyBeforeReplanning` | 补充要求后重建策略（含新 URL 授权） | `:231` |
+| `noWebSupplementTightensToolPolicyBeforeReplanning` | 补充要求不含 URL 时策略收紧 | `:265` |
+| `dependentTaskInheritsOnlyTypedSearchUrlProvenance` | 只继承直接依赖的 typed URL，下游首轮 schema 出现 `web_fetch` | `:293` |
+| `stepReviewRetriesUntilReviewerApproves` | 连续被拒后重试至通过 | `:325` |
+| `stepReviewDisabledKeepsSingleAttemptPerTask` | **`stepReview = false` 时每任务只跑一次**（用 `PLAN_PRESET`） | `:353` |
+| `fallsBackToExistingOutcomeAfterRetriesExhausted` | 重试耗尽保留既有结果 | `:377` |
+| `runsIndependentTasksInParallel` | 并发峰值 = 2（用 `PLAN_PRESET`，**不进审查**） | `:405` |
+| `parallelStepReviewDoesNotShareReviewerHistory` | **并行任务各拿一份 Reviewer 历史**（`FULL_PRESET`，5.6 的钉子） | `:432` |
+| `reportsIncompleteRunWhenFailureBlocksRemainingTasks` | 前置失败导致后续 PENDING，汇总区分 | `:454` |
+| `capsReplanningWhenEarlyFailureKeepsRecurring` | **重规划封顶为 1 次**，且不丢外层失败（5.8 的钉子） | `:484` |
 
 ## 11.2 简报（`StepBriefingTest.java`，7 个用例）
 
@@ -878,7 +924,7 @@ TurnToolPolicy activeToolPolicy = turnToolPolicy == null
 | `PipelineOptionsTest.teamPresetSkipsTheHumanGateAndEnablesAutoReview` | `TEAM_PRESET = (false,true)` | `:17` |
 | `PipelineOptionsTest.fullPresetEnablesBothInSeries` | `FULL_PRESET = (true,true)` | `:23` |
 | `MainPlanAgentFactoryTest.planModeReusesReactToolRegistryMemoryManagerAndLedger` | 计划 Agent 与 ReAct Agent 共享 ToolRegistry / MemoryManager / Ledger（含 `planner` 的 ledger） | `:23` |
-| `MainPlanAgentFactoryTest.planModeEnablesHumanGateAndStepReview` | `assertSame(FULL_PRESET, …)` + `stepReviewer != null` | `:46` |
+| `MainPlanAgentFactoryTest.planModeEnablesHumanGateAndStepReview` | `assertSame(FULL_PRESET, …)` + `pipelineOptions.stepReview()` 为真 | `:46` |
 | `AgentConversationLedgerTest.reactLedgerPreservesToolProtocolAndFinalReasoning` | ReAct 侧的 tool_call / tool_result / assistant 条目 | `:28` |
 | `AgentConversationLedgerTest.fullPresetKeepsRunningWithThePlanLedgerContract` | **统一后只产生 `plan` 模式条目**；Reviewer 子 Agent 不共享父账本 | `:144` |
 | `AgentConversationLedgerTest.planModeWritesIntoTheSharedLedgerWithTaskActor` | 任务条目的 actor 是 `task:task_1` | `:109` |
@@ -888,7 +934,7 @@ TurnToolPolicy activeToolPolicy = turnToolPolicy == null
 
 ## 11.6 当前测试未覆盖的点
 
-- **并行批次 + 步骤评审**（即 5.6 的数据竞争）。现有并行测试用 `PLAN_PRESET`，绕不开评审就无法触发。
+- **并行批次 + 步骤评审**：已由 `parallelStepReviewDoesNotShareReviewerHistory`（`PlanExecuteAgentTest.java:432`）覆盖，断言两个并行任务各拿一份 Reviewer 历史。更细的「并发审查是否串台」仍未覆盖（该测试用的是各写各的 stub，不是真实并发压力）。
 - 审查调用报错时任务被记为 `COMPLETED` 的**编排层**后果（`SubAgentStepReviewerTest` 只测到适配器的返回，没测 `applyStepReview` 之后的状态）。
 - 重试耗尽后拒绝结论被覆盖（`fallsBackToExistingOutcomeAfterRetriesExhausted` 测了结果保留，但没断言「未验证」）。
 - 重试期间的取消行为。
@@ -896,7 +942,7 @@ TurnToolPolicy activeToolPolicy = turnToolPolicy == null
 - 并行批次的浏览器租约是否成对释放。
 - TUI 计划路径的端到端接线（含「计划门是橡皮图章」这一既定事实）。
 - `parsePlan` 的未知依赖 / `dependencies` 非数组 / `id` 缺失（见 doc 02）。
-- `Planner.replan` 生成的计划是否会再次经过计划门（有代码路径，无测试）。
+- 重规划失败链的「再次过计划门」：`capsReplanningWhenEarlyFailureKeepsRecurring`（`PlanExecuteAgentTest.java:484`）走的是 `FULL_PRESET` 且 handler 直接放行，所以覆盖了「重规划被调用且封顶」，没覆盖「重规划后 handler 又拦住人」这条分支。
 
 ## 11.7 回归命令
 
@@ -929,7 +975,7 @@ mvn test -DskipTests=false -Pquick
 
 审查侧分两层失败策略，这是我最想讲的一点：**如果审查调用本身失败，判通过**——不能因为审查服务挂了就作废一个可能完全正确的任务；**如果审查返回了内容但无法确认通过，判不通过**，也就是 fail-closed。审查结论不再走自由文本二次解析，而是结构化成一个 record，同时携带通过标志和改进意见，意见按 `issues` → `suggestions` → `summary` 三级回退。
 
-**我要诚实说的几处限制**：第一，`humanPlanGate` 这个字段在 main 里从来没被读取过，计划门是否真的拦人完全取决于注入的 handler——CLI 会停下等人，TUI 传的是个直接放行的 lambda，所以 TUI 下计划门是橡皮图章。第二，审查调用失败会被记为 `COMPLETED`，没有任何警告，"未验证"没有被建模成一个状态。第三，重试耗尽后保留结果并标 `COMPLETED`，Reviewer 的拒绝结论不体现在汇总里。第四，Reviewer 是纯文本审查器——只有任务描述和最终文本，没有工具、没有依赖结果、没有工具调用记录，所以它没法核实"我跑了测试"这类声明。第五，也是我最近才发现的一处回归：并行批次里所有任务共享同一个 `SubAgent` 实例去审查，而 `SubAgent` 的历史是普通 `ArrayList`、没有任何同步，所以这是数据竞争——旧的三角色实现是为每个并行步骤各建一个 Reviewer 才避开的，合并时这个保护丢了。
+**我要诚实说的几处限制**：第一，`humanPlanGate` 这个字段在 main 里从来没被读取过，计划门是否真的拦人完全取决于注入的 handler——CLI 会停下等人，TUI 传的是个直接放行的 lambda，所以 TUI 下计划门是橡皮图章。第二，审查调用失败会被记为 `COMPLETED`，没有任何警告，"未验证"没有被建模成一个状态。第三，重试耗尽后保留结果并标 `COMPLETED`，Reviewer 的拒绝结论不体现在汇总里。第四，Reviewer 是纯文本审查器——只有任务描述和最终文本，没有工具、没有依赖结果、没有工具调用记录，所以它没法核实"我跑了测试"这类声明。第五，一处合并引入、后来又修掉的回归：并行批次里所有任务曾经共享同一个 `SubAgent` 实例去审查，而 `SubAgent` 的历史是普通 `ArrayList`、没有任何同步，所以是数据竞争——旧的三角色实现是为每个并行步骤各建一个 Reviewer 才避开的，合并时这个保护丢了，现在已改成每任务现建一个实例并加了回归测试。另外还有一处更早的旧缺陷是我顺手发现并封顶的：任务早期失败会触发重规划，而重规划又会重新走整条链，递归没有边界，实测能把栈打穿。
 
 ## 12.3 合并类问题怎么答
 
@@ -945,15 +991,15 @@ mvn test -DskipTests=false -Pquick
 
 ### Q1：Multi-Agent 比单 Agent 多了什么？
 
-多的是**责任与上下文隔离**，不是模型数量。规划只看全局、执行只看当前任务与依赖产物、审查只看任务描述与结果，三者由编排器显式传递（`Planner.java:67-72`、`PlanExecuteAgent.java:642`、`SubAgentStepReviewer.java:24`）。代价是多一次规划调用 + 每任务一次审查调用的成本。
+多的是**责任与上下文隔离**，不是模型数量。规划只看全局、执行只看当前任务与依赖产物、审查只看任务描述与结果，三者由编排器显式传递（`Planner.java:67-72`、`PlanExecuteAgent.java:649`、`SubAgentStepReviewer.java:24`）。代价是多一次规划调用 + 每任务一次审查调用的成本。
 
 ### Q2：三个角色是三个模型吗？
 
-不是。规划、执行、审查共用同一个 `LlmClient` 实例（`PlanExecuteAgent.java:178` 保存、`:181` 交给 `Planner`、`:187` 交给 Reviewer）。区别只在提示词和消息列表。
+不是。规划、执行、审查共用同一个 `LlmClient` 实例（`PlanExecuteAgent.java:178` 保存、`:181` 交给 `Planner`、`:611` 交给 Reviewer）。区别只在提示词和消息列表。
 
 ### Q3：三个角色是三个类吗？
 
-不是。规划是 `Planner` 类，执行是 `PlanExecuteAgent.executeTaskWithPolicy` 方法，审查是一个 `SubAgent` 实例（`PlanExecuteAgent.java:187`）。合并前它们都是 `SubAgent` 的实例，现在只有审查还是。
+不是。规划是 `Planner` 类，执行是 `PlanExecuteAgent.executeTaskWithPolicy` 方法，审查是一个 `SubAgent` 实例（`PlanExecuteAgent.java:611`）。合并前它们都是 `SubAgent` 的实例，现在只有审查还是。
 
 ### Q4：`SubAgent` 和主 `Agent` 是什么关系？
 
@@ -961,7 +1007,7 @@ mvn test -DskipTests=false -Pquick
 
 ### Q5：`AgentRole` 里三个角色在生产路径上都用到了吗？
 
-`REVIEWER` 是唯一在生产代码里被实例化的（`PlanExecuteAgent.java:187`）。`PLANNER` / `WORKER` 目前只在测试里出现，所以 `SubAgent.shouldUseTools()` 里 `role == WORKER` 那个分支**生产不可达**（`SubAgent.java:557-562`）。这是一个可以清理的残留。
+`REVIEWER` 是唯一在生产代码里被实例化的（`PlanExecuteAgent.java:611`）。`PLANNER` / `WORKER` 目前只在测试里出现，所以 `SubAgent.shouldUseTools()` 里 `role == WORKER` 那个分支**生产不可达**（`SubAgent.java:557-562`）。这是一个可以清理的残留。
 
 ### Q6：审查结论是怎么传回来的？
 
@@ -977,15 +1023,15 @@ mvn test -DskipTests=false -Pquick
 
 ### Q9：为什么最多重试 2 次？
 
-限制成本和循环风险。`MAX_RETRIES_PER_STEP` 限制的是首次执行之后的额外尝试（`PlanExecuteAgent.java:135`、`:612-616`），所以一个任务最多被执行 3 次、被审查 3 次。还有一处放大器要主动交代：每次重试都新建 `AgentBudget`（`:661`），所以最坏情况下一个任务烧掉 3 份预算。
+限制成本和循环风险。`MAX_RETRIES_PER_STEP` 限制的是首次执行之后的额外尝试（`PlanExecuteAgent.java:135`、`:619-623`），所以一个任务最多被执行 3 次、被审查 3 次。还有一处放大器要主动交代：每次重试都新建 `AgentBudget`（`:668`），所以最坏情况下一个任务烧掉 3 份预算。
 
 ### Q10：重试的时候给执行体什么？
 
-只有一句反馈，以「之前的结果被审查拒绝，原因：…」的形式进简报（`StepBriefing.java:49-52`），**不含上一次的结果本身**。合并前重试复用同一个 `SubAgent`、历史未清空，所以执行体还记得自己上一轮做了什么；现在 `executeTaskWithPolicy` 每次新建 `messages`（`PlanExecuteAgent.java:649`），**重试是在干净上下文里重跑的**——这是合并带来的一处能力退化。
+只有一句反馈，以「之前的结果被审查拒绝，原因：…」的形式进简报（`StepBriefing.java:49-52`），**不含上一次的结果本身**。合并前重试复用同一个 `SubAgent`、历史未清空，所以执行体还记得自己上一轮做了什么；现在 `executeTaskWithPolicy` 每次新建 `messages`（`PlanExecuteAgent.java:656`），**重试是在干净上下文里重跑的**——这是合并带来的一处能力退化。
 
 ### Q11：审查一直不通过会怎样？
 
-重试耗尽后保留当前结果并打印「⚠️ 任务 […] 达到最大重试次数，保留当前结果」（`PlanExecuteAgent.java:612-615`），任务状态仍是 `COMPLETED`。拒绝结论不会体现在最终汇总的状态里。
+重试耗尽后保留当前结果并打印「⚠️ 任务 […] 达到最大重试次数，保留当前结果」（`PlanExecuteAgent.java:619-622`），任务状态仍是 `COMPLETED`。拒绝结论不会体现在最终汇总的状态里。
 
 ### Q12：依赖结果怎么传递？
 
@@ -993,15 +1039,15 @@ mvn test -DskipTests=false -Pquick
 
 ### Q13：URL 凭据是怎么隔离的？
 
-顶层策略从**用户提交态原文**构建（`PlanExecuteAgent.java:324-327`；CLI 传的 `submittedInput` 是未展开的原文），每个任务用 `forkWithTrustedUrls(直接依赖的 TrustedUrlContext)` 派生独立分支（`:571-575`）。所以「分支默认隔离，只有声明的 DAG 后继可继承」成立，测试是 `dependentTaskInheritsOnlyTypedSearchUrlProvenance`。
+顶层策略从**用户提交态原文**构建（`PlanExecuteAgent.java:318-322`；CLI 传的 `submittedInput` 是未展开的原文），每个任务用 `forkWithTrustedUrls(直接依赖的 TrustedUrlContext)` 派生独立分支（`:574-578`）。所以「分支默认隔离，只有声明的 DAG 后继可继承」成立，测试是 `dependentTaskInheritsOnlyTypedSearchUrlProvenance`。
 
 ### Q14：URL 隔离有什么边界？
 
-两个。一是继承只看**直接依赖**，不展开传递依赖（`PlanExecuteAgent.java:571-574`），长链中间的 URL 会断。二是 **Reviewer 不在任何凭据链上**：`SubAgentStepReviewer` 从不调用 `setTurnToolPolicy`，所以每次审查都现建一份策略，且输入文本里含被审查任务的执行结果（`SubAgent.java:255-261`）——严格说这是越权点，但因为 Reviewer 没有工具而不可利用。这是「靠没工具而安全」，不是「靠策略正确而安全」。
+两个。一是继承只看**直接依赖**，不展开传递依赖（`PlanExecuteAgent.java:574-577`），长链中间的 URL 会断。二是 **Reviewer 不在任何凭据链上**：`SubAgentStepReviewer` 从不调用 `setTurnToolPolicy`，所以每次审查都现建一份策略，且输入文本里含被审查任务的执行结果（`SubAgent.java:255-261`）——严格说这是越权点，但因为 Reviewer 没有工具而不可利用。这是「靠没工具而安全」，不是「靠策略正确而安全」。
 
 ### Q15：并行的调度粒度是什么？
 
-按依赖分层。每轮取当前所有依赖已满足的任务作为一个批次，批内并行、批间串行（`PlanExecuteAgent.java:405-450`），线程池大小是 `min(任务数, 4)`（`:510`）。不是「谁空出来谁上」的持续调度。
+按依赖分层。每轮取当前所有依赖已满足的任务作为一个批次，批内并行、批间串行（`PlanExecuteAgent.java:402-453`），线程池大小是 `min(任务数, 4)`（`:513`）。不是「谁空出来谁上」的持续调度。
 
 ### Q16：并行写文件会冲突吗？
 
@@ -1009,27 +1055,27 @@ mvn test -DskipTests=false -Pquick
 
 ### Q17：怎么验证并行是真的？
 
-用阻塞式 stub + 并发峰值计数器。`PlanExecuteAgentTest.runsIndependentTasksInParallel`（`:403`）断言两个任务同时挂在 `chat()` 里、峰值为 2。**注意这个测试用的是 `PLAN_PRESET`**，所以它验证的是并行调度，不覆盖并行 + 审查的路径。
+用阻塞式 stub + 并发峰值计数器。`PlanExecuteAgentTest.runsIndependentTasksInParallel`（`:405`）断言两个任务同时挂在 `chat()` 里、峰值为 2。**注意这个测试用的是 `PLAN_PRESET`**，所以它验证的是并行调度，不覆盖并行 + 审查的路径。
 
 ### Q18：并行批次的审查有什么问题？
 
-**有数据竞争**。构造器只创建一个 `SubAgent` 作为 Reviewer（`PlanExecuteAgent.java:185-189`），而并行批次会多线程同时进入 `applyStepReview` → 同一个实例的 `execute`。`SubAgent.conversationHistory` 是普通 `ArrayList`（`SubAgent.java:80`），`historyVersion` 是普通 `long`（`:67`），类里没有任何 `synchronized`。后果包括并发修改异常、审查输入串台、历史被别的线程清空。旧实现为每个并行步骤各建一个 `reviewer-{stepId}`，正是为了避开这一点；合并时这个保护没有被搬过来，而 `/plan` 现在是 `FULL_PRESET`，所以**并行 + 审查是默认路径**。最小修法是给审查加同步或恢复每任务一个实例。
+**曾经有，已经修掉了**。合并后的一段时间里，构造器只创建一个 `SubAgent` 作为 Reviewer，而并行批次会多线程同时进入 `applyStepReview` → 同一个实例的 `execute`。`SubAgent.conversationHistory` 是普通 `ArrayList`（`SubAgent.java:80`），`historyVersion` 是普通 `long`（`:67`），类里没有任何 `synchronized`，后果包括并发修改异常、审查输入串台、历史被别的线程清空。旧实现为每个并行步骤各建一个 `reviewer-{stepId}`，正是为了避开这一点；合并时这个保护没有被搬过来，而 `/plan` 是 `FULL_PRESET`，所以**并行 + 审查是默认路径**。修法是恢复「每任务一个实例」：开关改读 `pipelineOptions.stepReview()`（`PlanExecuteAgent.java:587`），Reviewer 在 `applyStepReview` 内部现建（`PlanExecuteAgent.java:610-611`），回归测试 `parallelStepReviewDoesNotShareReviewerHistory` 断言两个并行任务拿到的不是同一份历史。
 
 ### Q19：规划者会被再次调用吗？
 
-会，但只在两种情况下：用户选「补充要求」后重新规划（`PlanExecuteAgent.java:385-392`，可反复），以及任务失败且 `plan.getProgress() < 0.5` 时的重规划（`:439-443`）。**审查反馈不会触发重规划**——重规划看的是进度阈值，不是审查结论。
+会，但只在两种情况下：用户选「补充要求」后重新规划（`PlanExecuteAgent.java:383-389`，可反复），以及任务失败且 `plan.getProgress() < 0.5` 时的重规划（`:441-451`）。**审查反馈不会触发重规划**——重规划看的是进度阈值，不是审查结论。
 
 ### Q20：重规划之后还会再问一次计划门吗？
 
-会。`executePlan` 里检测到失败后调用 `reviewAndExecutePlan(replanned, ...)`（`PlanExecuteAgent.java:442`），而那个方法的 `while` 第一件事就是调 `reviewHandler.review`（`:371`）。所以长任务中途用户可能被问第二次计划。
+会。`executePlan` 里检测到失败后调用 `reviewAndExecutePlan(replanned, ...)`（`PlanExecuteAgent.java:447-450`），而那个方法的 `while` 第一件事就是调 `reviewHandler.review`（`:367`）。所以长任务中途用户可能被问第二次计划。
 
 ### Q21：计划门的三种结果分别做什么？
 
-`EXECUTE` 直接执行；`SUPPLEMENT` 把补充要求拼进 goal 和策略输入、重新规划、**再次过门**；`CANCEL` 返回取消提示且不持久化 assistant 消息（`PlanExecuteAgent.java:370-393`、`PlanRunOutcome.canceled`）。注意 `feedback` 为空时的 `SUPPLEMENT` 会被**静默降级**为 `EXECUTE`（`:380-383`）。
+`EXECUTE` 直接执行；`SUPPLEMENT` 把补充要求拼进 goal 和策略输入、重新规划、**再次过门**；`CANCEL` 返回取消提示且不持久化 assistant 消息（`PlanExecuteAgent.java:364-390`、`PlanRunOutcome.canceled`）。注意 `feedback` 为空时的 `SUPPLEMENT` 会被**静默降级**为 `EXECUTE`（`:376-379`）。
 
 ### Q22：`humanPlanGate` 这个开关生效吗？
 
-**不生效**。`grep -rn humanPlanGate src/main/java` 只会命中声明处（`PipelineOptions.java:7`）；`PlanExecuteAgent` 只读了 `.stepReview()`（`:185`）。人工计划门是否真的拦人取决于注入的 `PlanReviewHandler` 实现：CLI 会停下读单键（`Main.java:1551+`），**TUI 传的是直接放行的 lambda**（`TuiSessionController.java:254`）。所以 TUI 下「计划门」实际是关的，尽管它传 `FULL_PRESET`。
+**不生效**。`grep -rn humanPlanGate src/main/java` 只会命中声明处（`PipelineOptions.java:7`）；`PlanExecuteAgent` 只读了 `.stepReview()`（`:587`）。人工计划门是否真的拦人取决于注入的 `PlanReviewHandler` 实现：CLI 会停下读单键（`Main.java:1551+`），**TUI 传的是直接放行的 lambda**（`TuiSessionController.java:254`）。所以 TUI 下「计划门」实际是关的，尽管它传 `FULL_PRESET`。
 
 ### Q23：`stepReview` 为什么不能从命令行关掉？
 
@@ -1049,11 +1095,11 @@ mvn test -DskipTests=false -Pquick
 
 ### Q27：如何控制 Token 成本？
 
-规划只调一次、规划阶段不暴露工具、每个任务新建消息列表（跨任务不累积）、任务结束即释放、审查输入只有两段文本、重试次数有上限、和主 Agent 一样走上下文压缩（`PlanExecuteAgent.java:704`）。**反方向的问题也要说**：依赖结果是全文注入无截断（`StepBriefing.java:37-39`），每次重试新建预算（`:661`），所以成本上限并不紧。
+规划只调一次、规划阶段不暴露工具、每个任务新建消息列表（跨任务不累积）、任务结束即释放、审查输入只有两段文本、重试次数有上限、和主 Agent 一样走上下文压缩（`PlanExecuteAgent.java:711`）。**反方向的问题也要说**：依赖结果是全文注入无截断（`StepBriefing.java:37-39`），每次重试新建预算（`:668`），所以成本上限并不紧。
 
 ### Q28：这个实现最大的可靠性缺口是什么？
 
-按严重程度：一是并行批次下 Reviewer 的数据竞争（`PlanExecuteAgent.java:185-189`、`:510-531`）；二是审查调用失败被记为 `COMPLETED` 且无警告（`SubAgentStepReviewer.java:28-30`）；三是重试耗尽后拒绝结论被 `COMPLETED` 覆盖（`PlanExecuteAgent.java:612-615`）；四是 Reviewer 缺少验证所需的证据（无工具、无依赖结果、无工具记录）；五是重试期间没有取消检查（`:607-621`）；六是重试在干净上下文里重跑，闭环信息量弱于合并前。
+按严重程度：一是并行批次下 Reviewer 的数据竞争（`PlanExecuteAgent.java:610-611`、`:513-517`）；二是审查调用失败被记为 `COMPLETED` 且无警告（`SubAgentStepReviewer.java:28-30`）；三是重试耗尽后拒绝结论被 `COMPLETED` 覆盖（`PlanExecuteAgent.java:619-622`）；四是 Reviewer 缺少验证所需的证据（无工具、无依赖结果、无工具记录）；五是重试期间没有取消检查（`:614-628`）；六是重试在干净上下文里重跑，闭环信息量弱于合并前。
 
 ### Q29：下一步怎么演进？
 
@@ -1080,18 +1126,18 @@ mvn test -DskipTests=false -Pquick
 | 简历表述 | 代码证据 |
 |---|---|
 | 统一多 Agent 协作 Plan-and-Execute | `PipelineOptions.FULL_PRESET` 与唯一入口 — `PipelineOptions.java:11`、`CliCommandParser.java:128-134`、`Main.java:1302`、`:1318` |
-| 人工计划门 | `PlanReviewHandler` + 三种决定 — `PlanExecuteAgent.java:92-100`、`:369-394`；CLI 终端门 — `Main.java:1551+` |
-| DAG 调度 | `getExecutableTasksInOrder` + `ExecutionPlan.getExecutableTasks` — `PlanExecuteAgent.java:476-485`、`ExecutionPlan.java:85-89`；环检测 — `Planner.java:155-157` |
-| 步骤自动评审 | `stepReviewer` 构造 — `PlanExecuteAgent.java:185-189`；审查回灌 — `:600-622` |
-| 步骤级上下文传递 | `StepBriefing` 唯一渲染点 — `StepBriefing.java:20-55`；注入点 — `PlanExecuteAgent.java:642` |
+| 人工计划门 | `PlanReviewHandler` + 三种决定 — `PlanExecuteAgent.java:92-100`、`:369-390`；CLI 终端门 — `Main.java:1551+` |
+| DAG 调度 | `getExecutableTasksInOrder` + `ExecutionPlan.getExecutableTasks` — `PlanExecuteAgent.java:479-488`、`ExecutionPlan.java:85-89`；环检测 — `Planner.java:155-157` |
+| 步骤自动评审 | `stepReviewer` 构造 — `PlanExecuteAgent.java:610-611`；审查回灌 — `:603-629` |
+| 步骤级上下文传递 | `StepBriefing` 唯一渲染点 — `StepBriefing.java:20-55`；注入点 — `PlanExecuteAgent.java:649` |
 | 审查结论结构化承载 | `StepReviewDecision` + `ReviewResponseParser` — `StepReviewDecision.java:6-15`、`ReviewResponseParser.java:19-73` |
-| 失败反馈 | 反馈进简报「之前的结果被审查拒绝，原因：」 — `StepBriefing.java:49-52`；回灌同一任务 — `PlanExecuteAgent.java:619-620` |
-| 最多 2 次自动重试 | `MAX_RETRIES_PER_STEP`（值 2）与重试 `while` — `PlanExecuteAgent.java:135`、`:607-621`；语义是首次执行后的额外尝试 |
-| 规划—执行—审查—重试闭环 | 规划 → 计划门 → 调度 → 任务执行 → 审查 → 重试 → 汇总 — `PlanExecuteAgent.java:364-367`、`:369-394`、`:396-474`、`:600-622`、`:1187-1216` |
-| 无依赖步骤按批并行（最多 4 并发） | 批次切分 + `min(size,4)` 线程池 + 独立输出缓冲 + 按序 flush — `PlanExecuteAgent.java:487-563`；并发峰值测试 — `PlanExecuteAgentTest.java:403` |
-| URL 凭据按 DAG 边隔离 | 顶层策略来自提交态原文 — `PlanExecuteAgent.java:324-327`；每任务 `forkWithTrustedUrls` — `:571-575`；只继承直接依赖 — `:1181-1183`；测试 — `PlanExecuteAgentTest.java:291` |
+| 失败反馈 | 反馈进简报「之前的结果被审查拒绝，原因：」 — `StepBriefing.java:49-52`；回灌同一任务 — `PlanExecuteAgent.java:626-627` |
+| 最多 2 次自动重试 | `MAX_RETRIES_PER_STEP`（值 2）与重试 `while` — `PlanExecuteAgent.java:135`、`:614-628`；语义是首次执行后的额外尝试 |
+| 规划—执行—审查—重试闭环 | 规划 → 计划门 → 调度 → 任务执行 → 审查 → 重试 → 汇总 — `PlanExecuteAgent.java:364-367`、`:369-390`、`:392-477`、`:603-629`、`:1194-1225` |
+| 无依赖步骤按批并行（最多 4 并发） | 批次切分 + `min(size,4)` 线程池 + 独立输出缓冲 + 按序 flush — `PlanExecuteAgent.java:490-566`；并发峰值测试 — `PlanExecuteAgentTest.java:405` |
+| URL 凭据按 DAG 边隔离 | 顶层策略来自提交态原文 — `PlanExecuteAgent.java:318-322`；每任务 `forkWithTrustedUrls` — `:574-578`；只继承直接依赖 — `:1180-1191`；测试 — `PlanExecuteAgentTest.java:293` |
 | 子 Agent 运行时 | `SubAgent` 的角色化 ReAct 循环（现服务 Reviewer） — `SubAgent.java:52`、`:502-510`、`:557-562` |
-| child session 审计 | 任务级 child session — `PlanExecuteAgent.java:578-590`、`:943-963` |
+| child session 审计 | 任务级 child session — `PlanExecuteAgent.java:581-595`、`:950-970` |
 
 ---
 
@@ -1107,32 +1153,33 @@ mvn test -DskipTests=false -Pquick
 
 ## 15.3 逐条列出需要知道的限制
 
-- **并行批次下 Reviewer 有数据竞争**：单个 `SubAgent` 实例被所有并行任务共享，其 `conversationHistory` 是普通 `ArrayList`、`historyVersion` 是普通 `long`、类内无 `synchronized`（`PlanExecuteAgent.java:185-189`、`:510-531`、`SubAgent.java:80`、`:67`）。旧实现为每个并行步骤各建一个 Reviewer，合并时该保护缺失；`/plan` 走 `FULL_PRESET`，因此这是默认路径。
-- **`humanPlanGate` 是声明性字段，不是可执行开关**：`src/main` 里从未被读取（`PipelineOptions.java:7`；`PlanExecuteAgent.java:184-185`）。真正生效的是注入的 `PlanReviewHandler`。
+- **并行批次下 Reviewer 曾有的数据竞争（已修复）**：合并后一度是单个 `SubAgent` 实例被所有并行任务共享，其 `conversationHistory` 是普通 `ArrayList`、`historyVersion` 是普通 `long`、类内无 `synchronized`（`SubAgent.java:80`、`:67`）。旧实现为每个并行步骤各建一个 Reviewer，合并时该保护缺失；`/plan` 走 `FULL_PRESET`，所以这是默认路径。现已改为每任务现建实例（`PlanExecuteAgent.java:587`、`:610-611`），回归测试见 `PlanExecuteAgentTest.java:432`。
+- **失败重规划曾无限递归（已修复）**：`executePlan` → `reviewAndExecutePlan` → `executePlan` 原先没有深度上限，每轮真实调用一次 LLM，且 `Planner.replan` 会把 goal 逐层拼接，触发条件始终不变，实测能把栈打穿。现由 `MAX_REPLANS_PER_RUN`（`PlanExecuteAgent.java:136`）封顶为每轮 1 次（`:441-451`），回归测试见 `PlanExecuteAgentTest.java:484`。
+- **`humanPlanGate` 是声明性字段，不是可执行开关**：`src/main` 里从未被读取（`PipelineOptions.java:7`；`PlanExecuteAgent.java:184`）。真正生效的是注入的 `PlanReviewHandler`。
 - **TUI 的人工计划门是橡皮图章**：注入的是直接放行 lambda，用户看不到计划（`TuiSessionController.java:250-257`）。
 - **TUI 没有任务级 child session**：不调用 `setParentSession`（`TuiSessionController.java:250-260` vs `Main.java:1305`、`:1321`）。
-- **审查调用失败被记为 `COMPLETED` 且无警告**，汇总可能输出「✅ 计划执行完成！」（`SubAgentStepReviewer.java:28-30`、`PlanExecuteAgent.java:419-421`）。
-- **重试次数耗尽后拒绝结论被覆盖**：保留最后结果并标记 `COMPLETED`，只留一句警告（`PlanExecuteAgent.java:612-615`）。
-- **重试在干净上下文里重跑**：每次 `executeTaskWithPolicy` 新建 `messages`，执行体不记得上一轮做了什么，改进只能靠 `feedback`（`PlanExecuteAgent.java:649`）。这是相对合并前的退化。
-- **每次重试新建 `AgentBudget`**：预算耗尽的收尾结果被拒绝后，重试会拿到全新预算，最坏消耗 3 倍（`PlanExecuteAgent.java:661`）。
-- **重试循环内没有取消检查**：按 ESC 后当前任务的审查 + 重试会跑完（`PlanExecuteAgent.java:607-621`；仅 `:664`、`:718` 两处检查）。
+- **审查调用失败被记为 `COMPLETED` 且无警告**，汇总可能输出「✅ 计划执行完成！」（`SubAgentStepReviewer.java:28-30`、`PlanExecuteAgent.java:416-427`）。
+- **重试次数耗尽后拒绝结论被覆盖**：保留最后结果并标记 `COMPLETED`，只留一句警告（`PlanExecuteAgent.java:619-622`）。
+- **重试在干净上下文里重跑**：每次 `executeTaskWithPolicy` 新建 `messages`，执行体不记得上一轮做了什么，改进只能靠 `feedback`（`PlanExecuteAgent.java:656`）。这是相对合并前的退化。
+- **每次重试新建 `AgentBudget`**：预算耗尽的收尾结果被拒绝后，重试会拿到全新预算，最坏消耗 3 倍（`PlanExecuteAgent.java:668`）。
+- **重试循环内没有取消检查**：按 ESC 后当前任务的审查 + 重试会跑完（`PlanExecuteAgent.java:614-628`；仅 `:671`、`:725` 两处检查）。
 - **`parseIssues` 全部解析失败时返回硬编码文案**，Reviewer 原文被丢弃（`ReviewResponseParser.java:69-72`）。
 - **关键词兜底会误判**：出现「有问题」这类词（含否定语境）会让一段实际上是肯定的文本被判不通过（`ReviewResponseParser.java:35-40`）。
 - **Reviewer 拿不到验证所需的证据**：没有依赖结果、没有工具调用记录、没有工具，只有「总目标 + 当前任务 + 最终文本」（`SubAgentStepReviewer.java:24`、`SubAgent.java:507`、`:557-562`）。
 - **Reviewer 的策略输入含被审查任务的执行结果文本**（`SubAgent.java:255-261`）。当前因 Reviewer 无工具而不可利用，但这是「靠没工具而安全」。
-- **URL 继承只看直接依赖**，不展开传递依赖（`PlanExecuteAgent.java:571-575`、`:1181-1183`）。
+- **URL 继承只看直接依赖**，不展开传递依赖（`PlanExecuteAgent.java:574-578`、`:1180-1191`）。
 - **依赖结果全文注入、无截断**：简报长度随上游结果线性增长（`StepBriefing.java:37-39`，测试 `StepBriefingTest.java:24`）。
 - **计划的 `summary` 字段被解析但不展示**：`ExecutionPlan.setSummary` 只在创建时写入（`Planner.java:112-116`、`:247-248`），`ExecutionPlan.summarize()` 输出的是任务数与批次信息，不含 summary。
 - **`Task.TaskType` 不影响 Java 侧执行路径**：只作为变量写进 `plan.md` 提示词（`PlanExecuteAgent.java:631`）。
-- **`AgentRole.PLANNER` / `WORKER` 在生产不可达**：`src/main` 里只在 Reviewer 处实例化 `SubAgent`；`shouldUseTools()` 的 WORKER 分支生产不可达（`PlanExecuteAgent.java:187`、`SubAgent.java:557-562`）。
-- **`Task.TaskStatus.RUNNING` 可达**：批次执行前会 `markStarted()`（`PlanExecuteAgent.java:494`、`:520`）；但 `SKIPPED` 仍不可达——`markSkipped()` 在 `src/main` 无调用点（`Task.java:97-100`）。
-- **计划门可以无限次反复**：`reviewAndExecutePlan` 是 `while(true)`，`SUPPLEMENT` 没有次数上限（`PlanExecuteAgent.java:369-394`）。
-- **`SUPPLEMENT` 且 feedback 为空会被静默当作 `EXECUTE`**（`PlanExecuteAgent.java:380-383`）。
+- **`AgentRole.PLANNER` / `WORKER` 在生产不可达**：`src/main` 里只在 Reviewer 处实例化 `SubAgent`；`shouldUseTools()` 的 WORKER 分支生产不可达（`PlanExecuteAgent.java:611`、`SubAgent.java:557-562`）。
+- **`Task.TaskStatus.RUNNING` 可达**：批次执行前会 `markStarted()`（`PlanExecuteAgent.java:497`、`:523`）；但 `SKIPPED` 仍不可达——`markSkipped()` 在 `src/main` 无调用点（`Task.java:97-100`）。
+- **计划门可以无限次反复**：`reviewAndExecutePlan` 是 `while(true)`，`SUPPLEMENT` 没有次数上限（`PlanExecuteAgent.java:369-390`）。
+- **`SUPPLEMENT` 且 feedback 为空会被静默当作 `EXECUTE`**（`PlanExecuteAgent.java:376-379`）。
 - **空计划会被报成「完成」**：`ExecutionPlan.isAllCompleted()` 对空任务集合返回 true（`ExecutionPlan.java:161-164`）。
 - **依赖引用未知 ID 时该边被静默丢弃**（`Planner.java:144-150`），任务不再被阻塞——与旧文档描述的「永久 PENDING」相反，读旧文档要注意这一点。
 - **`grep -rn humanPlanGate` 只能命中声明处**，这是判断该字段是否生效的最快方式。
 - **产物只在内存里**：`Task.result` 不持久化，进程退出即丢失；child session 只记录消息流水，不提供结构化产物恢复。
 - **并行步骤共享同一 workspace**，没有资源冲突检测，依赖规划者在提示词层面避免依赖（`prompts/modes/planner.md` 第 9-10 条）。
 - **项目里有三处 ReAct 循环**（主 `Agent`、`SubAgent`、`PlanExecuteAgent.executeTaskWithPolicy`），没有公共内核，流式渲染、工具执行、预算收尾的改动需要人工同步。
-- **`PromptMode.TEAM_REVIEWER` 与 `modes/team-reviewer.md` 的名称仍是 "Team"**：合并时按范围约定未改名，但这条路径现在服务于统一的 `/plan`（`PromptMode.java:7`、`PlanExecuteAgent.java:187`）。
+- **`PromptMode.TEAM_REVIEWER` 与 `modes/team-reviewer.md` 的名称仍是 "Team"**：合并时按范围约定未改名，但这条路径现在服务于统一的 `/plan`（`PromptMode.java:7`、`PlanExecuteAgent.java:611`）。
 - **Reviewer 是概率模型，不是形式化验证器**；它看不到工具证据，因此「执行体声称做过的事」在审查阶段无法被核实。

@@ -6,10 +6,9 @@ package com.codeagent.agent;
  * 消息类型说明：
  * - TASK:      主控分配给子代理的任务
  * - RESULT:    子代理返回的执行结果
- * - FEEDBACK:  检查者对结果的反馈（可能包含改进建议）
- * - APPROVAL:  检查者认可结果
- * - REJECTION: 检查者拒绝结果，需要重新执行
  * - ERROR:     子代理在执行过程中遭遇系统级错误（例如 LLM 调用失败），调用方需识别并优雅处理
+ *
+ * 审查结论不走消息类型，而是由 StepReviewDecision 结构化承载（见 StepReviewer）。
  */
 public record AgentMessage(
         String fromAgent,
@@ -20,9 +19,6 @@ public record AgentMessage(
     public enum Type {
         TASK,
         RESULT,
-        FEEDBACK,
-        APPROVAL,
-        REJECTION,
         ERROR
     }
 
@@ -38,27 +34,6 @@ public record AgentMessage(
      */
     public static AgentMessage result(String fromAgent, AgentRole role, String content) {
         return new AgentMessage(fromAgent, role, content, Type.RESULT);
-    }
-
-    /**
-     * 创建反馈消息（检查者 -> 主控）
-     */
-    public static AgentMessage feedback(String fromAgent, String content) {
-        return new AgentMessage(fromAgent, AgentRole.REVIEWER, content, Type.FEEDBACK);
-    }
-
-    /**
-     * 创建审批通过消息
-     */
-    public static AgentMessage approval(String fromAgent, String content) {
-        return new AgentMessage(fromAgent, AgentRole.REVIEWER, content, Type.APPROVAL);
-    }
-
-    /**
-     * 创建拒绝消息（检查者认为结果不合格）
-     */
-    public static AgentMessage rejection(String fromAgent, String content) {
-        return new AgentMessage(fromAgent, AgentRole.REVIEWER, content, Type.REJECTION);
     }
 
     /**

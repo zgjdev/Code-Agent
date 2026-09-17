@@ -110,7 +110,7 @@ navigate_page → wait_for（等关键元素出现）→ take_snapshot → 抽�
 
 ## 并行调研
 
-任务包含多个**独立**调研目标时（如同时调研 3 个公众号），可以拆给 sub-agent 并行：让 PlanExecuteAgent 把任务拆成 DAG 平行批次，或用 Multi-Agent 模式（`/team`）分给多个 worker。**注意**：浏览器实例只有一个，浏览器操作仍要串行；只有 `web_fetch` / `web_search` 这种纯 HTTP 调用才能真并行。
+任务包含多个**独立**调研目标时（如同时调研 3 个公众号），可以让 PlanExecuteAgent 把任务拆成 DAG 平行批次（`/plan`，同一依赖批次的独立任务并行执行）。**注意**：浏览器实例只有一个，浏览器操作仍要串行；只有 `web_fetch` / `web_search` 这种纯 HTTP 调用才能真并行。
 
 ## 不要做的事
 

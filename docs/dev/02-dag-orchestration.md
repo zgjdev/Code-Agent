@@ -216,7 +216,7 @@ prompts/modes/
 | 名字 | 是什么 | 与 DAG 的关系 |
 |---|---|---|
 | `PlanExecuteAgent` | Plan-and-Execute 的调度器 | 本文主角 |
-| `AgentOrchestrator` | Planner / Worker / Reviewer 三角色协作，另一个模式 | **无关**，走 `/team`，见 `03-multi-agent-collaboration.md` |
+| `AgentOrchestrator`（已删除） | Planner / Worker / Reviewer 三角色协作，合并前的另一个模式 | **无关**，已并入 `PlanExecuteAgent`，见 `03-multi-agent-collaboration.md` |
 | `DurableTaskManager` / `RuntimeApiServer` | 后台任务与 HTTP API | **无关**，它们内部跑的是普通 ReAct Agent（`Main.java:1142-1153`） |
 
 特别提醒最后一行：**看到"计划"或"任务"字样时不要默认它走 DAG**。`/plan` 是唯一一条用户可见的 DAG 入口。

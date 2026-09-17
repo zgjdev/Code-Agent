@@ -132,6 +132,8 @@ public class PlanExecuteAgent {
     private TurnToolPolicy turnToolPolicy = TurnToolPolicy.forExplicitTask("");
     private String submittedPolicyInput = "";
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private static final int MAX_RETRIES_PER_STEP = 2;
+    private final PipelineOptions pipelineOptions;
 
     public PlanExecuteAgent(LlmClient llmClient) {
         this(llmClient, (goal, plan) -> PlanReviewDecision.execute());
@@ -152,6 +154,12 @@ public class PlanExecuteAgent {
         this(llmClient, toolRegistry, null, memoryManager, reviewHandler, out);
     }
 
+    public PlanExecuteAgent(LlmClient llmClient, ToolRegistry toolRegistry,
+                            MemoryManager memoryManager, PlanReviewHandler reviewHandler,
+                            PrintStream out, PipelineOptions pipelineOptions) {
+        this(llmClient, toolRegistry, null, memoryManager, reviewHandler, out, pipelineOptions);
+    }
+
     PlanExecuteAgent(LlmClient llmClient, ToolRegistry toolRegistry, Planner planner,
                      MemoryManager memoryManager, PlanReviewHandler reviewHandler) {
         this(llmClient, toolRegistry, planner, memoryManager, reviewHandler, null);
@@ -159,12 +167,20 @@ public class PlanExecuteAgent {
 
     PlanExecuteAgent(LlmClient llmClient, ToolRegistry toolRegistry, Planner planner,
                      MemoryManager memoryManager, PlanReviewHandler reviewHandler, PrintStream out) {
+        this(llmClient, toolRegistry, planner, memoryManager, reviewHandler, out,
+                PipelineOptions.PLAN_PRESET);
+    }
+
+    PlanExecuteAgent(LlmClient llmClient, ToolRegistry toolRegistry, Planner planner,
+                     MemoryManager memoryManager, PlanReviewHandler reviewHandler, PrintStream out,
+                     PipelineOptions pipelineOptions) {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry != null ? toolRegistry : new ToolRegistry();
         this.out = out == null ? deferredSystemOut() : out;
         this.planner = planner != null ? planner : new Planner(llmClient, this.out);
         this.reviewHandler = reviewHandler == null ? (goal, plan) -> PlanReviewDecision.execute() : reviewHandler;
         this.memoryManager = memoryManager != null ? memoryManager : new MemoryManager(llmClient);
+        this.pipelineOptions = pipelineOptions != null ? pipelineOptions : PipelineOptions.PLAN_PRESET;
         this.autoCompactionManager = new AutoCompactionManager(llmClient);
         this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
@@ -558,7 +574,11 @@ public class PlanExecuteAgent {
                 childSession.set(child);
             }
             TaskRunResult result = executeTaskWithPolicy(
-                    goal, plan, task, streamState, out, dependencyUrls, taskToolPolicy);
+                    goal, plan, task, streamState, out, dependencyUrls, null, taskToolPolicy);
+            if (pipelineOptions.stepReview()) {
+                result = applyStepReview(
+                        goal, plan, task, streamState, out, dependencyUrls, taskToolPolicy, result);
+            }
             if (child != null) {
                 parentSession.recordChildResult(child, result.result(), "completed");
                 child.markClosed("completed");
@@ -571,9 +591,38 @@ public class PlanExecuteAgent {
         }
     }
 
+    private TaskRunResult applyStepReview(String goal, ExecutionPlan plan, Task task,
+                                          StreamState streamState, PrintStream out,
+                                          List<TurnToolPolicy.TrustedUrlContext> dependencyUrls,
+                                          TurnToolPolicy taskToolPolicy,
+                                          TaskRunResult initial) throws IOException {
+        // 每个任务独占一个 Reviewer：并行批次最多 4 个任务同时进来，
+        // 共享实例会让多条线程写同一份 SubAgent 会话历史。
+        StepReviewer reviewer = new SubAgentStepReviewer(
+                new SubAgent("reviewer", AgentRole.REVIEWER, llmClient, toolRegistry), out);
+        TaskRunResult result = initial;
+        int retries = 0;
+        while (true) {
+            StepReviewDecision decision = reviewer.review(goal, task, result.result());
+            if (decision.approved()) {
+                return result;
+            }
+            if (retries >= MAX_RETRIES_PER_STEP) {
+                out.println("⚠️ 任务 [" + task.getId() + "] 达到最大重试次数，保留当前结果\n");
+                return result;
+            }
+            retries++;
+            out.println("⚠️ 任务 [" + task.getId() + "] 审查未通过，重新执行...");
+            out.println("   反馈: " + decision.feedback() + "\n");
+            result = executeTaskWithPolicy(goal, plan, task, streamState, out, dependencyUrls,
+                    decision.feedback(), taskToolPolicy);
+        }
+    }
+
     private TaskRunResult executeTaskWithPolicy(
             String goal, ExecutionPlan plan, Task task, StreamState streamState, PrintStream out,
             List<TurnToolPolicy.TrustedUrlContext> dependencyUrls,
+            String retryFeedback,
             TurnToolPolicy taskToolPolicy) throws IOException {
         String prompt = promptAssembler.assemble(PromptMode.PLAN, PromptContext.builder()
                 .projectMemoryContext(buildProjectMemoryContext())
@@ -588,7 +637,7 @@ public class PlanExecuteAgent {
         String memoryContext = memoryManager.buildContextForQuery(
                 task.getDescription(),
                 memoryManager.getContextProfile().memoryContextTokens());
-        String taskInput = buildTaskContext(goal, plan, task, dependencyUrls);
+        String taskInput = buildStepBriefing(goal, plan, task, dependencyUrls, retryFeedback).render();
         if (!memoryContext.isEmpty()) {
             taskInput = taskInput + "\n\n" + memoryContext;
         }
@@ -1119,41 +1168,18 @@ public class PlanExecuteAgent {
         }
     }
 
-    private String buildTaskContext(String goal, ExecutionPlan plan, Task task,
-                                    List<TurnToolPolicy.TrustedUrlContext> dependencyUrls) {
-        StringBuilder context = new StringBuilder();
-        context.append("总目标：").append(goal).append("\n");
-        context.append("当前任务：").append(task.getDescription()).append("\n");
-
-        if (task.getDependencies().isEmpty()) {
-            context.append("依赖任务：无\n");
-        } else {
-            context.append("依赖任务结果：\n");
-            for (String depId : task.getDependencies()) {
-                Task dep = plan.getTask(depId);
-                if (dep == null) {
-                    continue;
-                }
-                context.append("- ").append(dep.getId())
-                        .append(" / ").append(dep.getDescription())
-                        .append(" / 状态=").append(dep.getStatus())
-                        .append("\n");
-                if (dep.getResult() != null && !dep.getResult().isBlank()) {
-                    context.append(dep.getResult()).append("\n");
-                }
-            }
-        }
-
-        Set<String> trustedDependencyUrls = dependencyUrls.stream()
+    private StepBriefing buildStepBriefing(String goal, ExecutionPlan plan, Task task,
+                                           List<TurnToolPolicy.TrustedUrlContext> dependencyUrls,
+                                           String retryFeedback) {
+        List<Task> completedDependencies = task.getDependencies().stream()
+                .map(plan::getTask)
+                .filter(Objects::nonNull)
+                .filter(dependency -> dependency.getStatus() == Task.TaskStatus.COMPLETED)
+                .toList();
+        List<String> trustedUrls = dependencyUrls.stream()
                 .flatMap(contextItem -> contextItem.urls().stream())
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-        if (!trustedDependencyUrls.isEmpty()) {
-            context.append("依赖分支经 web_search 验证的 URL（可供当前任务抓取/导航）：\n");
-            trustedDependencyUrls.forEach(url -> context.append("- ").append(url).append("\n"));
-        }
-
-        context.append("请执行此任务。如果是ANALYSIS或VERIFICATION类型，请基于以上上下文直接给出结果。");
-        return context.toString();
+                .toList();
+        return new StepBriefing(goal, task, completedDependencies, trustedUrls, retryFeedback);
     }
 
     private String buildFinalResult(ExecutionPlan plan, Map<String, Boolean> streamedTaskOutputs) {

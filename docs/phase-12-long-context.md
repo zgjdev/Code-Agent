@@ -60,8 +60,8 @@ src/main/java/com/codeagent/context/
 - `AutoCompactionManager` / `SessionMemoryCompactor` / `ConversationHistoryCompactor`：双路径自动压缩
 - `ToolRegistry`：`glob_files` / `grep_code` / `read_file` 提供实时确定性代码定位，`search_code` 默认 topK 自适应
 - `McpServerManager`：生成 MCP resources prompt index
-- `Agent` / `PlanExecuteAgent` / `AgentOrchestrator` / `SubAgent`：注入长上下文策略与资源索引
-- `Main`：Banner、模型切换后的上下文策略提示、Plan/Team resource index 供应器
+- `Agent` / `PlanExecuteAgent` / `SubAgent`：注入长上下文策略与资源索引
+- `Main`：Banner、模型切换后的上下文策略提示、Plan resource index 供应器
 
 ## 4. 验证
 

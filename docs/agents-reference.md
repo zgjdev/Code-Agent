@@ -210,7 +210,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `/export` 导出当前 ReAct conversationHistory 为 Markdown 到 `~/.codeagent/exports/session-*.md`；包含完整 system prompt，便于检查 LLM 实际接收前的指令，命令不接受路径参数。
 - 普通任务和斜杠命令提交后都会以 `>` 暗色整行块回写原始输入，避免 JLine accept 后清掉编辑行导致结果区看不到刚执行的命令
 - InlineRenderer 不使用独立 JLine `Display.update()` 维护 thinking 临时区；真实终端验证发现独立 Display 会在 transcript/status 输出后从错误位置向上清屏。当前实现用固定高度 live 区重写自身行，content/tool 边界先清理 live 区再追加 transcript。
-- 交互期输出优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`AgentOrchestrator` 都可接收同一个 renderer 输出流，避免绕过 inline renderer 直接写 stdout
+- 交互期输出优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`SubAgent` 都可接收同一个 renderer 输出流，避免绕过 inline renderer 直接写 stdout
 - `CodeIndex` 通过 `ProgressListener` 上报索引开始 / 文件数量 / 进度 / 完成或失败，`/index` 绑定当前 renderer 输出流；内部异常细节写 logger
 
 ### LSP Diagnostics (Phase 17)
@@ -263,13 +263,16 @@ ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 system / user / assistant / tool_call / tool_result 原始消息的 append-only JSONL 账本 / mode-actor-source 归因 / POSIX 权限收紧
 
 ### PlanExecuteAgent.java
-规划后执行 / 计划审阅 / DAG 任务执行 / 并行批次 / 失败重规划
+统一的多 Agent 协作 Plan-and-Execute：规划后执行 / 可选人工计划门 / DAG 任务执行 / 并行批次 / 可选步骤自动评审与重试 / 失败重规划。两个开关由构造时的 `PipelineOptions` 预设决定（`/plan` = `FULL_PRESET`，两个开关都开）
 
-### AgentOrchestrator.java
-Multi-Agent 编排器 / 三角色管理 / 按依赖分配 / 审查重试
+### PipelineOptions.java / StepReviewer.java / StepReviewDecision.java
+统一模式的两个开关与审查层契约；`/plan` 映射到 `FULL_PRESET`，`PLAN_PRESET` / `TEAM_PRESET` 仅保留在构造层（CLI 不可触达）
+
+### StepBriefing.java / SubAgentStepReviewer.java / ReviewResponseParser.java
+下行简报的唯一渲染点 / 用 Reviewer 子 Agent 实现审查层 / 审查输出的失败关闭解析
 
 ### SubAgent.java
-可配置角色子代理 / 独立对话历史 / Worker 用工具、Planner/Reviewer 不用
+可配置角色子代理 / 独立对话历史 / 统一模式中只承担 Reviewer 角色，不调用工具
 
 ### Planner.java
 LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖计算
@@ -343,8 +346,8 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 ## Test Coverage Summary
 
-测试覆盖偏向：解析、计划结构、RAG 核心、Multi-Agent 编排、HITL 策略、策略层拦截、MCP 协议、资源输入层、长上下文策略与 Skill 加载。
+测试覆盖偏向：解析、计划结构、RAG 核心、计划编排与步骤审查、HITL 策略、策略层拦截、MCP 协议、资源输入层、长上下文策略与 Skill 加载。
 
 不覆盖：真实 LLM 联调、真实 Embedding API、真实 MCP server 联调、终端完整手工体验。
 
-完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / SessionMemoryCompactorTest / AutoCompactionManagerTest / ConversationHistoryCompactorTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentWebSearchDecisionTest / AgentRoleTest / AgentMessageTest / AgentOrchestratorTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / TurnToolPolicyTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest / BetterHarnessOptionsTest / BetterHarnessEvidenceCollectorTest / BetterHarnessRunnerTest
+完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / SessionMemoryCompactorTest / AutoCompactionManagerTest / ConversationHistoryCompactorTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentWebSearchDecisionTest / AgentRoleTest / AgentMessageTest / PipelineOptionsTest / StepReviewDecisionTest / StepBriefingTest / ReviewResponseParserTest / SubAgentStepReviewerTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / TurnToolPolicyTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest / BetterHarnessOptionsTest / BetterHarnessEvidenceCollectorTest / BetterHarnessRunnerTest

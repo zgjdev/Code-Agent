@@ -21,12 +21,16 @@ import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlanExecuteAgentTest {
@@ -317,6 +321,161 @@ class PlanExecuteAgentTest {
                 "依赖任务首轮应继承前置 web_search 的类型化 URL 授权");
     }
 
+    @Test
+    void stepReviewRetriesUntilReviewerApproves() throws Exception {
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "第一版结果", null, 10, 5),
+                new LlmClient.ChatResponse("assistant",
+                        "{\"approved\": false, \"issues\": [\"缺少边界处理\"]}", null, 10, 5),
+                new LlmClient.ChatResponse("assistant", "第二版结果", null, 10, 5),
+                new LlmClient.ChatResponse("assistant", "{\"approved\": true, \"issues\": []}", null, 10, 5)
+        ));
+        PlanExecuteAgent agent = new PlanExecuteAgent(
+                llmClient,
+                new ToolRegistry(),
+                new StubPlanner(llmClient),
+                new MemoryManager(llmClient),
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()),
+                PipelineOptions.TEAM_PRESET);
+
+        String result = agent.run("读取测试文件");
+
+        assertTrue(result.contains("计划执行完成"), result);
+        assertTrue(llmClient.messageSnapshots.stream()
+                        .flatMap(List::stream)
+                        .anyMatch(message -> message.content() != null
+                                && message.content().contains("缺少边界处理")),
+                "重试时必须把审查反馈注入下一次执行的下行简报");
+    }
+
+    @Test
+    void stepReviewDisabledKeepsSingleAttemptPerTask() throws Exception {
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "唯一一次结果", null, 10, 5)
+        ));
+        PlanExecuteAgent agent = new PlanExecuteAgent(
+                llmClient,
+                new ToolRegistry(),
+                new StubPlanner(llmClient),
+                new MemoryManager(llmClient),
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()),
+                PipelineOptions.PLAN_PRESET);
+
+        agent.run("读取测试文件");
+
+        long executionAttempts = llmClient.messageSnapshots.stream()
+                .flatMap(List::stream)
+                .filter(message -> message.content() != null
+                        && message.content().contains("当前任务：task_1"))
+                .count();
+        assertEquals(1, executionAttempts, "stepReview 关闭时每个任务只应执行一次");
+    }
+
+    @Test
+    void fallsBackToExistingOutcomeAfterRetriesExhausted() throws Exception {
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "第一版结果", null, 10, 5),
+                new LlmClient.ChatResponse("assistant",
+                        "{\"approved\": false, \"issues\": [\"仍不合格\"]}", null, 10, 5),
+                new LlmClient.ChatResponse("assistant", "第二版结果", null, 10, 5),
+                new LlmClient.ChatResponse("assistant",
+                        "{\"approved\": false, \"issues\": [\"仍不合格\"]}", null, 10, 5),
+                new LlmClient.ChatResponse("assistant", "第三版结果", null, 10, 5),
+                new LlmClient.ChatResponse("assistant",
+                        "{\"approved\": false, \"issues\": [\"仍不合格\"]}", null, 10, 5)
+        ));
+        PlanExecuteAgent agent = new PlanExecuteAgent(
+                llmClient,
+                new ToolRegistry(),
+                new StubPlanner(llmClient),
+                new MemoryManager(llmClient),
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()),
+                PipelineOptions.TEAM_PRESET);
+
+        String result = agent.run("读取测试文件");
+
+        assertTrue(result.contains("计划执行完成") || result.contains("计划部分完成"),
+                "重试耗尽后必须回到既有结果汇总路径，不得抛异常：" + result);
+    }
+
+    @Test
+    void runsIndependentTasksInParallel() throws Exception {
+        CountDownLatch tasksInFlight = new CountDownLatch(2);
+        AtomicInteger currentConcurrency = new AtomicInteger();
+        AtomicInteger peakConcurrency = new AtomicInteger();
+        BarrierStubGLMClient llmClient =
+                new BarrierStubGLMClient(tasksInFlight, currentConcurrency, peakConcurrency);
+        PlanExecuteAgent agent = new PlanExecuteAgent(
+                llmClient,
+                new ToolRegistry(),
+                new TwoIndependentTaskPlanner(llmClient),
+                null,
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()),
+                PipelineOptions.PLAN_PRESET
+        );
+
+        String result = agent.run("并行完成两件互不依赖的事");
+
+        assertTrue(result.contains("计划执行完成"), result);
+        assertEquals(2, peakConcurrency.get(), "同一批次的两个独立任务应并发进入 LLM 调用");
+    }
+
+    /**
+     * 并行批次里的每个任务必须拿到属于自己的 Reviewer 会话。
+     * 共用同一个 SubAgent 会让两条审查线程写同一份 ArrayList 历史（数据竞争）。
+     */
+    @Test
+    void parallelStepReviewDoesNotShareReviewerHistory() throws Exception {
+        CountDownLatch reviewsInFlight = new CountDownLatch(2);
+        ParallelReviewGLMClient llmClient = new ParallelReviewGLMClient(reviewsInFlight);
+        PlanExecuteAgent agent = new PlanExecuteAgent(
+                llmClient,
+                new ToolRegistry(),
+                new TwoIndependentTaskPlanner(llmClient),
+                null,
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()),
+                PipelineOptions.FULL_PRESET
+        );
+
+        String result = agent.run("并行完成两件互不依赖的事");
+
+        assertTrue(result.contains("计划执行完成"), result);
+        assertEquals(2, llmClient.reviewMessageLists.size(), "两个并行任务应各触发一次审查");
+        assertNotSame(llmClient.reviewMessageLists.get(0), llmClient.reviewMessageLists.get(1),
+                "并行任务的 Reviewer 不得共享同一份会话历史");
+    }
+
+    @Test
+    void reportsIncompleteRunWhenFailureBlocksRemainingTasks() throws Exception {
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "第一步完成", null, 10, 2),
+                new LlmClient.ChatResponse("assistant", "第二步完成", null, 10, 2)
+        ));
+        PlanExecuteAgent agent = new PlanExecuteAgent(
+                llmClient,
+                new ToolRegistry(),
+                new FailureBlockingPlanner(llmClient),
+                null,
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()),
+                PipelineOptions.PLAN_PRESET
+        );
+
+        String result = agent.run("按顺序执行四个步骤");
+
+        assertTrue(result.contains("计划部分完成，有任务失败"), result);
+        assertTrue(result.contains("task_3"), result);
+        assertFalse(llmClient.messageSnapshots.stream().flatMap(List::stream)
+                        .anyMatch(message -> message.content() != null
+                                && message.content().contains("当前任务：task_4")),
+                "前置任务失败后，被阻塞的任务不应执行");
+    }
+
     private record StubResponse(LlmClient.ChatResponse response, boolean streamContent,
                                 java.util.function.Consumer<LlmClient.StreamListener> streamScript) {
         private static StubResponse plain(LlmClient.ChatResponse response) {
@@ -362,6 +521,117 @@ class PlanExecuteAgentTest {
         }
     }
 
+    private static final class TwoIndependentTaskPlanner extends Planner {
+        private TwoIndependentTaskPlanner(LlmClient llmClient) {
+            super(llmClient);
+        }
+
+        @Override
+        public ExecutionPlan createPlan(String goal) {
+            ExecutionPlan plan = new ExecutionPlan("plan-parallel", goal);
+            plan.addTask(new Task("task_1", "任务A", Task.TaskType.ANALYSIS));
+            plan.addTask(new Task("task_2", "任务B", Task.TaskType.ANALYSIS));
+            plan.computeExecutionOrder();
+            return plan;
+        }
+    }
+
+    private static final class FailureBlockingPlanner extends Planner {
+        private FailureBlockingPlanner(LlmClient llmClient) {
+            super(llmClient);
+        }
+
+        @Override
+        public ExecutionPlan createPlan(String goal) {
+            ExecutionPlan plan = new ExecutionPlan("plan-blocked", goal);
+            plan.addTask(new Task("task_1", "第一步", Task.TaskType.ANALYSIS));
+            plan.addTask(new Task("task_2", "第二步", Task.TaskType.ANALYSIS));
+            plan.addTask(new Task("task_3", "第三步（LLM 调用失败）", Task.TaskType.ANALYSIS, List.of("task_2")));
+            plan.addTask(new Task("task_4", "第四步（被前置失败阻塞）", Task.TaskType.ANALYSIS, List.of("task_3")));
+            plan.computeExecutionOrder();
+            return plan;
+        }
+    }
+
+    /** 两个独立任务必须在同一时刻都停留在 chat() 内，否则抛错。 */
+    private static final class BarrierStubGLMClient extends GLMClient {
+        private final CountDownLatch tasksInFlight;
+        private final AtomicInteger currentConcurrency;
+        private final AtomicInteger peakConcurrency;
+
+        private BarrierStubGLMClient(CountDownLatch tasksInFlight,
+                                     AtomicInteger currentConcurrency,
+                                     AtomicInteger peakConcurrency) {
+            super("test-key");
+            this.tasksInFlight = tasksInFlight;
+            this.currentConcurrency = currentConcurrency;
+            this.peakConcurrency = peakConcurrency;
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException {
+            return chat(messages, tools, StreamListener.NO_OP);
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener)
+                throws IOException {
+            int now = currentConcurrency.incrementAndGet();
+            peakConcurrency.updateAndGet(previous -> Math.max(previous, now));
+            tasksInFlight.countDown();
+            try {
+                if (!tasksInFlight.await(5, TimeUnit.SECONDS)) {
+                    throw new IOException("两个独立任务未并发进入 LLM 调用");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("并发探测被中断", e);
+            } finally {
+                currentConcurrency.decrementAndGet();
+            }
+            return new ChatResponse("assistant", "任务完成", null, 10, 2);
+        }
+    }
+
+    /** 按提示词区分执行调用与审查调用：两个审查调用必须同时停留在 chat() 内。 */
+    private static final class ParallelReviewGLMClient extends GLMClient {
+        private final CountDownLatch reviewsInFlight;
+        private final List<List<Message>> reviewMessageLists =
+                Collections.synchronizedList(new ArrayList<>());
+
+        private ParallelReviewGLMClient(CountDownLatch reviewsInFlight) {
+            super("test-key");
+            this.reviewsInFlight = reviewsInFlight;
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException {
+            return chat(messages, tools, StreamListener.NO_OP);
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener)
+                throws IOException {
+            boolean reviewCall = messages.stream()
+                    .anyMatch(message -> message.content() != null
+                            && message.content().contains("质量检查专家"));
+            if (!reviewCall) {
+                return new ChatResponse("assistant", "任务完成", null, 10, 2);
+            }
+            reviewMessageLists.add(messages);
+            reviewsInFlight.countDown();
+            try {
+                if (!reviewsInFlight.await(5, TimeUnit.SECONDS)) {
+                    throw new IOException("两个并行任务的审查调用未同时进入 LLM");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("审查并发探测被中断", e);
+            }
+            return new ChatResponse("assistant", "{\"approved\": true, \"issues\": []}", null, 10, 2);
+        }
+    }
+
     private static final class StubGLMClient extends GLMClient {
         private final Queue<StubResponse> responses;
         private final List<List<Tool>> toolSnapshots = new ArrayList<>();
@@ -386,8 +656,11 @@ class PlanExecuteAgentTest {
             return chat(messages, tools, StreamListener.NO_OP);
         }
 
+        // 并行批次里同一实例会被多个 plan-executor 线程同时调用，
+        // 响应队列和快照列表都必须串行化，否则会读到并发写坏的 ArrayList。
         @Override
-        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+        public synchronized ChatResponse chat(List<Message> messages, List<Tool> tools,
+                                              StreamListener listener) throws IOException {
             toolSnapshots.add(tools == null ? List.of() : List.copyOf(tools));
             messageSnapshots.add(List.copyOf(messages));
             StubResponse stubResponse = responses.poll();

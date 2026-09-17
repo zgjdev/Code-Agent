@@ -270,7 +270,7 @@
 **核心知识点**：
 - MCP resources/list + resources/read 的工具化封装
 - 用户显式 `@server:protocol://path` resource 引用与上下文注入
-- jline `Completer` 与 raw mode 的协同（@-mention autocomplete 不能干扰 plan/team raw mode 路径）
+- jline `Completer` 与 raw mode 的协同（@-mention autocomplete 不能干扰 plan raw mode 路径）
 - 被动通知响应模式 vs 主动 ping 的取舍（按月计费的 server 必须不主动 ping）
 
 **验证**：`mvn test` 336 tests 通过
@@ -491,7 +491,7 @@
 **功能迭代**：
 - 分层 prompt 文件（`src/main/resources/prompts/`）：
   - `base.md`：核心规则（工具使用、输出格式、子 Agent 协议、上下文管理）
-  - `modes/agent.md` / `modes/plan.md` / `modes/planner.md` / `modes/team-planner.md` / `modes/team-worker.md` / `modes/team-reviewer.md`：各模式的工作流预期和权限
+  - `modes/agent.md` / `modes/plan.md` / `modes/planner.md` / `modes/team-reviewer.md`：各模式的工作流预期和权限
   - `approvals/suggest.md` / `approvals/auto.md` / `approvals/never.md`：审批策略
   - `personalities/calm.md`：语调（保留现有 `AGENTS.md` 中的 Personality 规范）
 - `PromptAssembler`：按固定顺序组装（base → personality → mode → approval → project_context → skills → context_mgmt → handoff），遵循"volatile content last"原则以最大化 KV prefix cache 命中率
@@ -644,11 +644,13 @@ Git       Prompt    异步后台    图片
 
 **候选实现**：
 
-- **Spring AI 版本**：用 `ChatModel` / `StreamingChatModel` / `ToolCallback` / Spring Boot DI 重写主流程；`Agent` / `PlanExecuteAgent` / `AgentOrchestrator` / `ToolRegistry` / `MemoryManager` 全面 Bean 化；HITL 通过 AOP 拦截
+- **Spring AI 版本**：用 `ChatModel` / `StreamingChatModel` / `ToolCallback` / Spring Boot DI 重写主流程；`Agent` / `PlanExecuteAgent` / `ToolRegistry` / `MemoryManager` 全面 Bean 化；HITL 通过 AOP 拦截
 - **LangGraph4J 版本**：用图状态机模型重构 Agent 流程，把 ReAct / Plan-and-Execute / Multi-Agent 三种模式统一到 graph 抽象下，节点 = 角色/工具调用，边 = 状态转移条件
 
 **设计价值**：完整呈现「自己造轮子 → 用社区轮子」的取舍——什么场景手写更清晰、什么场景框架更省心，让用户既能看懂底层、又能切换主流框架。
 
 ---
+
+*Post-21 追加：把 Plan-and-Execute 与 Multi-Agent 合并为统一的「多 Agent 协作 Plan-and-Execute」（`PlanExecuteAgent`）。入口只保留 `/plan`（`FULL_PRESET`：人工计划门 + 步骤自动评审串联），`/team` 命令及其接线已删除；`AgentOrchestrator`、`ExecutionStep`、`StepStatus` 及 `prompts/modes/team-planner.md`、`team-worker.md` 已删除。*
 
 *已完成第 16 期 TUI 产品化（含 16.1 形态修正：默认切换为 inline 流式 TUI，Lanterna 全屏 TUI 通过 `CODEAGENT_RENDERER=lanterna` 保留）、第 17 期 LSP 诊断注入 MVP、第 18 期 Git Side-History 快照与回滚 MVP、第 19 期 Prompt 分层架构 MVP、第 20 期后台任务 + Runtime API MVP、第 21 期图片复制粘贴输入 MVP。*

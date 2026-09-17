@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlannerTest {
@@ -55,6 +56,87 @@ class PlannerTest {
         assertEquals(2, plan.getAllTasks().size());
         assertTrue(plan.getTask("task_2").getDependencies().contains("task_1"));
         assertTrue(client.lastSystemPrompt.contains("计划前必须读取项目规则"));
+    }
+
+    @Test
+    void parsesPlanWrappedInMarkdownFence() throws Exception {
+        StubGLMClient client = new StubGLMClient("""
+                ```json
+                {
+                  "summary": "带围栏的计划",
+                  "tasks": [
+                    {
+                      "id": "t1",
+                      "description": "执行命令",
+                      "type": "COMMAND",
+                      "dependencies": []
+                    }
+                  ]
+                }
+                ```
+                """);
+        Planner planner = new Planner(client);
+
+        ExecutionPlan plan = planner.createPlan("先执行命令再汇总结果");
+
+        assertEquals("带围栏的计划", plan.getSummary());
+        assertEquals(List.of("task_1"), plan.getExecutionOrder());
+        assertEquals("执行命令", plan.getTask("task_1").getDescription());
+        assertEquals(Task.TaskType.COMMAND, plan.getTask("task_1").getType());
+    }
+
+    @Test
+    void mapsDependencyDeclaredBeforeItsTarget() throws Exception {
+        StubGLMClient client = new StubGLMClient("""
+                {
+                  "summary": "前向引用",
+                  "tasks": [
+                    {
+                      "id": "b",
+                      "description": "依赖后定义的任务",
+                      "type": "VERIFICATION",
+                      "dependencies": ["a"]
+                    },
+                    {
+                      "id": "a",
+                      "description": "先定义在这里",
+                      "type": "ANALYSIS",
+                      "dependencies": []
+                    }
+                  ]
+                }
+                """);
+        Planner planner = new Planner(client);
+
+        ExecutionPlan plan = planner.createPlan("先分析再验证项目结构");
+
+        assertEquals(2, plan.getAllTasks().size());
+        assertEquals(List.of("task_2"), plan.getTask("task_1").getDependencies());
+        assertEquals("task_2", plan.getExecutionOrder().get(0));
+    }
+
+    @Test
+    void fallsBackToAnalysisTypeWhenTypeFieldIsMissing() throws Exception {
+        StubGLMClient client = new StubGLMClient("""
+                {
+                  "summary": "缺类型",
+                  "tasks": [
+                    {"id": "t1", "description": "第一步", "dependencies": []}
+                  ]
+                }
+                """);
+        Planner planner = new Planner(client);
+
+        ExecutionPlan plan = planner.createPlan("先做第一步再继续后续步骤");
+
+        assertEquals(Task.TaskType.ANALYSIS, plan.getTask("task_1").getType());
+    }
+
+    @Test
+    void throwsWhenPlannerOutputIsNotParseableJson() {
+        Planner planner = new Planner(new StubGLMClient("这不是 JSON"));
+
+        assertThrows(IOException.class, () -> planner.createPlan("先分析再验证项目结构"));
     }
 
     private static final class FailingGLMClient extends GLMClient {

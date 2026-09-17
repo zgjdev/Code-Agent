@@ -73,7 +73,7 @@ mvn test -DskipTests=false
 - 主从架构：编排器（Orchestrator）协调子代理（SubAgent）
 - 规划者拆解任务 -> 执行者执行 -> 检查者审查质量
 - 审查未通过时带反馈重试（最多 2 次），冲突自动解决
-- 新增 `/team` CLI 命令，进入多 Agent 协作模式
+- 新增 `/team` CLI 命令，进入多 Agent 协作模式（旧三角色实现，已并入统一多 Agent 协作 Plan-and-Execute，见「交互式斜杠命令」）
 
 ### 第六期：Human-in-the-Loop + 审批流
 
@@ -203,10 +203,10 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 | **plain 兜底** | `CODEAGENT_RENDERER=plain` | 纯 println，无折叠 / 状态栏，等价 v15 行为 |
 
 - 三种形态共享同一套 `Agent` / `ToolRegistry` / `MemoryManager` / MCP server / SkillRegistry / HITL handler，不创建孤立空会话
-- 普通输入走 ReAct；`/plan <任务>` 走 Plan-and-Execute；`/team <任务>` 走 Multi-Agent；`/cancel` 可取消运行中任务
+- 普通输入走 ReAct；`/plan <任务>` 走统一的 `PlanExecuteAgent`（人工计划门先审计划，再由 Reviewer 逐步自动评审，未通过自动重试）；`/cancel` 可取消运行中任务
 - 通用命令：`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/export`、`/better-harness`、`/hitl`、`/hitl on`、`/hitl off`、`/config`、`/exit`
 - Lanterna 的展示快照保存到 `~/.codeagent/history/session_*.jsonl`
-- 持久化会话保存在 `~/.codeagent/history/sessions/<session-id>/`：ReAct 使用 root session，Plan task、Team planner/worker/reviewer 和 SubAgent 使用独立 child session；每个 session 的 `events.jsonl` append-only 保存完整 system、user、assistant、tool_call、tool_result（含 reasoning、工具参数/结果和图片 payload），父 session 只保存 `child/result` 引用。`/clear` 和上下文压缩只改变 replay 后的模型发送视图，不改写旧事件。旧 `raw/session-*.jsonl` 仅用于兼容读取/幂等迁移，新会话不再写入该目录；POSIX 下会话目录为 0700、文件为 0600。会话可能包含敏感内容，请勿提交或随意分享
+- 持久化会话保存在 `~/.codeagent/history/sessions/<session-id>/`：ReAct 使用 root session，`/plan` 的任务执行使用独立 child session；每个 session 的 `events.jsonl` append-only 保存完整 system、user、assistant、tool_call、tool_result（含 reasoning、工具参数/结果和图片 payload），父 session 只保存 `child/result` 引用。`/clear` 和上下文压缩只改变 replay 后的模型发送视图，不改写旧事件。旧 `raw/session-*.jsonl` 仅用于兼容读取/幂等迁移，新会话不再写入该目录；POSIX 下会话目录为 0700、文件为 0600。会话可能包含敏感内容，请勿提交或随意分享
 - 兼容旧设置：`CODEAGENT_TUI=true` 自动映射为 `CODEAGENT_RENDERER=lanterna`（已 deprecated）
 - `CODEAGENT_NO_STATUSBAR=true` 在 inline 模式下禁用 JLine 底部 dock（不适合 ANSI 光标控制的终端）
 - `NO_COLOR=1` 禁用所有 ANSI 颜色，保留布局
@@ -693,10 +693,8 @@ I
 - `/wechat setup` - 重新扫码绑定并启动微信通道
 - `/wechat status` - 查看当前 CodeAgent 进程内微信通道状态
 - `/wechat stop` - 停止当前 CodeAgent 进程内微信通道
-- `/plan` - 下一条任务使用 Plan-and-Execute 模式
-- `/plan <任务>` - 直接用 Plan-and-Execute 模式执行这条任务
-- `/team` - 下一条任务使用 Multi-Agent 协作模式
-- `/team <任务>` - 直接用 Multi-Agent 协作模式执行这条任务
+- `/plan` - 下一条任务使用多 Agent 协作 Plan-and-Execute 模式（人工确认计划后执行，每个任务结果由 Reviewer 自动审查，未通过自动重试）
+- `/plan <任务>` - 直接用多 Agent 协作 Plan-and-Execute 模式执行这条任务
 - `/cancel` - 运行中请求取消当前任务；空闲时会提示当前没有正在运行的任务
 - `/hitl on` - 启用危险操作人工审批（HITL）
 - `/hitl off` - 关闭 HITL 审批
@@ -798,8 +796,11 @@ src/main/java/com/codeagent
 │   ├── PlanExecuteAgent.java   # Plan-and-Execute Agent
 │   ├── AgentRole.java          # Agent 角色枚举
 │   ├── AgentMessage.java       # Agent 间通信消息
-│   ├── SubAgent.java           # 可配置子代理
-│   └── AgentOrchestrator.java  # Multi-Agent 编排器
+│   ├── SubAgent.java           # 可配置子代理（Reviewer 角色）
+│   ├── PipelineOptions.java    # 统一模式的两个开关（人工计划门 / 步骤自动评审）
+│   ├── StepBriefing.java       # 任务下行简报的唯一渲染点
+│   ├── StepReviewer.java       # 步骤审查层接口
+│   └── SubAgentStepReviewer.java  # 用 Reviewer 子 Agent 实现步骤审查
 ├── cli/
 │   ├── Main.java               # CLI 入口
 │   ├── CliCommandParser.java   # 命令解析

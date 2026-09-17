@@ -141,16 +141,16 @@ class AgentConversationLedgerTest {
     }
 
     @Test
-    void teamModeAttributesEntriesToPlannerWorkerReviewerAndOrchestrator(@TempDir Path tempDir)
+    void fullPresetKeepsRunningWithThePlanLedgerContract(@TempDir Path tempDir)
             throws Exception {
         QueueClient llm = new QueueClient(List.of(
                 new LlmClient.ChatResponse("assistant", """
-                        {"summary":"one step","steps":[
+                        {"summary":"one step","tasks":[
                           {"id":"s1","description":"执行检查","type":"ANALYSIS","dependencies":[]}
                         ]}
                         """, "planner reasoning", null, 10, 2),
                 new LlmClient.ChatResponse(
-                        "assistant", "检查完成", "worker reasoning", null, 10, 2),
+                        "assistant", "检查完成", "task reasoning", null, 10, 2),
                 new LlmClient.ChatResponse(
                         "assistant",
                         "{\"approved\":true,\"summary\":\"通过\",\"issues\":[]}",
@@ -164,20 +164,24 @@ class AgentConversationLedgerTest {
         ConversationLedger ledger =
                 ConversationLedger.open(tempDir.resolve("history"), "team-session");
         PrintStream output = new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8);
-        AgentOrchestrator orchestrator = new AgentOrchestrator(
+        PlanExecuteAgent agent = new PlanExecuteAgent(
                 llm,
                 registry,
                 new MemoryManager(llm),
-                output);
-        orchestrator.setConversationLedger(ledger);
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                output,
+                PipelineOptions.FULL_PRESET);
+        agent.setConversationLedger(ledger);
 
-        assertTrue(orchestrator.run("完成一次检查").contains("检查完成"));
+        assertTrue(agent.run("完成一次检查").contains("检查完成"));
 
         List<ConversationLedger.Entry> entries = ledger.readAll();
-        assertTrue(entries.stream().anyMatch(entry -> "orchestrator".equals(entry.actor())));
-        assertTrue(entries.stream().noneMatch(entry -> "planner".equals(entry.actor())));
-        assertTrue(entries.stream().noneMatch(entry -> "worker-1".equals(entry.actor())));
-        assertTrue(entries.stream().noneMatch(entry -> "reviewer".equals(entry.actor())));
+        assertTrue(entries.stream().allMatch(entry -> "plan".equals(entry.mode())),
+                "统一后只产生 plan 模式条目: " + entries.stream().map(ConversationLedger.Entry::mode).toList());
+        assertTrue(entries.stream().anyMatch(entry ->
+                "task:task_1".equals(entry.actor()) && "assistant".equals(entry.event())));
+        assertTrue(entries.stream().noneMatch(entry -> "reviewer".equals(entry.actor())),
+                "Reviewer 子 Agent 不共享父账本");
     }
 
     private static final class StubToolRegistry extends ToolRegistry {

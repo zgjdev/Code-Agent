@@ -1,6 +1,7 @@
 package com.codeagent.cli;
 
 import com.codeagent.agent.Agent;
+import com.codeagent.agent.PipelineOptions;
 import com.codeagent.agent.PlanExecuteAgent;
 import com.codeagent.history.ConversationLedger;
 import com.codeagent.llm.GLMClient;
@@ -14,6 +15,7 @@ import java.lang.reflect.Field;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MainPlanAgentFactoryTest {
 
@@ -38,6 +40,25 @@ class MainPlanAgentFactoryTest {
         assertSame(sharedMemoryManager, readField(planAgent, "memoryManager"));
         assertSame(ledger, readField(planAgent, "conversationLedger"));
         assertSame(ledger, readField(readField(planAgent, "planner"), "conversationLedger"));
+    }
+
+    @Test
+    void planModeEnablesHumanGateAndStepReview(@TempDir Path tempDir) throws Exception {
+        LlmClient llmClient = new GLMClient("test-key");
+        ToolRegistry sharedToolRegistry = new ToolRegistry();
+        Agent reactAgent = new Agent(llmClient, sharedToolRegistry);
+        reactAgent.setConversationLedger(
+                ConversationLedger.open(tempDir.resolve("history"), "shared-session"));
+
+        PlanExecuteAgent planAgent = Main.createPlanAgent(
+                llmClient,
+                reactAgent,
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.cancel()
+        );
+
+        PipelineOptions options = (PipelineOptions) readField(planAgent, "pipelineOptions");
+        assertSame(PipelineOptions.FULL_PRESET, options);
+        assertTrue(options.stepReview(), "stepReview 开关决定每个任务是否自动构造 Reviewer");
     }
 
     private static Object readField(Object target, String fieldName) throws Exception {

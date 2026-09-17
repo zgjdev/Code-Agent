@@ -232,11 +232,10 @@ runtime/
 
 | 执行模式 | 交互式 CLI | 无头路径（后台任务 / HTTP Turn） |
 |---|---|---|
-| ReAct | 默认分支（`Main.java:1024-1027`） | **唯一支持** |
-| Plan-and-Execute | `/plan` 分支（`Main.java:1005-1014`） | 不支持 |
-| Multi-Agent | `/team` 分支（`Main.java:1015-1023`） | 不支持 |
+| ReAct | 默认分支（`Main.java:1003`） | **唯一支持** |
+| Plan-and-Execute | `/plan` 分支（`Main.java:992`） | 不支持 |
 
-原因不是「忘了接」，而是契约形状决定的：`TaskRunner` 只有 `run(String prompt)`（`TaskRunner.java:5`），**没有回传中间计划、审批请求或子 agent 消息的通道**。Plan 依赖 `PlanExecuteAgent.PlanReviewHandler` 的人工审阅（`Main.java:1317-1330`），Team 依赖把多路进度渲染到终端（`Main.java:1346-1350`）。没有终端的执行环境里，这两条路都无处落脚。
+原因不是「忘了接」，而是契约形状决定的：`TaskRunner` 只有 `run(String prompt)`（`TaskRunner.java:5`），**没有回传中间计划、审批请求或子 agent 消息的通道**。Plan 依赖 `PlanExecuteAgent.PlanReviewHandler` 的人工审阅（`Main.java:1291-1322`）。没有终端的执行环境里，这条路无处落脚。
 
 由此还顺出一个重要事实：**无头执行不经过 HITL 审批**。它用的是 `new ToolRegistry()`（`Main.java:1143`），而交互式路径用的是 `HitlToolRegistry`（`Main.java:239`，装配进 Agent 在 `Main.java:337`）。工具仍然受各自的策略约束，但不会弹人工确认。
 

@@ -1,7 +1,7 @@
 package com.codeagent.tui;
 
 import com.codeagent.agent.Agent;
-import com.codeagent.agent.AgentOrchestrator;
+import com.codeagent.agent.PipelineOptions;
 import com.codeagent.agent.PlanExecuteAgent;
 import com.codeagent.config.CodeAgentConfig;
 import com.codeagent.hitl.HitlHandler;
@@ -222,27 +222,13 @@ public final class TuiSessionController implements AutoCloseable {
             currentTask = executor.submit(() -> runAgentTask(task, RunMode.PLAN));
             return true;
         }
-        if (lower.startsWith("/team ")) {
-            String task = input.substring(6).trim();
-            if (task.isEmpty()) {
-                appendSystem("请提供协作任务，例如 /team 检查并修复测试。");
-                return true;
-            }
-            if (isTaskRunning()) {
-                appendSystem("当前任务仍在运行，请等待完成或输入 /cancel。");
-                return true;
-            }
-            appendUser(input);
-            currentTask = executor.submit(() -> runAgentTask(task, RunMode.TEAM));
-            return true;
-        }
         if (input.startsWith("/")) {
             appendSystem("""
                     TUI 当前支持命令：
                     /clear, /context, /memory, /memory clear, /save <事实>
                     /hitl, /hitl on, /hitl off
                     /snapshot, /snapshot status, /snapshot clean, /restore <N>
-                    /config, /plan <任务>, /team <任务>, /cancel, /exit
+                    /config, /plan <任务>, /cancel, /exit
                     其余管理命令请暂时在默认 CLI 模式执行。
                     """);
             return true;
@@ -266,19 +252,12 @@ public final class TuiSessionController implements AutoCloseable {
                                 llmClient,
                                 reactAgent.getToolRegistry(),
                                 reactAgent.getMemoryManager(),
-                                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute()
+                                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                                null,
+                                PipelineOptions.FULL_PRESET
                         );
                         planAgent.setConversationLedger(reactAgent.getConversationLedger());
                         yield planAgent.run(input);
-                    }
-                    case TEAM -> {
-                        AgentOrchestrator orchestrator = new AgentOrchestrator(
-                                llmClient,
-                                reactAgent.getToolRegistry(),
-                                reactAgent.getMemoryManager()
-                        );
-                        orchestrator.setConversationLedger(reactAgent.getConversationLedger());
-                        yield orchestrator.run(input);
                     }
                 }));
         } catch (Exception e) {
@@ -435,8 +414,7 @@ public final class TuiSessionController implements AutoCloseable {
 
     private enum RunMode {
         REACT("ReAct"),
-        PLAN("Plan"),
-        TEAM("Team");
+        PLAN("Plan");
 
         private final String label;
 

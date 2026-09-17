@@ -132,8 +132,8 @@ public class SubAgent {
 
     private PromptMode promptMode() {
         return switch (role) {
-            case PLANNER -> PromptMode.TEAM_PLANNER;
-            case WORKER -> PromptMode.TEAM_WORKER;
+            case PLANNER -> PromptMode.PLANNER;
+            case WORKER -> PromptMode.PLAN;
             case REVIEWER -> PromptMode.TEAM_REVIEWER;
         };
     }

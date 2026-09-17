@@ -27,7 +27,7 @@
 - `sampling/createMessage` 反向 LLM 调用
 - tool-enabled sampling
 - MCP server crash 自动重启
-- prompts 加载到 `/plan` / `/team` / 普通对话
+- prompts 加载到 `/plan` / 普通对话
 - resources 自动注入 system prompt（留给第 12 期长上下文工程）
 - health ping / heartbeat
 - progress notification UI 展示

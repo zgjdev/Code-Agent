@@ -6,7 +6,7 @@
 
 信息冲突时按以下顺序判断：代码实际行为 > AGENTS.md > CODEAGENT.md > README.md > ROADMAP.md > CLAUDE.md。ROADMAP.md 只表示演进方向，不代表已交付。
 
-CodeAgent 是面向商业使用的 Java 17+ Agent CLI，对标 Claude Code。当前主路径为 ReAct、Plan-and-Execute、Multi-Agent，共享 ToolRegistry、Memory、Snapshot、Policy、Renderer 等基础设施。核心模块位于 src/main/java/com/codeagent/，测试位于 src/test/java/。
+CodeAgent 是面向商业使用的 Java 17+ Agent CLI，对标 Claude Code。当前主路径为 ReAct 与统一多 Agent 协作的 Plan-and-Execute（`PlanExecuteAgent`，由 `/plan` 进入，人工计划门与步骤自动评审串联生效），共享 ToolRegistry、Memory、Snapshot、Policy、Renderer 等基础设施。核心模块位于 src/main/java/com/codeagent/，测试位于 src/test/java/。
 
 ## 2. 开发流程（最高优先级）
 
@@ -68,11 +68,9 @@ graph TB
     CLI[CLI / Runtime API / WeChat] --> ROUTE[命令与入口解析]
     ROUTE --> MODE{执行模式}
     MODE --> REACT[Agent ReAct]
-    MODE --> PLAN[PlanExecuteAgent]
-    MODE --> TEAM[AgentOrchestrator]
+    MODE --> PLAN[PlanExecuteAgent 统一多 Agent 协作]
     REACT --> CORE[Prompt + Context + ConversationLedger]
     PLAN --> CORE
-    TEAM --> CORE
     CORE --> TOOLS[ToolRegistry.executeTools]
     TOOLS --> POLICY[TurnToolPolicy / HITL / PathGuard / CommandGuard]
     TOOLS --> MCP[MCP / Web / Browser / File Tools]
@@ -143,9 +141,9 @@ sequenceDiagram
 
 ## 6. 必须遵守的运行时约束
 
-- ReAct、Plan、Team 都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
+- ReAct 与 PlanExecuteAgent（`/plan` 入口，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
 - 工具授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard；策略拒绝不能通过换工具、provider 或分支绕过。
-- URL 只能来自顶层用户原文或成功 web_search 的结构化 discoveredUrls；搜索正文、reasoning、普通工具输出和回复文本都不能产生新授权。Plan/Team 分支默认隔离 URL 凭据，只有声明的 DAG 后继可继承。
+- URL 只能来自顶层用户原文或成功 web_search 的结构化 discoveredUrls；搜索正文、reasoning、普通工具输出和回复文本都不能产生新授权。计划分支默认隔离 URL 凭据，只有声明的 DAG 后继可继承；步骤自动评审（stepReview）不改变这一步的授权继承。
 - @path/MCP resource 展开在进入 Agent 前完成；项目外绝对路径和符号链接逃逸保持原文。
 - 写文件后按配置运行 LSP 诊断；诊断作为下一轮 user message 注入。CODEAGENT_LSP_ENABLED=false 可关闭。
 - MCP 启动默认最多等待 8 秒，超时 server 保持 STARTING 并后台继续；用 /mcp 查看状态。
@@ -158,14 +156,14 @@ sequenceDiagram
 
 新增、删除或修改 /xxx 时必须同时检查：Main.java、CliCommandParser.java、相关 parser/completer、测试、README、AGENTS。未知斜杠命令必须在 CLI 层报错，不能回退给 Agent。
 
-改工具集时必须同步 ToolRegistry、Agent/Plan/SubAgent 提示词、HITL/Policy、审计和测试。改 MCP、Web、Browser、Memory、Prompt、Renderer 时，分别同步对应包、配置示例、文档和回归测试。
+改工具集时必须同步 ToolRegistry、Agent/Plan/SubAgent 提示词、HITL/Policy、审计和测试。修改 PipelineOptions 预设语义时，必须同步 /plan 的入口接线、MainPlanAgentFactoryTest 与本文档第 6 节。改 MCP、Web、Browser、Memory、Prompt、Renderer 时，分别同步对应包、配置示例、文档和回归测试。
 
 ## 8. 验证矩阵
 
 ```text
 命令解析：mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest
 工具/策略：mvn test -Dtest=ToolRegistryTest,TurnToolPolicyTest,ApprovalPolicyTest
-计划/多 Agent：mvn test -Dtest=ExecutionPlanTest,PlanExecuteAgentTest,AgentOrchestratorTest
+计划/多 Agent：mvn test -Dtest=ExecutionPlanTest,PlannerTest,PlanExecuteAgentTest,StepBriefingTest,SubAgentStepReviewerTest,PipelineOptionsTest
 Memory/RAG：mvn test -Dtest=MemoryManagerTest,ConversationHistoryCompactorTest,VectorStoreTest,CodeIndexTest
 MCP/Web：mvn test -Dtest=McpSchemaSanitizerTest,JsonRpcClientTest,NetworkPolicyTest,WebFetcherTest
 TUI：mvn test -Pphase16-smoke

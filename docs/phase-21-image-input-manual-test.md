@@ -149,13 +149,13 @@ emulate 视口为 7680x4320，打开 https://www.apple.com，take_screenshot
 
 预期：plan 第一个 task 拿到图（task 输入也走 ImageReferenceParser），生成的 Markdown 内容来自图。
 
-### Case 14 — Team 模式
+### Case 14 — 步骤执行器附图
 
 ```
-/team 帮我分析 @image:./shot.png 这个设计稿，由 planner 拆任务，coder 落代码骨架
+/plan 帮我分析 @image:./shot.png 这个设计稿，拆成任务并逐步执行
 ```
 
-预期：SubAgent.execute 也能附图（同 Agent 走 ImageReferenceParser.userMessage）。
+预期：步骤执行路径也能附图（同 Agent 走 ImageReferenceParser.userMessage）。
 
 ---
 

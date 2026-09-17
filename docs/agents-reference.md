@@ -205,7 +205,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 当前开屏 Banner 是无右侧盒线边框的简洁布局，避免 ANSI/CJK 字宽导致竖线错位
 - InlineRenderer 复用 JLine 4 的编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`
 - BottomStatusBar 是 JLine `Status` 托管的底部 dock：由 JLine 负责滚动区域和状态行位置，不再手写 `\n`、`moveUp`、`CLEAR_TO_EOS` 或绝对光标行号；dock 上层展示 YOLO/HITL 与 MCP/Skill 摘要，下层展示 model、phase、ctx、token、cost、elapsed 与 cwd。关键字段可用 JLine `AttributedString` 做克制彩色高亮，但纯文本格式和列宽裁剪仍要稳定。`ctx` 只表示当前仍会带入下一轮请求的上下文估算，`in/out/cache` 表示最近任务调用统计。
-- `/clear` 清空当前 ReAct conversationHistory、对应的 Session Memory 预计算状态和待注入 SkillContextBuffer，并重建不含上一轮检索记忆的 system prompt；长期记忆条目保留，后续只会按新查询重新检索注入。
+- `/clear` 清空当前 ReAct conversationHistory、对应的 Session Memory 预计算状态和待注入 SkillContextBuffer，并重建 system prompt；历史中的检索记忆随对话历史一并丢弃（system prompt 本就不含它）。长期记忆条目保留，后续只会按新查询重新检索并注入到新的 user 消息。
 - `/compact` 手动以完整摘要压缩当前 ReAct conversationHistory，压缩期间显示动态 activity 面板，成功后刷新底部 ctx；不会清空长期记忆或待注入 SkillContextBuffer。
 - `/export` 导出当前 ReAct conversationHistory 为 Markdown 到 `~/.codeagent/exports/session-*.md`；包含完整 system prompt，便于检查 LLM 实际接收前的指令，命令不接受路径参数。
 - 普通任务和斜杠命令提交后都会以 `>` 暗色整行块回写原始输入，避免 JLine accept 后清掉编辑行导致结果区看不到刚执行的命令
@@ -227,9 +227,10 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### Prompt Layering (Phase 19)
 
-- 组装顺序：base → personality → mode → approval → runtime_context → project_context → skills → context_mgmt → handoff
-- runtime_context 每轮注入当前日期和系统时区，供相对日期理解使用
-- project_context 顺序：`CODEAGENT.md` 项目记忆 → 相关长期记忆 → MCP resources 索引
+- 组装顺序：base → personality → mode → approval → project_context → skills → context_mgmt → handoff → runtime_context
+- runtime_context 注入当前日期和系统时区，供相对日期理解使用；放在末尾，跨日时不影响它之前的段
+- project_context 顺序：`CODEAGENT.md` 项目记忆 → MCP resources 索引
+- 相关长期记忆不进 system prompt，追加到本轮 user 消息末尾；改写消息 0 会让前缀缓存连同整段历史一起失效，详见 `docs/dev/11-prompt-cache-friendly-context-injection.md`
 - 覆盖优先级：jar 内置 < 用户级 ~/.codeagent/prompts/ < 项目级 .codeagent/prompts/
 - 必要校验：base.md 和最终 prompt 必须包含 `## Language`
 

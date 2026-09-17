@@ -95,7 +95,7 @@ ReAct 这个词最初来自论文里那种"让模型输出 `Thought: ... / Actio
 ```mermaid
 flowchart TD
     U["用户输入（Main 读一行）"] --> R["Agent.run(userInput, submittedUserInput)"]
-    R --> PRE["前置准备<br/>① TurnToolPolicy.fromUserInput(submitted)<br/>② prune 历史图片<br/>③ 检索长期记忆并替换 system prompt<br/>④ 前置 Skill 正文<br/>⑤ 追加 user 消息（双写 ledger）"]
+    R --> PRE["前置准备<br/>① TurnToolPolicy.fromUserInput(submitted)<br/>② prune 历史图片<br/>③ 检索长期记忆 → 追加到本轮 user 消息（不写 system prompt）<br/>④ 前置 Skill 正文<br/>⑤ 追加 user 消息（双写 ledger）"]
 
     PRE --> LOOP{"while(true) 每轮开始"}
     LOOP --> CANCEL1["CancellationContext.isCancelled()?"]
@@ -191,7 +191,7 @@ input = mentionExpander.expand(input);          // @file 展开后的投喂内�
 input = localPathMentionExpander.expand(input);
 ```
 
-- `userInput`（展开后）**喂给模型**，也决定 system prompt 里的记忆检索关键词（`Agent.java:227`）
+- `userInput`（展开后）**喂给模型**，也决定长期记忆检索用的关键词（`Agent.java:228`）
 - `submittedUserInput`（原始）**只用来构造工具授权策略**（`Agent.java:217-220`）
 
 这条分离有测试兜底：`AgentWebSearchDecisionTest.java:81`（`expandedMentionContentCannotGrantToolsOrGroundUrls`）断言把 URL 藏在展开出来的文件正文里，**不能**让模型获得抓取该 URL 的授权。
@@ -246,13 +246,15 @@ public String run(String userInput, String submittedUserInput) {   // Agent.java
 2. **`pruneHistoricalImagePayloads()`**（`Agent.java:222` → `Agent.java:598-623`）
    把历史消息里的图片 `ContentPart` 全部剥掉，替换成一段文本提示（`LlmClient.java:142-167`）。目的是避免同一张历史截图在后续每轮重复计费。
 
-3. **检索长期记忆并整体替换 system prompt**（`Agent.java:226-228`）
-   检索结果**不追加成普通聊天消息**，而是通过 `updateSystemPromptWithMemory`（`Agent.java:538-557`）替换 `conversationHistory[0]`。这样角色语义稳定，下一轮也容易覆盖掉上一轮的记忆注入。若新 system 与旧的完全相等，方法直接 return，不产生账本条目（`Agent.java:540-542`）。
+3. **检索长期记忆并追加到本轮 user 消息**（`Agent.java:227-229`）
+   检索结果**不再写进 system prompt**，而是在第 5 步拼到本轮用户消息内容的末尾（`Agent.java:233-235`）。`refreshSystemPrompt()`（`Agent.java:543-562`）仍然存在，但只负责会话级稳定内容的刷新，不再接收记忆文本。
+   **这是一次有意的行为反转。** 原实现通过 `updateSystemPromptWithMemory` 替换 `conversationHistory[0]`，理由是「角色语义稳定，下一轮也容易覆盖掉上一轮的记忆注入」。代价是每轮改写消息 0，而消息 0 是整段 prompt 的前缀起点——provider 的自动前缀缓存在第一个不同 token 处失效，因此每轮检索结果一变，**整段历史对话一并失效**。改为随用户消息注入后，历史消息一经写入永不被改写，旧记忆也不再被覆盖（语义上更准确：第 N 轮的记忆针对第 N 轮的问题）。设计依据见 `docs/dev/11-prompt-cache-friendly-context-injection.md`。
+   若新 system 与旧的完全相等，`refreshSystemPrompt()` 直接 return，不产生账本条目（`Agent.java:545-547`）；由于 system 已不含每轮变化的内容，多数轮次命中该早退分支。
 
 4. **前置 Skill 正文**（`Agent.java:231` → `Agent.java:647-654`）
    `skillContextBuffer.drain()` 只会成功一次，正文被拼在用户原文之前，只注入一轮。
 
-5. **追加 user 消息**（`Agent.java:232-234`）
+5. **追加 user 消息**（`Agent.java:236-238`）
    纯文本输入保持字符串 `content`；含 `@image:` 引用时转成 `ContentPart` 列表（`ImageReferenceParser.userMessage`）。这一步走 `appendConversationMessage`，因此**同时写入 ledger**（`Agent.java:1091-1098`）。
 
 第 1、5 步所在 try 块只捕 `SessionPersistenceException`（`Agent.java:235-238`），返回 `"Failed to persist conversation state: ..."`。
@@ -672,7 +674,8 @@ flowchart LR
 | 终轮 assistant 双写 | 以为交付视图和账本一致 | **分裂**：带 tool_calls 的轮次保留 reasoning（`assistant(reasoning, content, toolCalls)`），终轮丢弃 reasoning 只写 `assistant(content)`；账本两条路径都保留完整版 | `Agent.java:299-303`、`Agent.java:316-318`、`Agent.java:346-353` |
 | "Agent 是账本的唯一双写者" | 旧文档明确这么写 | **不成立**：Plan / Team / Planner / Harness 都在写账本 | `PlanExecuteAgent.java:306`、`SubAgent.java:216`、`AgentOrchestrator.java:171`、`Planner.java:73`、`BetterHarnessRunner.java:261` |
 | 账本写入失败 | 以为会向上冒泡 | `ConversationLedger.append` 内部 `catch (IOException)` 只打 error 日志，**调用方完全无感**（与 `SessionStore` 路径的 `SessionPersistenceException` 形成对比） | `ConversationLedger.java:180-196` |
-| system prompt 刷新 | 以为每轮重建只是一次内存替换 | 只要新 system 与旧的不同就**追加一条账本条目**（`memory_context_refresh`），所以账本会随轮次增长多条 full system prompt | `Agent.java:538-557` |
+| system prompt 刷新 | 以为每轮重建只是一次内存替换 | 只要新 system 与旧的不同就**追加一条账本条目**（`memory_context_refresh`）。改动后 system 只含会话级稳定内容，多数轮次命中早退分支，账本不再逐轮增长 full system prompt | `Agent.java:543-562` |
+| 记忆注入位置 | 旧文档称「替换 `conversationHistory[0]`，下一轮容易覆盖上一轮」 | **已反转**：检索结果随本轮 user 消息注入（`Agent.java:233-235`），历史消息永不被改写；旧记忆不再被覆盖，改为随历史累积、由自动压缩消化。原因是改写消息 0 会让前缀缓存连同整段历史一起失效 | `Agent.java:227-238`、`docs/dev/11-prompt-cache-friendly-context-injection.md` |
 | durable session 下的压缩 | 以为压缩总能生效 | `commitCompaction` 在 session 路径下要求特定形状，否则抛 `SessionPersistenceException("unsupported compaction shape")`，被 `maybeCompactHistory` 的 catch 吞成 `false` → 本轮不压缩，**下一轮还会再试一次** | `Agent.java:1239-1244`、`Agent.java:592-594` |
 | 会话事件写入成本 | 以为 append 是 O(1) | `SessionHandle.append` 每次都执行 `replayer.replay(manifest, events)`——**全量重放所有事件**。ReAct 单轮会写多条事件，整场会话呈 O(N²) | `SessionStore.java:520-542`、`SessionReplayer.java:46-56`；对比启动时用的增量 `replayFrom`（`SessionStore.java:84-86`） |
 | 图片裁剪与 session 下标 | 以为两者无耦合 | `pruneHistoricalImagePayloads` 用 `conversationHistory` 的下标 `i` 直接索引 `sessionHandle.projection().activeSurface().get(i)`，隐含"两者严格同序同长"；这是**推断的耦合**（未运行验证会否越界） | `Agent.java:601-613` |

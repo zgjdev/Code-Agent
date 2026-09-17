@@ -55,7 +55,7 @@
 |---|---|---|---|
 | 会话消息历史 | 这次对话的全部消息，就是发给模型的 `messages` | 当前会话 | **就是它本身** |
 | 原始消息账本 | 未经任何裁剪的原始流水，只追加 | 当前会话，落盘 | 不进（审计用） |
-| 长期记忆 | 跨会话仍然成立的事实、偏好 | 跨会话，落盘 | 检索后注入 system prompt |
+| 长期记忆 | 跨会话仍然成立的事实、偏好 | 跨会话，落盘 | 检索后追加到本轮 user 消息 |
 | 项目记忆 | `CODEAGENT.md` 系列文件 | 跟随仓库，可版本化 | 每次组装 system prompt 时加载 |
 | 会话记忆（实验） | 压缩用的异步预生成摘要状态 | 绑在某个 history 对象上，不落盘 | 压缩时用来替换旧消息 |
 
@@ -117,8 +117,8 @@ flowchart TB
     CM --> Prompt["PromptAssembler"]
     MM --> Retr
     LTM --> Retr
-    Retr -->|"相关长期记忆"| Prompt
-    Prompt -->|"新 system prompt"| Hist
+    Retr -->|"相关长期记忆<br/>追加到最新 user 消息"| Hist
+    Prompt -->|"system prompt（不含检索结果）"| Hist
     MM -.->|"storeFact"| LTM
     LTM --- Dedup
 
@@ -136,7 +136,7 @@ flowchart TB
     Hist -.->|"追加原始消息"| Ledger
 ```
 
-一句话概括数据流：**输入 → 检索长期记忆 → 组装 system prompt → 追加到 `conversationHistory` → 每轮迭代前判断是否压缩 → 发给模型。**
+一句话概括数据流：**输入 → 检索长期记忆 → 组装不含检索结果的 system prompt → 把检索结果拼进本轮 user 消息并追加到 `conversationHistory` → 每轮迭代前判断是否压缩 → 发给模型。**
 
 ## 1.2 分层职责表
 
@@ -146,7 +146,7 @@ flowchart TB
 | `LongTermMemory` | 跨会话事实的存储、检索、去重、JSON 持久化 | `memory/LongTermMemory.java:25` |
 | `MemoryDeduplicator` | 长期记忆的确定性去重（不做冲突消解） | `memory/MemoryDeduplicator.java:14` |
 | `MemoryQueryTokenizer` | jieba 分词 + 子串匹配 | `memory/MemoryQueryTokenizer.java:17` |
-| `MemoryRetriever` | 相关度打分、生成注入 system prompt 的文本 | `memory/MemoryRetriever.java:14` |
+| `MemoryRetriever` | 相关度打分、生成要注入的「相关长期记忆」文本 | `memory/MemoryRetriever.java:14` |
 | `TokenBudget` | 启发式 token 估算、静态预算拆分、用量统计 | `memory/TokenBudget.java:17` |
 | `ContextProfile` | 从 `maxContextWindow` 派生所有上下文参数 | `context/ContextProfile.java:18` |
 | `ContextTokenTracker` | 决定本轮用「usage 锚点 + 增量」还是「全量估算」 | `context/ContextTokenTracker.java:6` |
@@ -154,7 +154,7 @@ flowchart TB
 | `ConversationHistoryCompactor` | 稳定路径：达到阈值时把旧段整体摘要 | `memory/ConversationHistoryCompactor.java:29` |
 | `SessionMemoryCompactor` | 实验路径：阈值前异步预生成摘要 | `memory/SessionMemoryCompactor.java:26` |
 | `ProjectMemoryLoader` | 加载 `CODEAGENT.md` 系列并处理 `@import` | `prompt/ProjectMemoryLoader.java:19` |
-| `PromptAssembler` | 把项目记忆、长期记忆、skill、外部上下文拼进 system prompt | `prompt/PromptAssembler.java:9` |
+| `PromptAssembler` | 把项目记忆、skill、外部上下文拼进 system prompt（**不含长期记忆检索结果**） | `prompt/PromptAssembler.java:9` |
 | `ConversationLedger` | 只追加的原始消息账本 | `history/ConversationLedger.java:40` |
 | `SessionStore` | 持久化会话事件流，支持重启后恢复 | `history/SessionStore.java` |
 
@@ -166,7 +166,7 @@ flowchart TB
 |---|---|---|
 | 每个用户轮次开始前 | 裁剪历史图片二进制 | `agent/Agent.java:222` |
 | 每个用户轮次开始前 | 抽取「浏览器登录复用」启发式事实 | `agent/Agent.java:223` |
-| 每个用户轮次开始前 | 检索长期记忆并替换 `history[0]` | `agent/Agent.java:227-228` |
+| 每个用户轮次开始前 | 检索长期记忆并追加到本轮 user 消息末尾 | `agent/Agent.java:227-235` |
 | **每次 ReAct 迭代**（不是每轮用户输入） | 压缩检查 | `agent/Agent.java:264` |
 | provider 报上下文超限时 | 一次性手动压缩后重试 | `agent/Agent.java:378-396` |
 | `/clear` | 清空会话历史 + 会话记忆状态 + skill buffer | `agent/Agent.java:472-497` |
@@ -190,7 +190,7 @@ flowchart TB
 
 **长期记忆 vs 代码库 RAG。** 两者都是「检索后塞进 prompt」，但数据源、生命周期、存储完全不同：长期记忆存的是「用户偏好、项目约定」这类少量稳定事实，存在用户目录的 JSON 里，跨会话；RAG 存的是整个代码库的切片，重建索引时刷新。两者代码上零耦合。
 
-**长期记忆 vs `CODEAGENT.md`。** 长期记忆是「Agent 运行时攒下来的」，通过 `/save`、`save_memory`、启发式写入，颗粒是「一条事实」；`CODEAGENT.md` 是「人写给 Agent 的」，跟着仓库走、能进 Git、团队共享，颗粒是「一篇文档」。两者都注入 system prompt 的同一个章节下（`prompt/PromptAssembler.java:39-40`），但不能互相替代。
+**长期记忆 vs `CODEAGENT.md`。** 长期记忆是「Agent 运行时攒下来的」，通过 `/save`、`save_memory`、启发式写入，颗粒是「一条事实」；`CODEAGENT.md` 是「人写给 Agent 的」，跟着仓库走、能进 Git、团队共享，颗粒是「一篇文档」。**两者注入位置不同**：`CODEAGENT.md` 进 system prompt 的 `## Project Context`（`prompt/PromptAssembler.java:38`），长期记忆追加在本轮 user 消息末尾（`agent/Agent.java:233-235`）。区别的由来见 10.3，不能互相替代。
 
 **`conversationHistory` vs `ConversationLedger`。** 前者是投递视图，会被图片裁剪、`/clear`、压缩改写；后者只追加、永不改写，存的是模型**最初看到过什么**。见 `history/ConversationLedger.java:28-38`。
 
@@ -285,18 +285,21 @@ flowchart TB
 
 ## 3.1 注入时机：每个用户轮次开始前一次
 
-`Agent.run` 的开头依次做四件事（`agent/Agent.java:221-234`）：
+`Agent.run` 的开头依次做这几件事（`agent/Agent.java:221-238`）：
 
 ```text
 pruneHistoricalImagePayloads()          // 裁掉历史图片二进制
 storeExplicitBrowserMemoryHint(input)   // 抽取「浏览器登录复用」事实（有严格前置条件）
-buildContextForQuery(input, budget)     // 检索长期记忆，生成注入文本
-updateSystemPromptWithMemory(text)      // 用新 system prompt 替换 history[0]
+buildContextForQuery(input, budget)     // 检索长期记忆，生成待注入文本
+refreshSystemPrompt()                   // 刷新 system prompt（不含检索结果，相等则早退）
+prependSkillBodies(input)               // 前置一次性 skill 正文
+→ 把检索文本拼到用户原文之后            // agent/Agent.java:233-235
+appendConversationMessage(...)          // 追加本轮 user 消息
 ```
 
-然后是追加本轮用户消息。
+检索结果**不再进入 system prompt**，而是作为本轮用户消息的一部分随该消息发出，因此历史消息一经写入就不再被改写。原因见 10.3。
 
-**注意这里有一个顺序上的细节**：浏览器登录 fact 是在**检索之前**写入的（`agent/Agent.java:223` 在 `227` 之前）。所以如果这一轮输入同时触发了「保存」和「命中检索」，这一轮就可能检索到自己刚写进去的那条 fact。这是**推断**（从调用顺序推出），没有实测。
+**注意这里有一个顺序上的细节**：浏览器登录 fact 是在**检索之前**写入的（`agent/Agent.java:223` 在 `228` 之前）。所以如果这一轮输入同时触发了「保存」和「命中检索」，这一轮就可能检索到自己刚写进去的那条 fact。这是**推断**（从调用顺序推出），没有实测。
 
 而 `save_memory` 工具是在模型已经开始工作之后才被调用的，写入结果通常供**后续轮次**使用，不会回写当前这一条已经发出的请求。
 
@@ -353,14 +356,29 @@ updateSystemPromptWithMemory(text)      // 用新 system prompt 替换 history[0
 
 ## 3.6 注入的最终落点
 
-`PromptAssembler.assemble` 把所有上下文按固定顺序拼起来，其中「项目记忆 + 长期记忆 + 外部上下文」被塞进**同一个 `## Project Context` 章节**（`prompt/PromptAssembler.java:39-40`）：
+长期记忆与项目记忆的**落点不同**，这是本节最重要的结论。
+
+**项目记忆 + 外部上下文**进 system prompt 的同一个 `## Project Context` 章节（`prompt/PromptAssembler.java:38`）：
 
 ```java
 append(prompt, dynamicSection("Project Context",
-        ctx.projectMemoryContext(), ctx.memoryContext(), ctx.externalContext()));
+        ctx.projectMemoryContext(), ctx.externalContext()));
 ```
 
-也就是说，`CODEAGENT.md` 的内容和「相关长期记忆」在 prompt 里是**同一个标题下的相邻文本块**，不是两个独立章节。`dynamicSection` 会跳过空值（`prompt/PromptAssembler.java:79-93`），所以没有任何一块时为整个章节消失。
+`dynamicSection` 会跳过空值（`prompt/PromptAssembler.java:79-93`），所以两块都为空时整个章节消失。
+
+**长期记忆检索结果**则追加到本轮用户消息内容的末尾（`agent/Agent.java:233-235`），拼接顺序为 `skill 正文 → 用户原文 → 相关长期记忆`：
+
+```java
+String userMessageContent = prependSkillBodies(userInput);
+if (!memoryContext.isEmpty()) {
+    userMessageContent = userMessageContent + "\n\n" + memoryContext;
+}
+```
+
+`memoryContext` 由 `MemoryRetriever.buildContextForQuery` 生成，自带 `## 相关长期记忆` 标题（`memory/MemoryRetriever.java:65`），因此模型仍能把它与用户原文区分开。
+
+与 `PlanExecuteAgent` 的一致性：PLAN 路径本来就是这么做的——先按不含记忆的上下文拼 system prompt，再把记忆追加到 `taskInput`（`agent/PlanExecuteAgent.java:578-595`）。改动后 ReAct 与 PLAN 的注入形态统一。
 
 ---
 
@@ -740,11 +758,11 @@ Agent 每次 `run` 开始时，在追加本轮 user message 前执行一次长�
 pruneHistoricalImagePayloads
 → storeExplicitBrowserMemoryHint
 → buildContextForQuery(userInput, memoryContextTokens)
-→ 用新 system prompt 替换 conversationHistory[0]
-→ 追加本轮 user message
+→ refreshSystemPrompt()（system prompt 不含检索结果）
+→ 把检索结果拼到本轮 user message 末尾，再追加该消息
 ```
 
-（`agent/Agent.java:221-234`。）因此，本轮新写入的浏览器登录 fact 可能会在同一轮被下一步检索到；普通 `save_memory` 工具是在模型已经开始工作后调用的，写入结果通常供后续轮次使用，而不是回写当前已经发送的那一条请求。
+（`agent/Agent.java:221-238`。）因此，本轮新写入的浏览器登录 fact 可能会在同一轮被下一步检索到；普通 `save_memory` 工具是在模型已经开始工作后调用的，写入结果通常供后续轮次使用，而不是回写当前已经发送的那一条请求。
 
 Agent 注入路径使用 `MemoryRetriever.buildContextForQuery`：先从当前项目可见的 global/project 条目中打分排序，取一个固定的条数上限，再按 `maxTokens` 累加条目的 `tokenCount`，**超预算就在第一条放不下时停止**（`memory/MemoryRetriever.java:60-78`）。无命中返回空字符串，不生成空的「相关长期记忆」章节（`memory/MemoryRetriever.java:62`）。
 
@@ -816,15 +834,15 @@ sequenceDiagram
     M->>R: retrieveLongTerm(...)
     R-->>M: 本轮尚无此条（还没写）
     M-->>A: ""（无命中，不生成空章节）
-    A->>P: assemble(project=CODEAGENT.md, memory="")
-    P-->>A: system prompt
-    A->>A: history[0] 替换 + 追加 user 消息
+    A->>P: assemble(project=CODEAGENT.md)
+    P-->>A: system prompt（不含检索结果）
+    A->>A: refreshSystemPrompt()（内容未变则早退）；无命中，user 消息不加记忆块
     Note over A: 模型在本轮回复里调用 save_memory 工具
     A->>M: storeFact(fact, scope)
     M->>L: store(entry)
     Note over L: 去重 → put → 计数 → 立即全量写盘
     L-->>A: "💾 已保存到长期记忆(project): ..."
-    Note over A: 下一轮用户输入时才会被检索到并注入 system prompt
+    Note over A: 下一轮用户输入时才会被检索到，并追加到那一轮的 user 消息
     U->>A: run("帮我重构这个类")
     A->>M: buildContextForQuery("帮我重构这个类", budget)
     M->>R: retrieveLongTerm(...)
@@ -905,6 +923,8 @@ sequenceDiagram
 | `ScoredEntry.fromShortTerm` | 以为它区分短期/长期来源 | **恒为 `false`**，是重构残留字段 | `memory/MemoryRetriever.java:45`、`113` |
 | 会话记忆快路径 | 以为它总能省一次同步摘要 | 默认关闭；仅在窄带条件下可能生效，且会被完整摘要的 `clear()` 抹掉（见 5.4） | `memory/SessionMemoryCompactor.java:99-103`、`197-201`；`memory/AutoCompactionManager.java:53-60` |
 | 实验路径的测试 | 以为端到端被覆盖 | `SessionMemoryCompactorTest` 直接调内部方法；`AutoCompactionManagerTest` 用 stub 替换了门控方法 | `SessionMemoryCompactorTest.java:109-124`；`AutoCompactionManagerTest.java:99-118` |
+| 记忆注入位置 | 旧文档称「替换 `conversationHistory[0]`，下一轮容易覆盖上一轮」 | **已改**：检索结果追加到本轮 user 消息末尾（`agent/Agent.java:233-235`），system prompt 不再逐轮承载检索结果；历史消息永不被改写。**代价**：旧记忆不再被覆盖，改为随历史累积、由自动压缩消化 | `agent/Agent.java:227-238`、`agent/Agent.java:543-562`；`docs/dev/11-prompt-cache-friendly-context-injection.md` |
+| system prompt 段序 | 旧文档称 `... → runtime_context → project_context → ...` | **已改**：`runtime_context` 移到 system prompt **末尾**（`prompt/PromptAssembler.java:43`），使跨日变化只影响它自己 | `prompt/PromptAssembler.java:30-44` |
 | SubAgent 的记忆 | 以为所有 Agent 共享长期记忆注入 | **SubAgent 不检索/不注入长期记忆**，只加载 `CODEAGENT.md`；但可通过共享 toolRegistry **写入** | `agent/SubAgent.java:64`、`126`；`agent/AgentOrchestrator.java:107` |
 | 工具结果回灌 | 以为回灌给模型的是截断版 | 回灌进 `conversationHistory` 的是**完整结果**（`LlmClient.Message.tool(id, result)` 原样追加）；旧文档描述的 `MemoryManager.addToolResult` 截断副本已随短期记忆一并删除 | `agent/Agent.java:330-335` |
 | 原始消息可追溯 | 以为 `conversationHistory` 就是完整原始记录 | 它是投递视图，会被裁图、`/clear`、压缩改写；完整原始消息只在只追加的 ledger | `history/ConversationLedger.java:28-38` |
@@ -929,6 +949,25 @@ sequenceDiagram
 3. **不能引入额外服务依赖。** 向量检索需要 embedding 服务（要么调 API，要么本地跑模型）。记忆系统是一个**离线也在工作**的本地功能，为几十条事实引入 embedding 依赖不划算。
 
 代价也很清楚：**语义改写召回弱**。用户存了「默认用中文回答」，后来问「帮我翻译一段英文」，查询词和事实正文没有交集，分数为 0，不会被召回。如果将来事实规模上去了，可以加向量召回，但**仍要保留 scope 过滤和可删除性**——这两点是记忆系统的刚需，不能因为换了检索方式就丢。
+
+## 10.3 记忆注入为什么从 system prompt 改成追加到用户消息
+
+**改前的做法**（`updateSystemPromptWithMemory`）：每轮把检索结果拼进 system prompt，然后原地替换 `conversationHistory[0]`。当时的理由是「角色语义稳定，下一轮也容易覆盖掉上一轮的记忆注入」。
+
+**问题**：provider 的自动前缀缓存（DeepSeek 的 `prompt_cache_hit_tokens` 等）按「第一个不同的 token 之后全部失效」工作。而系统提示词是消息序列的第 0 条，是整段 prompt 的前缀起点。于是每轮检索结果一变（几乎必然与上一轮不同），不只 system 内部后续段失效，**后面整段历史对话也一起失效**——缓存收益基本归零。
+
+**改后的做法**：system prompt 只留会话级稳定内容；检索结果追加到本轮 user 消息末尾。历史消息一经写入永不被改写，缓存前缀因此能一路延伸到倒数第二条消息。
+
+**代价（真实存在，不是零成本）**：不再覆盖上一轮的记忆注入。第 N 轮检索到的记忆永久留在第 N 轮的用户消息里，历史会累积历次检索结果，token 占用随之增长，靠既有的自动压缩（第 5 部分）自然消化。换来的是语义更准确——第 N 轮的检索是针对第 N 轮问题的，留在原处比事后被覆盖更可解释。
+
+**为什么不选另外两种做法**：
+
+- 只把 `## Project Context` 整段移到 system prompt 末尾、仍原地替换：段还在 system 里，替换仍使其后（含全部历史）失效，没解决问题。
+- 每轮 append 一条独立的「记忆消息」：需要新增事件 source 约定，且对话中出现连续两条 `user` 消息存在 provider 兼容风险，相对追加进同一条消息没有净收益。
+
+**顺带的改动**：`runtimeContext()`（含当前日期）也从 system prompt 中段移到末尾。它每天变一次，频率低但失效半径和上面一样大，放在末尾后跨日只影响它自己。
+
+完整设计依据、影响面与验收标准见 `docs/dev/11-prompt-cache-friendly-context-injection.md`。缓存收益的具体数值尚未实测，度量方法在该文档第 5 部分。
 
 jieba 分词 + 子串匹配的选择（`memory/MemoryQueryTokenizer.java:26-58`）也带来了两个明确约束：只保留长度 ≥ 2 且非纯标点的 token，且匹配是**子串**而非词边界——所以短查询的召回会比较粗。
 
@@ -1093,7 +1132,7 @@ mvn test -Dtest=MemoryManagerTest,LongTermMemoryTest,MemoryRetrieverTest,Convers
 
 ## 13.1 30 秒版本
 
-我实现了 Agent 的分层记忆与上下文治理。发给模型的真实消息协议本身就保存在 `conversationHistory`，我们没有维护第二份影子短期记忆——早期那套「压影子结构但真实请求不变」的设计被删掉了，压的是真实历史。跨会话的稳定事实按 project/global 作用域持久化到本地 JSON，配置关键词与时间衰减检索，再按固定层次注入 system prompt。上下文接近模型窗口阈值时，按 user 轮次边界压缩真实消息历史，保证 assistant `tool_calls` 和 tool results 不被切断；压缩有一条稳定完整摘要路径和一条默认关闭的异步预生成实验路径，任何摘要失败都保留原历史。
+我实现了 Agent 的分层记忆与上下文治理。发给模型的真实消息协议本身就保存在 `conversationHistory`，我们没有维护第二份影子短期记忆——早期那套「压影子结构但真实请求不变」的设计被删掉了，压的是真实历史。跨会话的稳定事实按 project/global 作用域持久化到本地 JSON，用关键词与时间衰减检索，再追加到当轮用户消息末尾；系统提示词只保留会话级稳定内容，避免逐轮改写消息 0 而让 provider 的前缀缓存连同整段历史一起失效。上下文接近模型窗口阈值时，按 user 轮次边界压缩真实消息历史，保证 assistant `tool_calls` 和 tool results 不被切断；压缩有一条稳定完整摘要路径和一条默认关闭的异步预生成实验路径，任何摘要失败都保留原历史。
 
 ## 13.2 2 分钟版本
 
@@ -1227,7 +1266,7 @@ base64 图片成本高，而且后续每一轮都会重复携带，会迅速挤�
 | 会话持久化与崩溃恢复 | 事件流 + 原子 manifest — `history/SessionStore.java:520-560`、`313`；中断修复补 `request_failed` 与「not retried」tool result — `history/SessionStore.java:482-518`；压缩整组生效 — `history/SessionReplayer.java:208-231`；跨重启测试 — `SessionCompactionRecoveryTest.java:26-59` |
 | 只注入相关长期记忆（不重复注入会话历史） | `MemoryRetriever` 注释说明 — `memory/MemoryRetriever.java:32-37`；注入预算逐条累加、超预算停止 — `memory/MemoryRetriever.java:60-78`；测试「当前轮不作为历史记忆注入」— `MemoryRetrieverTest.java:24-57` |
 | 项目记忆 `CODEAGENT.md` | 五个来源按序拼接 — `prompt/ProjectMemoryLoader.java:66-76`；`@import` 安全规则 — `prompt/ProjectMemoryLoader.java:78-126`；字符预算截断留余量 — `prompt/ProjectMemoryLoader.java:128-132` |
-| 记忆注入 system prompt | 注入点 — `agent/Agent.java:221-234`；「Project Context」章节合并项目记忆与长期记忆 — `prompt/PromptAssembler.java:39-40` |
+| 长期记忆注入落点（追加到用户消息） | 检索与拼接 — `agent/Agent.java:227-235`；system prompt 只含项目记忆与外部上下文 — `prompt/PromptAssembler.java:38`；system 逐轮稳定有测试 — `AgentClearHistoryTest` 的 `systemPromptStaysIdenticalAcrossTurnsWhileRetrievedMemoryVaries`；设计依据 — `docs/dev/11-prompt-cache-friendly-context-injection.md` |
 | 上下文状态可观测 | `getContextStatus` 分类估算并按 role 展示、显示阈值与剩余 — `agent/Agent.java:707-760` |
 
 ---

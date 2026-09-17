@@ -232,8 +232,8 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 ### 第十九期：Prompt 分层架构（MVP）
 
 - ReAct、Plan task executor、Multi-Agent 三角色、Planner 的 system prompt 已从 Java 硬编码抽离到 `src/main/resources/prompts/`
-- `PromptAssembler` 按 `base -> personality -> mode -> approval -> runtime_context -> project_context -> skills -> context_mgmt -> handoff` 组装；`runtime_context` 注入当前日期/时区，动态项目上下文靠后注入
-- `project_context` 会先注入 `CODEAGENT.md` 项目记忆，再注入 `/save` 检索到的相关长期记忆和 MCP resource 索引
+- `PromptAssembler` 按 `base -> personality -> mode -> approval -> project_context -> skills -> context_mgmt -> handoff -> runtime_context` 组装；`runtime_context` 注入当前日期/时区，放在末尾以缩小跨日时的前缀缓存失效半径
+- `project_context` 包含 `CODEAGENT.md` 项目记忆和 MCP resource 索引；`/save` 检索到的相关长期记忆**不进 system prompt**，而是追加到本轮 user 消息末尾，避免每轮改写消息 0 而使整段历史的前缀缓存失效
 - 支持用户级覆盖 `~/.codeagent/prompts/...`，支持项目级覆盖 `.codeagent/prompts/...`，项目级优先级最高
 - 覆盖是整文件替换；`base.md` 和最终 prompt 必须包含 `## Language`
 - Prompt 改动审计模板见 `docs/prompt-analysis-template.md`
@@ -727,7 +727,7 @@ I
 - `/index [路径]` - 索引代码库（默认当前目录）
 - `/search <查询>` - 语义检索代码（RAG 辅助路径）
 - `/graph <类名>` - 查看代码关系图谱
-- `/clear` - 清空当前 ReAct 对话历史、Session Memory 预计算状态、待注入 Skill 上下文和上一轮检索记忆注入；长期记忆保留
+- `/clear` - 清空当前 ReAct 对话历史、Session Memory 预计算状态、待注入 Skill 上下文和历史中的检索记忆注入；长期记忆条目保留
 - `/exit` / `/quit` - 退出程序
 
 ## 运行效果

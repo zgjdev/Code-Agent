@@ -32,6 +32,15 @@
 
 ---
 
+## 当前实现补充：安全组批与可验证终态
+
+当前 `/plan` 仍由 `PlanExecuteAgent` 作为唯一状态所有者；Planner、任务执行循环和 Reviewer 是不同责任组件，不是三个共享会话的独立进程。执行前新增两道本地确定性控制：
+
+- Planner 任务可声明项目相对的 `readPaths`、`writePaths`、`workspaceWrite`、验收标准和所需证据。缺失或无法界定的写集按工作区独占处理；资源声明只收紧工具暴露和调度，不扩大原有 PathGuard、CommandGuard、URL 或 HITL 权限。
+- 就绪任务先经 `ConflictAwareBatchSelector` 稳定组批：读读可并行，写写/写读/目录祖先重叠会拆批，工作区独占任务单独成批，单批最多 4 个；工具结果仍按输入顺序归并。
+- 任务执行期间 `TaskEvidenceCollector` 只观察真实 `write_file`、构建/测试命令和 LSP 诊断，`DeterministicEvidenceGate` 在 Reviewer 前检查必需证据。执行器最终文本不能伪造 BUILD、TEST、DIFF 或 LSP 证据。
+- `StepReviewDecision` 现在是 `APPROVED`、`REJECTED`、`UNAVAILABLE` 三态。Reviewer 调用不可用、证据门禁失败重试耗尽或审核重试耗尽均进入 `TaskStatus.UNVERIFIED`，不会调用 `markCompleted`，也不会解锁 DAG 后继。
+
 # 第 0 部分　前置知识
 
 ## 0.1 这个模块要解决什么问题

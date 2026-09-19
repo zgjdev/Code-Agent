@@ -5,6 +5,7 @@ import com.codeagent.llm.LlmClient;
 import com.codeagent.plan.Task;
 import com.codeagent.tool.ToolRegistry;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Disabled;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -38,7 +39,8 @@ class SubAgentStepReviewerTest {
     }
 
     @Test
-    void approvesWhenReviewerCallFailsAtLlmLayer() {
+    @Disabled("legacy expectation is intentionally replaced by fail-closed semantics")
+    void marksReviewerCallUnavailableAtLlmLayer() {
         SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER,
                 new FailingClient(), new ToolRegistry());
         SubAgentStepReviewer stepReviewer = new SubAgentStepReviewer(reviewer, quietOut());
@@ -46,6 +48,17 @@ class SubAgentStepReviewerTest {
         StepReviewDecision decision = stepReviewer.review("总目标", TASK, "执行结果");
 
         assertTrue(decision.approved(), "审查阶段 LLM 失败不得作废已完成的步骤");
+    }
+
+    @Test
+    void reviewerErrorIsUnavailable() {
+        SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER,
+                new FailingClient(), new ToolRegistry());
+        StepReviewDecision decision = new SubAgentStepReviewer(reviewer, quietOut())
+                .review(new StepReviewRequest("goal", TASK, "result", null));
+
+        assertFalse(decision.approved());
+        assertEquals(StepReviewDecision.ReviewOutcome.UNAVAILABLE, decision.outcome());
     }
 
     private StepReviewDecision review(String reviewerContent) {

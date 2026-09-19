@@ -17,6 +17,8 @@ public final class LspDiagnosticFormatter {
         int max = maxDiagnostics();
         int count = Math.min(max, diagnostics.size());
         int omitted = diagnostics.size() - count;
+        int errorCount = (int) diagnostics.stream().filter(d -> d.severity() == LspSeverity.ERROR).count();
+        int warningCount = (int) diagnostics.stream().filter(d -> d.severity() == LspSeverity.WARNING).count();
 
         StringBuilder prompt = new StringBuilder();
         prompt.append("[LSP 诊断注入]\n");
@@ -38,7 +40,7 @@ public final class LspDiagnosticFormatter {
             prompt.append(line).append("\n");
             display.append(AnsiStyle.subtle(line)).append("\n");
         }
-        return new LspDiagnosticReport(prompt.toString().trim(), display.toString().trim());
+        return new LspDiagnosticReport(prompt.toString().trim(), display.toString().trim(), errorCount, warningCount);
     }
 
     static int maxDiagnostics() {

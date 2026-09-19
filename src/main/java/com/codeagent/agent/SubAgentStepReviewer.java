@@ -20,13 +20,20 @@ final class SubAgentStepReviewer implements StepReviewer {
     }
 
     @Override
-    public StepReviewDecision review(String goal, Task task, String stepResult) {
+    public StepReviewDecision review(StepReviewRequest request) {
+        String goal = request.goal();
+        Task task = request.task();
+        String stepResult = request.stepResult();
         String originalTask = "总目标：" + goal + "\n当前任务：" + task.getDescription();
+        if (request.verificationReport() != null) {
+            originalTask += "\nEvidence: " + request.verificationReport().evidence()
+                    + "\nBlocking reasons: " + request.verificationReport().blockingReasons();
+        }
         AgentMessage reviewResult = reviewer.review(originalTask, stepResult, out);
         reviewer.clearHistory();
 
         if (reviewResult.type() == AgentMessage.Type.ERROR) {
-            return StepReviewDecision.approve();
+            return StepReviewDecision.unavailable("Reviewer call unavailable");
         }
         if (ReviewResponseParser.parseApproved(reviewResult.content())) {
             return StepReviewDecision.approve();

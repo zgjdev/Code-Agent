@@ -128,7 +128,16 @@ public class Planner {
             String typeStr = taskNode.path("type").asText();
             Task.TaskType type = parseTaskType(typeStr);
 
-            plan.addTask(new Task(newId, description, type));
+            try {
+                TaskResourceClaims resourceClaims = TaskResourceClaims.normalize(
+                        Path.of(".").toAbsolutePath().normalize(), type, taskNode.get("resources"));
+                List<String> acceptanceCriteria = parseTextArray(taskNode.path("acceptanceCriteria"));
+                Set<EvidenceType> requiredEvidence = parseEvidence(taskNode.path("requiredEvidence"));
+                plan.addTask(new Task(newId, description, type, List.of(), resourceClaims,
+                        acceptanceCriteria, requiredEvidence));
+            } catch (IllegalArgumentException e) {
+                throw new IOException("Invalid resource declaration for task " + originalId, e);
+            }
         }
 
         // 第二遍：建立依赖和被依赖关系
@@ -171,6 +180,37 @@ public class Planner {
             case "VERIFICATION" -> Task.TaskType.VERIFICATION;
             default -> Task.TaskType.ANALYSIS;
         };
+    }
+
+    private List<String> parseTextArray(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonNode item : node) {
+            if (item.isTextual() && !item.asText().isBlank()) {
+                values.add(item.asText().trim());
+            }
+        }
+        return List.copyOf(values);
+    }
+
+    private Set<EvidenceType> parseEvidence(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return Set.of();
+        }
+        Set<EvidenceType> evidence = new LinkedHashSet<>();
+        for (JsonNode item : node) {
+            if (!item.isTextual()) {
+                continue;
+            }
+            try {
+                evidence.add(EvidenceType.valueOf(item.asText().trim().toUpperCase(Locale.ROOT)));
+            } catch (IllegalArgumentException e) {
+                log.warn("Ignoring unknown planner evidence type: {}", item.asText());
+            }
+        }
+        return Collections.unmodifiableSet(evidence);
     }
 
     /**

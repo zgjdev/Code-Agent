@@ -322,6 +322,8 @@ public class ExecutionPlan {
 
     private String getStatusIcon(Task.TaskStatus status) {
         return switch (status) {
+            case REVIEWING -> "REVIEW";
+            case UNVERIFIED -> "UNVERIFIED";
             case PENDING -> "⏳";
             case RUNNING -> "▶️";
             case COMPLETED -> "✅";

@@ -12,6 +12,9 @@ public class Task {
     private volatile TaskStatus status;
     private volatile String result;
     private volatile String error;
+    private final TaskResourceClaims resourceClaims;
+    private final List<String> acceptanceCriteria;
+    private final Set<EvidenceType> requiredEvidence;
     private final List<String> dependencies;  // 依赖的其他任务ID
     private final List<String> dependents;    // 依赖此任务的其他任务ID
     private volatile long startTime;
@@ -27,6 +30,8 @@ public class Task {
     }
 
     public enum TaskStatus {
+        REVIEWING,
+        UNVERIFIED,
         PENDING,       // 等待执行
         RUNNING,       // 执行中
         COMPLETED,     // 已完成
@@ -35,17 +40,34 @@ public class Task {
     }
 
     public Task(String id, String description, TaskType type) {
+        this(id, description, type, List.of(), TaskResourceClaims.conservativeDefault(type),
+                List.of(), Set.of());
+    }
+
+    public Task(String id, String description, TaskType type, List<String> dependencies) {
+        this(id, description, type, dependencies, TaskResourceClaims.conservativeDefault(type),
+                List.of(), Set.of());
+    }
+
+    public Task(String id,
+                String description,
+                TaskType type,
+                List<String> dependencies,
+                TaskResourceClaims resourceClaims,
+                List<String> acceptanceCriteria,
+                Set<EvidenceType> requiredEvidence) {
         this.id = id;
         this.description = description;
         this.type = type;
         this.status = TaskStatus.PENDING;
-        this.dependencies = new ArrayList<>();
+        this.dependencies = new ArrayList<>(dependencies == null ? List.of() : dependencies);
         this.dependents = new ArrayList<>();
-    }
-
-    public Task(String id, String description, TaskType type, List<String> dependencies) {
-        this(id, description, type);
-        this.dependencies.addAll(dependencies);
+        this.resourceClaims = resourceClaims == null
+                ? TaskResourceClaims.conservativeDefault(type)
+                : resourceClaims;
+        this.acceptanceCriteria = List.copyOf(acceptanceCriteria == null ? List.of() : acceptanceCriteria);
+        this.requiredEvidence = Collections.unmodifiableSet(new LinkedHashSet<>(
+                requiredEvidence == null ? Set.of() : requiredEvidence));
     }
 
     // Getters
@@ -57,6 +79,9 @@ public class Task {
     public String getError() { return error; }
     public List<String> getDependencies() { return new ArrayList<>(dependencies); }
     public List<String> getDependents() { return new ArrayList<>(dependents); }
+    public TaskResourceClaims getResourceClaims() { return resourceClaims; }
+    public List<String> getAcceptanceCriteria() { return acceptanceCriteria; }
+    public Set<EvidenceType> getRequiredEvidence() { return requiredEvidence; }
     public long getStartTime() { return startTime; }
     public long getEndTime() { return endTime; }
 
@@ -85,6 +110,16 @@ public class Task {
     public void markCompleted(String result) {
         this.status = TaskStatus.COMPLETED;
         this.result = result;
+        this.endTime = System.currentTimeMillis();
+    }
+
+    public void markReviewing() {
+        this.status = TaskStatus.REVIEWING;
+    }
+
+    public void markUnverified(String reason) {
+        this.status = TaskStatus.UNVERIFIED;
+        this.error = reason;
         this.endTime = System.currentTimeMillis();
     }
 

@@ -5,7 +5,9 @@ import com.codeagent.llm.LlmClient;
 import com.codeagent.tool.ToolRegistry.ToolExecutionResult;
 import com.codeagent.tool.ToolRegistry.ToolInvocation;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -24,6 +26,64 @@ class TurnToolPolicyTest {
             "阿里员工：作为一名合格的375员工，老板在的时候9点走，老板不在的时候6点半走，老板9点前走了那就跟着走（附Agent面试题）";
     private static final String HALLUCINATED_URL =
             "https://mp.weixin.qq.com/s/X1kQ_5tHZgO-zJfQrN1z2g";
+
+    @TempDir
+    Path projectRoot;
+
+    @Test
+    void taskScopeHidesWriteAndCommandToolsWithoutClaims() {
+        TurnToolPolicy policy = TurnToolPolicy.forExplicitTask("update the project")
+                .restrictTo(new ToolResourceScope(projectRoot, List.of(), List.of(), false));
+
+        TurnToolPolicy.ToolExposure exposure = policy.expose(definitions());
+
+        assertFalse(exposure.advertisedNames().contains("write_file"));
+        assertFalse(exposure.advertisedNames().contains("execute_command"));
+        assertTrue(exposure.advertisedNames().contains("read_file"));
+    }
+
+    @Test
+    void taskScopeAllowsDeclaredWritePath() {
+        Path allowed = projectRoot.resolve("src/Allowed.java");
+        TurnToolPolicy policy = TurnToolPolicy.forExplicitTask("update the project")
+                .restrictTo(new ToolResourceScope(projectRoot, List.of(), List.of(allowed), false));
+        RecordingRegistry registry = new RecordingRegistry();
+        TurnToolPolicy.ToolExposure exposure = policy.expose(definitions());
+
+        List<ToolExecutionResult> results = policy.execute(registry, List.of(invocation(
+                "write", "write_file", "{\"path\":\"src/Allowed.java\",\"content\":\"ok\"}")), exposure);
+
+        assertTrue(exposure.advertisedNames().contains("write_file"));
+        assertEquals(1, registry.executed.size());
+        assertTrue(results.get(0).successful());
+    }
+
+    @Test
+    void taskScopeRejectsUndeclaredWriteBeforeRegistryDispatch() {
+        Path allowed = projectRoot.resolve("src/Allowed.java");
+        TurnToolPolicy policy = TurnToolPolicy.forExplicitTask("update the project")
+                .restrictTo(new ToolResourceScope(projectRoot, List.of(), List.of(allowed), false));
+        RecordingRegistry registry = new RecordingRegistry();
+        TurnToolPolicy.ToolExposure exposure = policy.expose(definitions());
+
+        List<ToolExecutionResult> results = policy.execute(registry, List.of(invocation(
+                "write", "write_file", "{\"path\":\"src/Other.java\",\"content\":\"bad\"}")), exposure);
+
+        assertTrue(registry.executed.isEmpty());
+        assertFalse(results.get(0).successful());
+        assertTrue(results.get(0).result().contains("[RESOURCE_SCOPE_DENIED]"));
+    }
+
+    @Test
+    void workspaceExclusiveClaimIsRequiredForCommands() {
+        TurnToolPolicy restricted = TurnToolPolicy.forExplicitTask("run tests")
+                .restrictTo(new ToolResourceScope(projectRoot, List.of(), List.of(), false));
+        TurnToolPolicy exclusive = TurnToolPolicy.forExplicitTask("run tests")
+                .restrictTo(new ToolResourceScope(projectRoot, List.of(), List.of(), true));
+
+        assertFalse(restricted.expose(definitions()).advertisedNames().contains("execute_command"));
+        assertTrue(exclusive.expose(definitions()).advertisedNames().contains("execute_command"));
+    }
 
     @Test
     void bareHeadlineExposesNoToolsAndBlocksEveryHallucinatedCall() {

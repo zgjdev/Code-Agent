@@ -30,6 +30,7 @@ import com.codeagent.tool.ToolRegistry;
 import com.codeagent.tool.ToolRegistry.ToolExecutionResult;
 import com.codeagent.tool.ToolRegistry.ToolInvocation;
 import com.codeagent.tool.TurnToolPolicy;
+import com.codeagent.tool.ToolResourceScope;
 import com.codeagent.util.TerminalMarkdownRenderer;
 import com.codeagent.image.ImageReferenceParser;
 import org.slf4j.Logger;
@@ -67,21 +68,28 @@ public class PlanExecuteAgent {
     }
 
     private record TaskRunResult(String result, boolean streamedOutput,
-                                 TurnToolPolicy.TrustedUrlContext trustedUrls) {
-        static TaskRunResult of(String result, boolean streamedOutput, TurnToolPolicy policy) {
-            return new TaskRunResult(result, streamedOutput, policy.trustedUrlContext());
+                                 TurnToolPolicy.TrustedUrlContext trustedUrls,
+                                 TaskVerificationReport verificationReport) {
+        static TaskRunResult of(String result, boolean streamedOutput, TurnToolPolicy policy,
+                                TaskVerificationReport verificationReport) {
+            return new TaskRunResult(result, streamedOutput, policy.trustedUrlContext(), verificationReport);
+        }
+
+        TaskRunResult withReport(TaskVerificationReport report) {
+            return new TaskRunResult(result, streamedOutput, trustedUrls, report);
         }
     }
 
     private record TaskExecutionResult(Task task, String result, boolean streamedOutput,
-                                       TurnToolPolicy.TrustedUrlContext trustedUrls, Exception error) {
+                                       TurnToolPolicy.TrustedUrlContext trustedUrls,
+                                       TaskVerificationReport verificationReport, Exception error) {
         static TaskExecutionResult success(Task task, TaskRunResult taskRunResult) {
             return new TaskExecutionResult(task, taskRunResult.result(), taskRunResult.streamedOutput(),
-                    taskRunResult.trustedUrls(), null);
+                    taskRunResult.trustedUrls(), taskRunResult.verificationReport(), null);
         }
 
         static TaskExecutionResult failure(Task task, Exception error) {
-            return new TaskExecutionResult(task, null, false, null, error);
+            return new TaskExecutionResult(task, null, false, null, null, error);
         }
 
         boolean failed() {
@@ -408,12 +416,16 @@ public class PlanExecuteAgent {
                 break;
             }
 
+            List<Task> selectedTasks = new ConflictAwareBatchSelector().select(executableTasks, 4);
             List<TaskExecutionResult> batchResults = executeTaskBatch(
-                    plan, executableTasks, streamState, taskTrustedUrls);
+                    plan, selectedTasks, streamState, taskTrustedUrls);
             for (TaskExecutionResult batchResult : batchResults) {
                 Task task = batchResult.task();
 
-                if (!batchResult.failed()) {
+                if (!batchResult.failed()
+                        && (batchResult.verificationReport() == null
+                        || batchResult.verificationReport().outcome() == VerificationOutcome.VERIFIED
+                        || batchResult.verificationReport().outcome() == VerificationOutcome.NOT_REQUIRED)) {
                     task.markCompleted(batchResult.result());
                     taskTrustedUrls.put(task.getId(), batchResult.trustedUrls());
                     streamedTaskOutputs.put(task.getId(), batchResult.streamedOutput());
@@ -425,6 +437,16 @@ public class PlanExecuteAgent {
                         out.println("✅ 完成 [" + task.getId() + "]: "
                                 + batchResult.result().substring(0, Math.min(100, batchResult.result().length())) + "\n");
                     }
+                    continue;
+                }
+
+                if (!batchResult.failed()) {
+                    String reason = batchResult.verificationReport() == null
+                            ? "verification unavailable"
+                            : String.join("; ", batchResult.verificationReport().blockingReasons());
+                    task.markUnverified(reason);
+                    finalResult.append("任务 ").append(task.getId()).append(" 未验证: ").append(reason);
+                    out.println("⚠️ 未验证 [" + task.getId() + "]: " + reason + "\n");
                     continue;
                 }
 
@@ -575,7 +597,9 @@ public class PlanExecuteAgent {
                 .map(taskTrustedUrls::get)
                 .filter(Objects::nonNull)
                 .toList();
-        TurnToolPolicy taskToolPolicy = turnToolPolicy.forkWithTrustedUrls(dependencyUrls);
+        TurnToolPolicy taskToolPolicy = turnToolPolicy.forkWithTrustedUrls(dependencyUrls)
+                .restrictTo(toResourceScope(task));
+        TaskEvidenceCollector evidenceCollector = new TaskEvidenceCollector();
         SessionStore.SessionHandle child = null;
         try {
             if (parentSession != null) {
@@ -583,10 +607,22 @@ public class PlanExecuteAgent {
                 childSession.set(child);
             }
             TaskRunResult result = executeTaskWithPolicy(
-                    goal, plan, task, streamState, out, dependencyUrls, null, taskToolPolicy);
+                    goal, plan, task, streamState, out, dependencyUrls, null, taskToolPolicy, evidenceCollector);
+            result = result.withReport(DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot()));
+            int evidenceRetries = 0;
+            while (result.verificationReport().outcome() == VerificationOutcome.REJECTED
+                    && evidenceRetries < MAX_RETRIES_PER_STEP) {
+                evidenceRetries++;
+                result = executeTaskWithPolicy(goal, plan, task, streamState, out, dependencyUrls,
+                        String.join("; ", result.verificationReport().blockingReasons()),
+                        taskToolPolicy, evidenceCollector);
+                result = result.withReport(DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot()));
+            }
             if (pipelineOptions.stepReview()) {
+                task.markReviewing();
                 result = applyStepReview(
-                        goal, plan, task, streamState, out, dependencyUrls, taskToolPolicy, result);
+                        goal, plan, task, streamState, out, dependencyUrls, taskToolPolicy,
+                        evidenceCollector, result);
             }
             if (child != null) {
                 parentSession.recordChildResult(child, result.result(), "completed");
@@ -600,10 +636,21 @@ public class PlanExecuteAgent {
         }
     }
 
+    private ToolResourceScope toResourceScope(Task task) {
+        Path root = Path.of(toolRegistry.getProjectPath()).toAbsolutePath().normalize();
+        TaskResourceClaims claims = task.getResourceClaims();
+        List<Path> reads = claims.readPaths().stream().map(root::resolve).toList();
+        List<Path> writes = claims.writePaths().stream()
+                .map(path -> root.resolve(path.endsWith("/") ? path.substring(0, path.length() - 1) : path))
+                .toList();
+        return new ToolResourceScope(root, reads, writes, claims.workspaceWrite());
+    }
+
     private TaskRunResult applyStepReview(String goal, ExecutionPlan plan, Task task,
                                           StreamState streamState, PrintStream out,
                                           List<TurnToolPolicy.TrustedUrlContext> dependencyUrls,
                                           TurnToolPolicy taskToolPolicy,
+                                          TaskEvidenceCollector evidenceCollector,
                                           TaskRunResult initial) throws IOException {
         // 每个任务独占一个 Reviewer：并行批次最多 4 个任务同时进来，
         // 共享实例会让多条线程写同一份 SubAgent 会话历史。
@@ -612,11 +659,18 @@ public class PlanExecuteAgent {
         TaskRunResult result = initial;
         int retries = 0;
         while (true) {
-            StepReviewDecision decision = reviewer.review(goal, task, result.result());
+            StepReviewDecision decision = reviewer.review(new StepReviewRequest(
+                    goal, task, result.result(), result.verificationReport()));
             if (decision.approved()) {
                 return result;
             }
             if (retries >= MAX_RETRIES_PER_STEP) {
+                TaskVerificationReport unavailable = new TaskVerificationReport(
+                        VerificationOutcome.UNAVAILABLE, task.getAcceptanceCriteria(),
+                        result.verificationReport() == null ? List.of() : result.verificationReport().evidence(),
+                        List.of(decision.outcome() == StepReviewDecision.ReviewOutcome.UNAVAILABLE
+                                ? "reviewer unavailable" : "review retries exhausted"));
+                result = result.withReport(unavailable);
                 out.println("⚠️ 任务 [" + task.getId() + "] 达到最大重试次数，保留当前结果\n");
                 return result;
             }
@@ -624,7 +678,8 @@ public class PlanExecuteAgent {
             out.println("⚠️ 任务 [" + task.getId() + "] 审查未通过，重新执行...");
             out.println("   反馈: " + decision.feedback() + "\n");
             result = executeTaskWithPolicy(goal, plan, task, streamState, out, dependencyUrls,
-                    decision.feedback(), taskToolPolicy);
+                    decision.feedback(), taskToolPolicy, evidenceCollector);
+            result = result.withReport(DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot()));
         }
     }
 
@@ -632,7 +687,8 @@ public class PlanExecuteAgent {
             String goal, ExecutionPlan plan, Task task, StreamState streamState, PrintStream out,
             List<TurnToolPolicy.TrustedUrlContext> dependencyUrls,
             String retryFeedback,
-            TurnToolPolicy taskToolPolicy) throws IOException {
+            TurnToolPolicy taskToolPolicy,
+            TaskEvidenceCollector evidenceCollector) throws IOException {
         String prompt = promptAssembler.assemble(PromptMode.PLAN, PromptContext.builder()
                 .projectMemoryContext(buildProjectMemoryContext())
                 .variable("taskType", task.getType())
@@ -671,7 +727,7 @@ public class PlanExecuteAgent {
             if (CancellationContext.isCancelled()) {
                 streamRenderer.finish();
                 return TaskRunResult.of("⏹️ 已取消任务 [" + task.getId() + "]。",
-                        streamRenderer.hasStreamedOutput(), taskToolPolicy);
+                        streamRenderer.hasStreamedOutput(), taskToolPolicy, null);
             }
 
             AgentBudget.ExitReason exitReason = budget.check();
@@ -685,12 +741,13 @@ public class PlanExecuteAgent {
                         allResults,
                         streamRenderer,
                         taskToolPolicy,
+                        evidenceCollector,
                         out);
             }
             int iteration = budget.beginIteration();
 
             // 冻结最终 tools exposure 后预测完整请求；只有快照/计量异常才回退旧估算。
-            injectPendingLspDiagnostics(messages, out, actor);
+            injectPendingLspDiagnostics(messages, out, actor, evidenceCollector);
             List<LlmClient.Tool> toolDefinitions = llmClient.supportsTools()
                     ? toolRegistry.getToolDefinitions()
                     : null;
@@ -725,7 +782,7 @@ public class PlanExecuteAgent {
             if (CancellationContext.isCancelled()) {
                 streamRenderer.finish();
                 return TaskRunResult.of("⏹️ 已取消任务 [" + task.getId() + "]。",
-                        streamRenderer.hasStreamedOutput(), taskToolPolicy);
+                        streamRenderer.hasStreamedOutput(), taskToolPolicy, null);
             }
 
             budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
@@ -760,10 +817,10 @@ public class PlanExecuteAgent {
                 if (!allResults.isEmpty() && (response.content() == null || response.content().isBlank())) {
                     String toolOnlyResult = allResults.toString().trim();
                     streamRenderer.finish();
-                    return TaskRunResult.of(toolOnlyResult, streamRenderer.hasStreamedOutput(), taskToolPolicy);
+                    return TaskRunResult.of(toolOnlyResult, streamRenderer.hasStreamedOutput(), taskToolPolicy, null);
                 }
                 streamRenderer.finish();
-                return TaskRunResult.of(response.content(), streamRenderer.hasStreamedOutput(), taskToolPolicy);
+                return TaskRunResult.of(response.content(), streamRenderer.hasStreamedOutput(), taskToolPolicy, null);
             }
 
             // 有工具调用：执行工具并将结果回灌到消息历史
@@ -780,7 +837,7 @@ public class PlanExecuteAgent {
             streamRenderer.resetBetweenIterations();
 
             List<ToolExecutionResult> toolResults = executeToolCalls(
-                    task.getId(), response.toolCalls(), taskToolPolicy, toolExposure);
+                    task.getId(), response.toolCalls(), taskToolPolicy, toolExposure, evidenceCollector);
             for (ToolExecutionResult toolResult : toolResults) {
                 allResults.append(toolResult.result()).append("\n");
                 appendTaskMessage(
@@ -803,6 +860,7 @@ public class PlanExecuteAgent {
             StringBuilder allResults,
             TaskStreamRenderer streamRenderer,
             TurnToolPolicy taskToolPolicy,
+            TaskEvidenceCollector evidenceCollector,
             PrintStream out) {
         String description = budget.describeExit(exitReason);
         log.warn("Plan task {} exhausted budget: reason={}, iteration={}, tokens={}/{}",
@@ -839,7 +897,7 @@ public class PlanExecuteAgent {
                 budget.totalOutputTokens(),
                 budget.totalCachedInputTokens());
         streamRenderer.finish();
-        return TaskRunResult.of(partialResult, streamRenderer.hasStreamedOutput(), taskToolPolicy);
+        return TaskRunResult.of(partialResult, streamRenderer.hasStreamedOutput(), taskToolPolicy, null);
     }
 
     private String formatPartialResult(String description, String content) {
@@ -870,11 +928,12 @@ public class PlanExecuteAgent {
     }
 
     private void injectPendingLspDiagnostics(List<LlmClient.Message> messages, PrintStream out,
-                                             String actor) {
+                                             String actor, TaskEvidenceCollector evidenceCollector) {
         LspDiagnosticReport report = toolRegistry.flushPendingLspDiagnostics();
         if (report == null || report.isEmpty()) {
             return;
         }
+        evidenceCollector.observeLsp(report);
         appendTaskMessage(
                 messages,
                 actor,
@@ -898,7 +957,8 @@ public class PlanExecuteAgent {
     private List<ToolExecutionResult> executeToolCalls(String taskId,
                                                        List<LlmClient.ToolCall> toolCalls,
                                                        TurnToolPolicy taskToolPolicy,
-                                                       TurnToolPolicy.ToolExposure toolExposure) {
+                                                       TurnToolPolicy.ToolExposure toolExposure,
+                                                       TaskEvidenceCollector evidenceCollector) {
         List<ToolInvocation> invocations = new ArrayList<>();
         for (LlmClient.ToolCall toolCall : toolCalls) {
             String toolName = toolCall.function().name();
@@ -912,6 +972,7 @@ public class PlanExecuteAgent {
             log.info("Task {} executing {} tool calls in parallel", taskId, invocations.size());
         }
         List<ToolExecutionResult> results = taskToolPolicy.execute(toolRegistry, invocations, toolExposure);
+        evidenceCollector.observeTools(invocations, results, Path.of(toolRegistry.getProjectPath()));
         for (ToolExecutionResult result : results) {
             log.debug("Task {} tool result preview [{}]: {}", taskId, result.name(), preview(result.result(), 300));
         }

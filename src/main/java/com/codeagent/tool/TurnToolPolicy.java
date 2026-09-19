@@ -146,6 +146,7 @@ public final class TurnToolPolicy {
     private final AtomicBoolean sharedBrowserConnected = new AtomicBoolean(false);
     private final AtomicBoolean agentOwnedBrowserPage = new AtomicBoolean(false);
     private final BrowserLeaseCoordinator browserLeaseCoordinator;
+    private ToolResourceScope resourceScope;
     private boolean browserLeaseHeld;
 
     private TurnToolPolicy(String submittedUserInput, boolean forceActionable,
@@ -163,6 +164,7 @@ public final class TurnToolPolicy {
         this.explicitBrowserDisconnectRequested = BROWSER_DISCONNECT_REQUEST.matcher(input).find();
         this.explicitBrowserStatusRequested = BROWSER_STATUS_REQUEST.matcher(input).find();
         this.browserLeaseCoordinator = new BrowserLeaseCoordinator();
+        this.resourceScope = null;
         this.sharedBrowserConnected.set(sharedBrowserSession);
         this.agentOwnedBrowserPage.set(sharedBrowserSession && agentOwnedCurrentPage);
         extractUrls(input).stream().map(TurnToolPolicy::normalizeUrl).forEach(groundedUrls::add);
@@ -179,6 +181,7 @@ public final class TurnToolPolicy {
         this.explicitBrowserDisconnectRequested = source.explicitBrowserDisconnectRequested;
         this.explicitBrowserStatusRequested = source.explicitBrowserStatusRequested;
         this.browserLeaseCoordinator = source.browserLeaseCoordinator;
+        this.resourceScope = source.resourceScope;
         this.groundedUrls.addAll(source.groundedUrls);
         this.searchResultUrls.addAll(source.searchResultUrls);
         this.browserContextEstablished.set(source.browserContextEstablished.get());
@@ -214,6 +217,13 @@ public final class TurnToolPolicy {
     /** Isolates URL discovery state for a parallel plan task or team worker. */
     public TurnToolPolicy fork() {
         return new TurnToolPolicy(this);
+    }
+
+    /** Returns an isolated branch with an additional task-local resource restriction. */
+    public TurnToolPolicy restrictTo(ToolResourceScope scope) {
+        TurnToolPolicy restricted = fork();
+        restricted.resourceScope = Objects.requireNonNull(scope, "scope");
+        return restricted;
     }
 
     /**
@@ -257,6 +267,9 @@ public final class TurnToolPolicy {
                 continue;
             }
             String name = definition.name();
+            if (resourceScope != null && !resourceScope.exposes(name)) {
+                continue;
+            }
             if (explicitNoWeb && isPotentialExternalTool(definition)) {
                 continue;
             }
@@ -365,6 +378,13 @@ public final class TurnToolPolicy {
         if (!actionable) {
             return Decision.deny(ReasonCode.NO_ACTION,
                     "当前顶层用户输入只有标题、主题或文本片段，没有明确任务。不要猜测用户意图或调用工具；请先询问用户希望如何处理。");
+        }
+
+        if (resourceScope != null) {
+            java.util.Optional<String> denial = resourceScope.denialReason(invocation);
+            if (denial.isPresent()) {
+                return Decision.deny(ReasonCode.RESOURCE_SCOPE_DENIED, denial.get());
+            }
         }
 
         String name = invocation.name();
@@ -928,6 +948,7 @@ public final class TurnToolPolicy {
         NO_ACTION,
         WEB_FORBIDDEN,
         UNGROUNDED_URL,
+        RESOURCE_SCOPE_DENIED,
         TOOL_NOT_ADVERTISED
     }
 

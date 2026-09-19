@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -137,6 +138,80 @@ class PlannerTest {
         Planner planner = new Planner(new StubGLMClient("这不是 JSON"));
 
         assertThrows(IOException.class, () -> planner.createPlan("先分析再验证项目结构"));
+    }
+
+    @Test
+    void parsesResourceClaimsAcceptanceCriteriaAndRequiredEvidence() throws Exception {
+        StubGLMClient client = new StubGLMClient("""
+                {
+                  "summary": "safe write",
+                  "tasks": [
+                    {
+                      "id": "write",
+                      "description": "update service",
+                      "type": "FILE_WRITE",
+                      "dependencies": [],
+                      "resources": {
+                        "readPaths": ["src/main/java/com/acme/"],
+                        "writePaths": ["src/main/java/com/acme/Service.java"],
+                        "workspaceWrite": false
+                      },
+                      "acceptanceCriteria": ["compiles", "rollback test passes"],
+                      "requiredEvidence": ["DIFF", "BUILD", "TEST", "UNKNOWN"]
+                    }
+                  ]
+                }
+                """);
+        Planner planner = new Planner(client);
+
+        ExecutionPlan plan = planner.createPlan("analyze, update, and verify the service implementation");
+        Task task = plan.getTask("task_1");
+
+        assertEquals(List.of("src/main/java/com/acme/Service.java"),
+                task.getResourceClaims().writePaths());
+        assertEquals(List.of("compiles", "rollback test passes"), task.getAcceptanceCriteria());
+        assertEquals(Set.of(EvidenceType.DIFF, EvidenceType.BUILD, EvidenceType.TEST),
+                task.getRequiredEvidence());
+    }
+
+    @Test
+    void acceptsLegacyPlannerJsonWithConservativeDefaults() throws Exception {
+        StubGLMClient client = new StubGLMClient("""
+                {
+                  "summary": "legacy",
+                  "tasks": [
+                    {"id": "write", "description": "update file", "type": "FILE_WRITE", "dependencies": []}
+                  ]
+                }
+                """);
+
+        Task task = new Planner(client)
+                .createPlan("analyze and update the legacy implementation")
+                .getTask("task_1");
+
+        assertTrue(task.getResourceClaims().workspaceWrite());
+        assertTrue(task.getAcceptanceCriteria().isEmpty());
+    }
+
+    @Test
+    void rejectsIllegalResourcePathFromPlanner() {
+        StubGLMClient client = new StubGLMClient("""
+                {
+                  "summary": "unsafe",
+                  "tasks": [
+                    {
+                      "id": "write",
+                      "description": "escape project",
+                      "type": "FILE_WRITE",
+                      "dependencies": [],
+                      "resources": {"writePaths": ["../outside.txt"]}
+                    }
+                  ]
+                }
+                """);
+
+        assertThrows(IOException.class, () -> new Planner(client)
+                .createPlan("analyze and update files outside the project"));
     }
 
     private static final class FailingGLMClient extends GLMClient {

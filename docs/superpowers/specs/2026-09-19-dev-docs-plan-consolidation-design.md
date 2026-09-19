@@ -11,6 +11,7 @@
 ## 2. 修改范围
 
 - 保持 `docs/dev/02-dag-orchestration.md` 删除，不创建占位页。
+- 删除已经完成且内容被 03 吸收的 `docs/dev/12-unified-multi-agent-plan-and-execute.md`，避免它继续以合并前的 `/team` / `AgentOrchestrator` 现状形成第二份事实源。
 - `01-react-agent.md`：移除已删除 `AgentOrchestrator` 的现存实现引用，更新 Plan 交叉链接和失效证据。
 - `03-multi-agent-collaboration.md`：成为唯一 Plan-and-Execute 文档；修正 URL 权限收紧语义、CLI/TUI child session 边界和测试证据。
 - `04-code-rag-graph.md`：如实标注 `CodeIndexTest` 的 Embedding 外部依赖与 Windows 路径测试边界，修正失效行号。

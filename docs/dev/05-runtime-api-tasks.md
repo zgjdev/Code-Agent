@@ -119,7 +119,7 @@ data: {"turn_id":"turn_x","status":"completed"}
 | CAS | compare-and-set，带旧状态条件的 UPDATE |
 | 无头执行（headless） | 没有人盯着终端、不需要交互审批的执行方式 |
 | HITL | Human-in-the-loop，工具调用前弹人工审批 |
-| ReAct | 「想一想、调个工具、再想一想」的单 agent 循环。与 Plan-and-Execute、Multi-Agent 并列 |
+| ReAct | 「想一想、调个工具、再想一想」的单 agent 循环。当前与统一多 Agent 协作的 Plan-and-Execute 并列；后者只从 `/plan` 进入 |
 | 交互式 CLI | 用户敲 `/xxx` 命令的那个终端界面 |
 
 ---
@@ -226,9 +226,9 @@ runtime/
 
 这是最容易被过度宣传的一点，必须主动澄清。
 
-`runHeadlessTask` 的全文只有几行（`Main.java:1142-1153`），它做的事是：新建一个**普通 `ToolRegistry`**、设置项目路径、新建一个**普通 `Agent`**、挂上会话账本（失败就忽略）、然后 `agent.run(prompt)`。
+`runHeadlessTask` 的全文只有几行（`Main.java:1119-1130`），它做的事是：新建一个**普通 `ToolRegistry`**、设置项目路径、新建一个**普通 `Agent`**、挂上会话账本（失败就忽略）、然后 `agent.run(prompt)`。
 
-对照交互式循环里的三条分支：
+对照交互式循环里的两条执行分支：
 
 | 执行模式 | 交互式 CLI | 无头路径（后台任务 / HTTP Turn） |
 |---|---|---|
@@ -237,7 +237,7 @@ runtime/
 
 原因不是「忘了接」，而是契约形状决定的：`TaskRunner` 只有 `run(String prompt)`（`TaskRunner.java:5`），**没有回传中间计划、审批请求或子 agent 消息的通道**。Plan 依赖 `PlanExecuteAgent.PlanReviewHandler` 的人工审阅（`Main.java:1291-1322`）。没有终端的执行环境里，这条路无处落脚。
 
-由此还顺出一个重要事实：**无头执行不经过 HITL 审批**。它用的是 `new ToolRegistry()`（`Main.java:1143`），而交互式路径用的是 `HitlToolRegistry`（`Main.java:239`，装配进 Agent 在 `Main.java:337`）。工具仍然受各自的策略约束，但不会弹人工确认。
+由此还顺出一个重要事实：**无头执行不经过 HITL 审批**。它用的是 `new ToolRegistry()`（`Main.java:1120`），而交互式路径用的是 `HitlToolRegistry`（`Main.java:239`，装配进 Agent 在 `Main.java:337`）。工具仍然受各自的策略约束，但不会弹人工确认。
 
 ## 1.5 四个容易混淆的持久化位置
 
@@ -304,7 +304,7 @@ system property  codeagent.task.workers
 
 ### 事实一：初始化失败会让整个 CLI 起不来（fail-fast，与全项目风格不一致）
 
-`openTaskManager` 只有一条路径：捕获**任何** `Exception`（不只是 `SQLException`）并包成 `IllegalStateException` 往上抛（`Main.java:1155-1161`）。而 `main` 里那个大 `try` **只 catch `IOException`**（`Main.java:1048-1051`）。`IllegalStateException` 继承自 `RuntimeException`，不会被捕获，于是它逃出 `main`，JVM 打印堆栈并以非零码退出。
+`openTaskManager` 只有一条路径：捕获**任何** `Exception`（不只是 `SQLException`）并包成 `IllegalStateException` 往上抛（`Main.java:1132-1137`）。而 `main` 里那个大 `try` **只 catch `IOException`**（`Main.java:1025-1027`）。`IllegalStateException` 继承自 `RuntimeException`，不会被捕获，于是它逃出 `main`，JVM 打印堆栈并以非零码退出。
 
 对比同一个 `try` 块里其它组件的处理方式：
 
@@ -414,7 +414,7 @@ while (running):
 
 并发语义可以一句话概括：**领取是串行的，执行是并行的**。`claimNext` 在对象锁内，而真正的 `runner.run` 在锁外（`:174-181`），所以最多有「worker 数量」个任务同时在跑，而所有数据库访问仍然被同一把锁串行化。这是有意的设计——长时间持有 Java 锁会阻塞其它任务的状态写入和取消。
 
-还有一个隐含的线程安全结论：`TaskRunner` 的契约**不要求线程安全**，因为默认实现每次调用都新建 `ToolRegistry` 和 `Agent`（`Main.java:1142-1153`）。风险只在调用方自己传进一个有状态的 runner 时才出现。
+还有一个隐含的线程安全结论：`TaskRunner` 的契约**不要求线程安全**，因为默认实现每次调用都新建 `ToolRegistry` 和 `Agent`（`Main.java:1119-1130`）。风险只在调用方自己传进一个有状态的 runner 时才出现。
 
 ### 缺陷一：Worker 在等待点被中断会永久退出，而且不会被补充
 
@@ -718,11 +718,11 @@ sequenceDiagram
 2. 用户输入 `/task add 把那篇长文总结成三句话`。解析成 `TASK` 命令（`CliCommandParser.java:277-278`），分发到 `TaskCommandFormatter.handle`（`Main.java:808-811`），走到 `enqueue` 分支（`TaskCommandFormatter.java:16-19`）。
 3. `enqueue` 插一条 `enqueued` 行，`notifyAll()` 唤醒一个空闲 Worker（`DurableTaskManager.java:100-101`），然后把读回来的快照打印成「已提交 + 一条查看命令」。
 4. 某个 Worker 从 `wait(超时)` 醒来或被 `notifyAll` 唤醒，`claimNext` 用条件 UPDATE 把行改成 `running`（`:228-242`）。
-5. Worker 在锁外调用 runner，runner 是 `prompt -> runHeadlessTask(prompt, llmClientRef.get())`（`Main.java:1157`），`runHeadlessTask` 新建 `ToolRegistry` 与 `Agent` 并 `agent.run(prompt)`（`Main.java:1142-1153`）。
+5. Worker 在锁外调用 runner，runner 是 `prompt -> runHeadlessTask(prompt, llmClientRef.get())`（`Main.java:1134`），`runHeadlessTask` 新建 `ToolRegistry` 与 `Agent` 并 `agent.run(prompt)`（`Main.java:1119-1130`）。
 6. 用户用 `/task` 或 `/task log <id>` 反复查看状态（`TaskCommandFormatter.java:10-15`、`:26-30`）。注意 `DurableTask` 只是某一时刻的快照，要看最新状态必须再查一次（`DurableTaskManager.java:128`）。
 7. runner 返回后，Worker 重读状态并写 `completed` 与结果（`:176-181`）。
 
-**一个容易忽略的细节**：runner 里读的是 `llmClientRef.get()`（`Main.java:1157`），也就是**执行那一刻**的 LLM 客户端。用户在界面里用 `/model` 切换 provider 会更新这个引用（`Main.java:706-707`）。所以：队里排着的任务用什么模型跑，取决于它被领取的时刻，**不取决于它被提交的时刻**。用户提交时看到的模型名和执行时用的可能不是同一个。
+**一个容易忽略的细节**：runner 里读的是 `llmClientRef.get()`（`Main.java:1134`），也就是**执行那一刻**的 LLM 客户端。用户在界面里用 `/model` 切换 provider 会更新这个引用（`Main.java:706-707`）。所以：队里排着的任务用什么模型跑，取决于它被领取的时刻，**不取决于它被提交的时刻**。用户提交时看到的模型名和执行时用的可能不是同一个。
 
 ## 场景二：取消一个正在跑的任务
 
@@ -767,7 +767,7 @@ sequenceDiagram
 
 | 主题 | 设计意图 | 实际实现 | 源码位置 |
 |---|---|---|---|
-| 任务管理器初始化失败 | 以为和其它组件一样降级继续 | **fail-fast**：`openTaskManager` 把异常包成 `IllegalStateException` 抛出，而 `main` 的大 `try` 只 catch `IOException`，异常逃出 `main`，**交互式 CLI 完全起不来** | `Main.java:1155-1161`、`374`、`1048-1051` |
+| 任务管理器初始化失败 | 以为和其它组件一样降级继续 | **fail-fast**：`openTaskManager` 把异常包成 `IllegalStateException` 抛出，而 `main` 的大 `try` 只 catch `IOException`，异常逃出 `main`，**交互式 CLI 完全起不来** | `Main.java:1132-1137`、`374`、`1025-1027` |
 | 对比：其它组件初始化失败 | — | MCP / skill 解压 / 可恢复会话写启动提示继续；会话账本降级为 `disabled()`；RAG 是每次调用时临时打开 | `Main.java:294-304`、`:313-317`、`:328-335`、`:345-368`、`:936` |
 | 配置读取来源 | 以为 `.env` 里写 `CODEAGENT_TASK_*` / `CODEAGENT_RUNTIME_*` 就能用 | 这两个类**只读** `System.getProperty` / `System.getenv`；`.env` 文件的解析是按 key 白名单硬编码的，只覆盖 LLM 与日志配置 | `DurableTaskManager.java:46-48`、`:57-59`；`RuntimeApiServer.java:42-44`；`RuntimeThreadStore.java:25-27` vs `CodeAgentConfig.java:279-295`、`Main.java:2941-2947` |
 | 配置示例文件 | 以为示例里的键都能直接抄进 `.env` | `.env.example` 把 `CODEAGENT_TASK_DIR` / `CODEAGENT_TASK_WORKERS` / `CODEAGENT_RUNTIME_DIR` 写成孤立赋值行，与「必须作为真实环境变量」的事实不符 | `.env.example:135-149` |
@@ -784,7 +784,7 @@ sequenceDiagram
 | runner 失败的记录内容 | 以为能看出异常类型 | 只存 `e.getMessage()` 一行字符串，**无类型、无堆栈**；message 为 null 时 `error` 列是 NULL | `DurableTaskManager.java:187-193`、`:263` |
 | `result` 与 `error` 的空值处理 | 以为统一 | `result` 的 null 会被换成空串（`:262`），`error` **不做替换**（`:263`）——两者标准不一致 | `DurableTaskManager.java:262-263` |
 | 优雅关闭的语义 | 以为关闭会把在跑的任务重新排队 | 取决于 runner 是否响应中断：响应 → 写 `canceled`（不可恢复）；不响应 → 保持 `running`（下次启动恢复）。**行为由巧合决定，不是设计** | `DurableTaskManager.java:330-340`、`:182-186`、`:295-306` |
-| 后台任务用哪个模型 | 以为沿用提交时的模型 | runner 读的是 `llmClientRef.get()`，即**执行那一刻**的客户端；`/model` 切换会改变后续被领取任务所用的模型 | `Main.java:1157`、`:706-707` |
+| 后台任务用哪个模型 | 以为沿用提交时的模型 | runner 读的是 `llmClientRef.get()`，即**执行那一刻**的客户端；`/model` 切换会改变后续被领取任务所用的模型 | `Main.java:1134`、`:706-707` |
 | HTTP 未匹配请求的返回 | 以为一律 404 | **鉴权先于路由**：前缀内未匹配路径在 Key 缺失时返回 401；带正确 Key 才是 404；**前缀外路径不进入 handler，得到 JDK 的空 body 404** | `RuntimeApiServer.java:57-82`（鉴权 `:59-62`）、`:37` |
 | HTTP 方法不匹配 | 以为会返回 405 | 没有 405：方法不匹配会落到 catch-all 的 404 | `RuntimeApiServer.java:65-78` |
 | `handleTurn` 的校验顺序 | 以为先校验 body | **先 `exists` 再读 body**：Thread 不存在时 404 优先于 400 | `RuntimeApiServer.java:85` vs `:89` |
@@ -801,7 +801,7 @@ sequenceDiagram
 | `after` 参数解析 | 以为支持标准 query 编码 | 手工 `split("&")` + 前缀匹配，**不做 URL 解码**，失败一律回退 0（会从头重放全部事件） | `RuntimeApiServer.java:141-155` |
 | JSON 转义完整性 | 文档称转义可避免破坏 JSON | 只转义 `\` `"` `\r` `\n` 四种；**其它控制字符未处理**，可能产出非法 JSON | `RuntimeApiServer.java:176-184` |
 | 事件保留策略 | — | 只有插入，没有删除/归档；表只增不减 | `RuntimeThreadStore.java:61-103` |
-| 无头执行的审批链 | 以为与交互式 CLI 一致 | `runHeadlessTask` 用**普通 `ToolRegistry`**，不经过 HITL 交互审批 | `Main.java:1143`、`:1145` vs 交互式装配 `Main.java:239`、`:337` |
+| 无头执行的审批链 | 以为与交互式 CLI 一致 | `runHeadlessTask` 用**普通 `ToolRegistry`**，不经过 HITL 交互审批 | `Main.java:1120`、`:1122` vs 交互式装配 `Main.java:239`、`:337` |
 | 取消机制是否统一 | 以为两条路径共用一套取消信号 | 交互式 CLI 用 `CancellationContext.startRun()` 建 token，配合 ESC 监听与 `future.cancel(true)`；TUI 与微信通道也各自建 token（`TuiSessionController.java:254`、`WechatAgentSession.java:74`）；**无头任务不建 token，只靠线程 interrupt** | `Main.java:1369-1370`、`:1387-1392`、`:1403-1407`、`:1419`；消费点 `Agent.java:250`、`:289`、`ToolRegistry.java:1166`、`:1305`、`LlmRetryPolicy.java:79` vs `DurableTaskManager.java:147-151` |
 | `serve` 与交互式 CLI 的关系 | 以为可以同时用 | `serve` 分支在 `main` 最前面 `return`，所以 **API 进程里没有后台任务管理器**，交互式进程里也没有 API | `Main.java:218-222` vs `:374` |
 | 端口解析 | 以为非法端口会报错 | 解析失败**静默回退**内置默认端口，服务照常起来 | `Main.java:1126-1140` |
@@ -862,11 +862,11 @@ Runtime API 用**事件流**：客户端能观察到过程（`RuntimeThreadStore
 
 当前选择「查一次即返回」加标准 SSE 编码：客户端实现简单（读到流结束解析文本），将来要升级成长连接也不用改事件模型，只要改传输层。代价是实时性完全由客户端轮询频率决定，而且「没有新事件」时的响应会退化成 chunked（3.6 节）。
 
-## 6.7 为什么没有把 Plan / Team 接进无头路径
+## 6.7 为什么没有把统一 `/plan` 接进无头路径
 
-无头 runner 的契约是「一个 prompt 进、一个字符串出」（`TaskRunner.java:5`）。Plan 需要审阅交互（`Main.java:1317-1330`），Team 需要多路进度渲染（`Main.java:1346-1350`），两者都要有终端和一个活着的人。
+无头 runner 的契约是「一个 prompt 进、一个字符串出」（`TaskRunner.java:5`）。统一的 Plan-and-Execute 路径需要人工计划审阅，并通过 Renderer 展示计划与步骤进度（创建与审阅接线见 `Main.java:1294-1322`、`:1551-1625`）；当前无头契约没有承载这些交互和中间事件的通道。
 
-所以取舍是：用一个**极窄的契约**覆盖最常见的「长任务扔后台跑」场景，代价是无头能力只覆盖三种执行模式里的一种，而且没有 HITL 审批（`Main.java:1143`）。要支持无头 Plan/Team，得先扩展契约（回调、事件回调、或注入一个 `CancellationToken` + 进度 sink），而不是在 `Main` 里加个分支就完事。
+所以取舍是：用一个**极窄的契约**覆盖最常见的「长任务扔后台跑」场景，代价是无头能力只覆盖两种执行模式里的 ReAct，而且没有 HITL 审批（`Main.java:1120`）。要支持无头 `/plan`，得先扩展契约（审阅策略、事件回调，或注入一个 `CancellationToken` + 进度 sink），而不是在 `Main` 里加个分支就完事。
 
 ---
 
@@ -982,7 +982,7 @@ mvn test -Dtest=DurableTaskManagerTest,RuntimeApiServerTest,CliCommandParserTest
 
 ## 9.1 30 秒版
 
-我为 Agent CLI 实现了本地异步运行时，由两个独立子系统组成。后台任务用 SQLite 存五态生命周期，通过固定 Worker Pool 用带状态条件的事务 UPDATE 原子领取，支持运行中 interrupt 取消和进程重启后把崩溃遗留的任务重新排队。另一个是用 JDK 内置 `HttpServer` 实现的 Runtime API，可以创建 Thread、异步提交 Turn、用 after 游标按 SSE 格式读取事件。两者只共享一个单 prompt 的 `TaskRunner` 接口，数据库和调度器完全独立，都接到同一个无头 ReAct 执行体。要主动说明的是：两条无头路径都只跑 ReAct，没有 Plan/Team，也不经过 HITL 审批。
+我为 Agent CLI 实现了本地异步运行时，由两个独立子系统组成。后台任务用 SQLite 存五态生命周期，通过固定 Worker Pool 用带状态条件的事务 UPDATE 原子领取，支持运行中 interrupt 取消和进程重启后把崩溃遗留的任务重新排队。另一个是用 JDK 内置 `HttpServer` 实现的 Runtime API，可以创建 Thread、异步提交 Turn、用 after 游标按 SSE 格式读取事件。两者只共享一个单 prompt 的 `TaskRunner` 接口，数据库和调度器完全独立，都接到同一个无头 ReAct 执行体。要主动说明的是：两条无头路径都只跑 ReAct，不支持统一 `/plan`，也不经过 HITL 审批。
 
 ## 9.2 2 分钟版
 
@@ -1084,11 +1084,11 @@ Jackson 的解析异常落进了统一 catch，没有单独映射成 400（`Runt
 
 ### Q22：HTTP Turn 和后台任务打通了吗？
 
-没有，而且是不能同时存在的。共享的只有 `TaskRunner` 这个函数形状（`TaskRunner.java:5`）和执行体 `runHeadlessTask`（`Main.java:1142-1153`）；HTTP 不写 `runtime_tasks`、不经过固定 Worker Pool、用独立的 `runtime.db`（`RuntimeApiServer.java:96-99`、`RuntimeThreadStore.java:24-33`）；后台任务也不产生任何事件。另外 `serve` 分支在 `main` 最前面就 `return` 了（`Main.java:218-222`），所以 API 进程里连任务管理器都没有。
+没有，而且是不能同时存在的。共享的只有 `TaskRunner` 这个函数形状（`TaskRunner.java:5`）和执行体 `runHeadlessTask`（`Main.java:1119-1130`）；HTTP 不写 `runtime_tasks`、不经过固定 Worker Pool、用独立的 `runtime.db`（`RuntimeApiServer.java:96-99`、`RuntimeThreadStore.java:24-33`）；后台任务也不产生任何事件。另外 `serve` 分支在 `main` 最前面就 `return` 了（`Main.java:218-222`），所以 API 进程里连任务管理器都没有。
 
-### Q23：无头路径能跑 Plan 或 Team 吗？
+### Q23：无头路径能跑统一 `/plan` 吗？
 
-不能。`TaskRunner` 只有 `run(String prompt)`（`TaskRunner.java:5`），`runHeadlessTask` 只构造普通 `Agent`（`Main.java:1145`）。Plan 和 Team 需要终端上的审阅与多路渲染，只存在于交互循环里（`Main.java:1005-1023`）。而且无头执行用的是普通 `ToolRegistry`（`Main.java:1143`），**不经过 HITL 审批**。
+不能。`TaskRunner` 只有 `run(String prompt)`（`TaskRunner.java:5`），`runHeadlessTask` 只构造普通 `Agent`（`Main.java:1122`）。统一 `/plan` 的审阅与进度展示只接在交互循环（`Main.java:992-1001`、`:1294-1322`、`:1551-1625`）。而且无头执行用的是普通 `ToolRegistry`（`Main.java:1120`），**不经过 HITL 审批**。
 
 ### Q24：为什么 `DurableTaskManager` 初始化失败会让整个 CLI 起不来？
 
@@ -1108,7 +1108,7 @@ Jackson 的解析异常落进了统一 catch，没有单独映射成 400（`Runt
 
 ### Q28：如果让你重做，最先改哪三件？
 
-第一，把 `TaskRunner` 从 `String run(String prompt)` 扩成带回调的契约（进度、取消令牌、结构化结果），这一处同时解锁了取消语义、真实流式事件和无头 Plan/Team 的可能性。第二，把 HTTP Turn 落到 durable queue 上执行，让两条路径共用调度、取消和恢复——顺序放在「扩契约」之后，因为 `turn.started` 和 `running` 现在是两个独立的真相来源。第三，加 schema 迁移、幂等键与租约/心跳。前两件是架构问题，第三件是运维问题。
+第一，把 `TaskRunner` 从 `String run(String prompt)` 扩成带回调的契约（进度、取消令牌、结构化结果、计划审阅策略），这一处同时解锁了取消语义、真实流式事件和无头 `/plan` 的可能性。第二，把 HTTP Turn 落到 durable queue 上执行，让两条路径共用调度、取消和恢复——顺序放在「扩契约」之后，因为 `turn.started` 和 `running` 现在是两个独立的真相来源。第三，加 schema 迁移、幂等键与租约/心跳。前两件是架构问题，第三件是运维问题。
 
 ---
 
@@ -1118,7 +1118,7 @@ Jackson 的解析异常落进了统一 catch，没有单独映射成 400（`Runt
 
 > 异步任务与 Runtime API：使用 SQLite 持久化任务队列和状态，支持 enqueued/running/completed/failed/canceled 生命周期、Worker Pool、取消及运行中任务恢复；通过 HTTP API 创建 Thread、提交 Turn，并以 SSE 获取事件流。
 
-这句话**没有**声称 HTTP Turn 由 durable queue 执行，**没有**声称无头路径支持 Plan / Team，**也没有**声称 SSE 是长连接推送。逐项证据如下：
+这句话**没有**声称 HTTP Turn 由 durable queue 执行，**没有**声称无头路径支持统一 `/plan`，**也没有**声称 SSE 是长连接推送。逐项证据如下：
 
 | 简历原句 | 代码证据 |
 |---|---|
@@ -1130,11 +1130,11 @@ Jackson 的解析异常落进了统一 catch，没有单独映射成 400（`Runt
 | 通过 HTTP API 创建 Thread | 路由 `RuntimeApiServer.java:65-68`；存储 `RuntimeThreadStore.java:35-48` |
 | 提交 Turn | 路由与异步提交 `RuntimeApiServer.java:70-73`、`:84-100` |
 | 以 SSE 获取事件流 | 读取与编码 `RuntimeApiServer.java:115-128`、`:157-165`；游标 `RuntimeThreadStore.java:79-103` |
-| 端到端接真实 Agent（诚实标注：仅 ReAct、无 HITL） | 无头执行体 `Main.java:1142-1153`；后台任务接线 `Main.java:1155-1161`、启动 `:374-376`；HTTP 接线 `Main.java:1105-1109` |
+| 端到端接真实 Agent（诚实标注：仅 ReAct、无 HITL） | 无头执行体 `Main.java:1119-1130`；后台任务接线 `Main.java:1132-1137`、启动 `:374-376`；HTTP 接线 `Main.java:1081-1086` |
 
 **讲简历时要主动加的三句限定**：
 
-1. 「两条无头路径都只跑 ReAct，Plan/Team 仍在交互式 CLI 里，也没有 HITL 审批。」
+1. 「两条无头路径都只跑 ReAct；统一 `/plan` 只接在交互式 CLI 和 TUI，无头路径也没有 HITL 审批。」
 2. 「HTTP Turn 没有走持久任务队列，它和后台任务是两套独立存储、两套独立调度。」
 3. 「HTTP 的 SSE 是一次性快照加客户端轮询，不是服务端长连接推送。」
 
@@ -1150,7 +1150,7 @@ Jackson 的解析异常落进了统一 catch，没有单独映射成 400（`Runt
 
 ## 12.2 尚未实现的
 
-租约与可见性超时、幂等键、重试与退避、死信队列、优先级与延迟调度、多实例调度、schema 迁移、Worker 补充与存活检测、异常路径退避；HTTP 侧的 Turn 查询与取消、Thread 列表与删除、健康检查、限流与背压、事件保留与清理、长连接推送、Turn 级串行与对话历史；两条路径的统一调度；无头路径的 Plan/Team 与 HITL；`TaskRunner` 的进度与取消通道。
+租约与可见性超时、幂等键、重试与退避、死信队列、优先级与延迟调度、多实例调度、schema 迁移、Worker 补充与存活检测、异常路径退避；HTTP 侧的 Turn 查询与取消、Thread 列表与删除、健康检查、限流与背压、事件保留与清理、长连接推送、Turn 级串行与对话历史；两条路径的统一调度；无头路径的统一 `/plan` 与 HITL；`TaskRunner` 的进度与取消通道。
 
 ## 12.3 逐条列出需要知道的限制
 
@@ -1165,7 +1165,7 @@ Jackson 的解析异常落进了统一 catch，没有单独映射成 400（`Runt
 - **失败只记 message**，无异常类型与堆栈（`:187-193`、`:263`）。
 - **两张库表都没有 schema 迁移**（`DurableTaskManager.java:274-293`、`RuntimeThreadStore.java:105-124`），加列对已存在的库不生效。
 - **`.env` 文件不会提供 `CODEAGENT_TASK_*` / `CODEAGENT_RUNTIME_*`**（`DurableTaskManager.java:46-48`、`:57-59`；`RuntimeApiServer.java:42-44`；`RuntimeThreadStore.java:25-27`），必须用真实环境变量或 `-D`；`.env.example:135-149` 的写法容易误导。
-- **无头路径只支持 ReAct、不走 HITL**（`TaskRunner.java:5`、`Main.java:1142-1153`、`:1143`）。
+- **无头路径只支持 ReAct、不走 HITL**（`TaskRunner.java:5`、`Main.java:1119-1130`、`:1120`）。
 - **无头取消没有 `CancellationToken`**，只依赖线程中断；交互式路径才有 token（`Main.java:1369-1370`、`Agent.java:250`、`ToolRegistry.java:1166`）。
 - **HTTP 与后台任务未统一**，两套数据库、两套调度器，且不能在同一进程同时提供（`Main.java:218-222` vs `:374`）。
 - **SSE 是快照加轮询**，无长连接、无 heartbeat；**没有新事件时传输方式退化为 chunked**（`RuntimeApiServer.java:115-128`）。

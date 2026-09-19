@@ -67,7 +67,7 @@ ReAct 这个词最初来自论文里那种"让模型输出 `Thought: ... / Actio
 
 运行时只负责维护协议、执行工具、控制边界；**"下一步做什么"完全由模型根据完整消息历史自己决定**。这带来一个直接的后果：本项目的 ReAct 循环**没有"计划"这一层数据结构**，也没有可枚举的步骤列表，只有一条不断增长的 `List<Message>`。
 
-> 对照：需要"先把步骤规划出来再执行"的场景走的是 Plan 模式，那是另一条执行路径，见 `02-dag-orchestration.md`。
+> 对照：需要"先把步骤规划出来再执行"的场景走的是 Plan 模式，那是另一条执行路径，见 `03-multi-agent-collaboration.md`。
 
 ## 0.4 名词速查
 
@@ -669,10 +669,10 @@ flowchart LR
 | 工具结果的截断 | 旧文档称"命令输出截断是唯一截断点" | **至少五处**：`read_file` 行数上限、`grep_code` 字符/条数预算、`web_fetch` 字符上限、`execute_command` 输出上限、`write_file` 字节上限（拒绝而非截断） | `ToolRegistry.java:396`、`:506-508`、`:655-657`、`:1049`、`:1505`、`:283-285` |
 | 单工具执行 | 以为都走线程池 | 单调用**内联执行**、浏览器批次**串行**、其余才建线程池——三条路径行为不一致（超时保护只在并行路径上） | `ToolRegistry.java:1310-1315`、`:1316-1329`、`:1331-1336` |
 | 失败判定 | 以为 `successful` 由执行路径决定 | 还有一层**文本前缀嗅探**：工具返回以 `🛡️`/`❌`/`工具执行失败` 等开头的正常内容也会被标成失败 | `ToolRegistry.java:1237-1239`、`:1251-1271` |
-| ReAct 的 browser lease | 借出后应归还 | `TurnToolPolicy.execute` 里 `acquireBrowserLease()`，**ReAct 路径从不调用 `releaseBrowserLease()`**；只有 `SubAgent` / `PlanExecuteAgent` / `AgentOrchestrator` 有对应释放 | `TurnToolPolicy.java:328-330`、`TurnToolPolicy.java:344-351`、`SubAgent.java:265`、`PlanExecuteAgent.java:570`、`AgentOrchestrator.java:543` |
+| ReAct 的 browser lease | 借出后应归还 | `TurnToolPolicy.execute` 里 `acquireBrowserLease()`，**ReAct 路径从不调用 `releaseBrowserLease()`**；当前生产路径中由 `SubAgent` / `PlanExecuteAgent` 显式释放 | `TurnToolPolicy.java:328-330`、`TurnToolPolicy.java:344-351`、`SubAgent.java:265`、`PlanExecuteAgent.java:599` |
 | 该 lease 的实际作用 | 以为是一把跨轮互斥锁 | **在 ReAct 里不构成互斥**：`browserLeaseCoordinator` 是**实例字段**（每次 `fromUserInput` 新建），ReAct 不 `fork()`，而 `browserLeaseHeld` 为真时 `acquire` 直接 return——同一 policy 的第二次 acquire 是空操作 | `TurnToolPolicy.java:148`、`TurnToolPolicy.java:165`、`TurnToolPolicy.java:181`、`TurnToolPolicy.java:353-359` |
 | 终轮 assistant 双写 | 以为交付视图和账本一致 | **分裂**：带 tool_calls 的轮次保留 reasoning（`assistant(reasoning, content, toolCalls)`），终轮丢弃 reasoning 只写 `assistant(content)`；账本两条路径都保留完整版 | `Agent.java:299-303`、`Agent.java:316-318`、`Agent.java:346-353` |
-| "Agent 是账本的唯一双写者" | 旧文档明确这么写 | **不成立**：Plan / Team / Planner / Harness 都在写账本 | `PlanExecuteAgent.java:306`、`SubAgent.java:216`、`AgentOrchestrator.java:171`、`Planner.java:73`、`BetterHarnessRunner.java:261` |
+| "Agent 是账本的唯一双写者" | 旧文档明确这么写 | **不成立**：统一 `/plan` 路径、Reviewer、Planner 与 Harness 都会写账本 | `PlanExecuteAgent.java:306`、`SubAgent.java:216`、`Planner.java:73`、`BetterHarnessRunner.java:261` |
 | 账本写入失败 | 以为会向上冒泡 | `ConversationLedger.append` 内部 `catch (IOException)` 只打 error 日志，**调用方完全无感**（与 `SessionStore` 路径的 `SessionPersistenceException` 形成对比） | `ConversationLedger.java:180-196` |
 | system prompt 刷新 | 以为每轮重建只是一次内存替换 | 只要新 system 与旧的不同就**追加一条账本条目**（`memory_context_refresh`）。改动后 system 只含会话级稳定内容，多数轮次命中早退分支，账本不再逐轮增长 full system prompt | `Agent.java:543-562` |
 | 记忆注入位置 | 旧文档称「替换 `conversationHistory[0]`，下一轮容易覆盖上一轮」 | **已反转**：检索结果随本轮 user 消息注入（`Agent.java:233-235`），历史消息永不被改写；旧记忆不再被覆盖，改为随历史累积、由自动压缩消化。原因是改写消息 0 会让前缀缓存连同整段历史一起失效 | `Agent.java:227-238`、`docs/dev/11-prompt-cache-friendly-context-injection.md` |
@@ -694,7 +694,7 @@ flowchart LR
 
 **代价**：轮次不可预估，依赖预算与停滞控制；执行过程不如 DAG 可预测、不可枚举。
 
-**当前判断**：简单探索走 ReAct，步骤明确且依赖复杂走 Plan 模式（见 `02-dag-orchestration.md`）。两条路径共用 `LlmClient`、`ToolRegistry`、`AgentBudget` 与账本。
+**当前判断**：简单探索走 ReAct，步骤明确且依赖复杂走 Plan 模式（见 `03-multi-agent-collaboration.md`）。两条路径共用 `LlmClient`、`ToolRegistry`、`AgentBudget` 与账本。
 
 ## 6.2 工具失败回灌 vs 立即终止
 

@@ -762,15 +762,17 @@ flowchart TD
 | `CodeChunkerTest` | `.java` 文件切出 class 块和 method 块；`toEmbeddingText()` 的 `[class:名称]` 格式 | `CodeChunkerTest.java:11`、`:25-41`、`:43-50` |
 | `CodeAnalyzerTest` | 对示例类断言 extends、implements、contains、imports 四类关系 | `CodeAnalyzerTest.java:11`、`:15-39` |
 | `VectorStoreTest` | 插入与向量搜索、关键词搜索、关系存储与 `getRelations`、`clearProject` | `VectorStoreTest.java:12`、`:31`、`:56`、`:67`、`:77` |
-| `CodeRetrieverTest` | 用自定义 stub `EmbeddingClient` 验证自然语言查询中的代码关键词会把目标方法提升到首位 | `CodeRetrieverTest.java:12`、`:31-64` |
-| `CodeIndexTest` | 不存在路径返回 0/0；索引测试资源目录；进度监听器收到开始/发现/完成消息 | `CodeIndexTest.java:10`、`:12`、`:20`、`:30` |
+| `CodeRetrieverTest` | 用自定义 stub `EmbeddingClient` 验证自然语言查询中的代码关键词会把目标方法提升到首位；当前测试用原始 `/tmp/...` 作为存储 project key，而生产检索会规范化项目路径，Windows 下两者不一致 | `CodeRetrieverTest.java:12`、`:31-64` |
+| `CodeIndexTest` | 不存在路径返回 0/0；索引测试资源目录；进度监听器收到开始/发现/完成消息；后两项使用默认 `EmbeddingClient`，会依赖本机 Ollama | `CodeIndexTest.java:10`、`:12`、`:20`、`:30` |
 | `SearchResultFormatterTest` | CLI 输出包含搜索摘要与首条结果 | `SearchResultFormatterTest.java:9`、`:11-28` |
 | `EmbeddingClientTest` | 默认 provider/模型、自定义配置、空输入返回空数组 | `EmbeddingClientTest.java:7`、`:9`、`:16`、`:24` |
 
-**两个已确认的测试缺陷，必须知道：**
+**四个已确认的测试缺陷或环境边界，必须知道：**
 
 1. **`testNonJavaFile` 并没有测非 Java 文件。** 它传入的仍是 `.java` 路径（`CodeChunkerTest.java:17`），代码注释也承认"因为是 `.java` 后缀，会被 AST 解析"（`:21`）。所以**非 Java 文本分段这条路径完全没有测试覆盖**。
 2. **`CodeAnalyzerTest` 没有断言 `calls`。** 只断言了 extends / implements / contains / imports 四类（`CodeAnalyzerTest.java:22-38`），而 `calls` 恰恰是问题最多的那一类。
+3. **`CodeIndexTest` 不是确定性的纯单测。** 它没有注入 fake `EmbeddingClient`，默认会访问 Ollama；本机未启动相应服务时，文件会被逐个跳过，块数断言和进度断言失败。
+4. **`CodeRetrieverTest` 的 project key 在 Windows 下不一致。** 测试直接用 `/tmp/...` 写入 `VectorStore`，而 `CodeRetriever` 会把项目路径规范化成 Windows 绝对路径再查询；生产的 `CodeIndex` 和 `CodeRetriever` 两端都会规范化，不存在这个错配。
 
 ## 8.2 回归命令
 
@@ -797,7 +799,7 @@ mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest
 - `search_code` 传入空白查询的行为
 - CLI `/index <path>` 后 `/search` 的项目路径一致性
 
-**测试环境约定**：涉及数据库的用例通过 `codeagent.rag.dir` 指向临时目录（如 `VectorStoreTest.java:19`），避免污染真实索引。真实 Embedding 服务的集成测试应注入确定性的 fake client，避免环境依赖——`CodeRetrieverTest` 就是这么做的。
+**测试环境约定**：涉及数据库的用例通过 `codeagent.rag.dir` 指向临时目录（如 `VectorStoreTest.java:19`），避免污染真实索引。需要验证索引/检索逻辑的单测应注入确定性的 fake client，并确保写入与查询使用同一种 project key 规范化规则。当前 `CodeIndexTest` 尚未注入 fake，`CodeRetrieverTest` 虽使用 stub，但在 Windows 下仍有 project key 错配；因此上面的整组命令目前不是跨平台、无外部依赖的绿色基线。
 
 ---
 
@@ -935,7 +937,7 @@ RAG 依赖预索引且返回相关性排序，可能过期或语义误召回。�
 
 ## 12.1 已经实现的
 
-Java 类和方法切块、非 Java 文本分段、两类 Embedding 接口（Ollama / OpenAI 兼容）、SQLite 持久化、JVM 余弦搜索、关键词召回、混合重排、单文件限流、结果格式化、一跳关系查询；`/index`、`/search`、`/graph` 三个 CLI 命令与 `search_code` 工具均已接线并可工作。
+Java 类和方法切块、非 Java 文本分段、两类 Embedding 接口（Ollama / OpenAI 兼容）、SQLite 持久化、JVM 余弦搜索、关键词召回、混合重排、单文件限流、结果格式化、一跳关系查询；`/index`、`/search`、`/graph` 三个 CLI 命令与 `search_code` 工具均已接线。语义索引与检索是否可用仍取决于已配置的 Embedding 服务；默认 Ollama 不可达时索引会跳过失败文件，不能表述为无条件可工作。
 
 ## 12.2 尚未实现的
 

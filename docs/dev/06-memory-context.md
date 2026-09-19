@@ -174,8 +174,8 @@ flowchart TB
 | `/memory`（status/list/search/delete/clear） | 长期记忆管理 | `cli/Main.java:608-653` |
 | `/save` | 写入长期记忆 | `cli/Main.java:654-663` |
 | `save_memory` 工具 | 模型主动写长期记忆 | `tool/ToolRegistry.java:726-748` |
-| Plan 模式每个计划任务 | 检索长期记忆 + 压缩 | `agent/PlanExecuteAgent.java:588-590`、`226-259` |
-| Team 的 SubAgent | 只压缩，**不检索长期记忆** | `agent/SubAgent.java:141-189` |
+| 统一 `/plan` 的每个执行任务 | 检索长期记忆 + 压缩 | `agent/PlanExecuteAgent.java:645-652`、`226-259` |
+| `/plan` 的 Reviewer `SubAgent` | 只压缩并加载项目 `CODEAGENT.md`，**不检索长期记忆，也不暴露工具** | `agent/SubAgent.java:126`、`:141-189`、`:557-562` |
 
 最后一行是个需要留意的差异，第 9 部分会展开。
 
@@ -275,7 +275,7 @@ flowchart TB
 - 它是**绑在某个特定 `List<Message>` 对象上的异步摘要状态**，用 `WeakReference` 做键（`memory/SessionMemoryCompactor.java:289-309`）。
 - 不落盘、不跨进程、不跨会话。
 - `history` 被整体替换（例如压缩重建、`/clear`、从磁盘恢复）后，`WeakReference` 指不到原对象，状态即失效（`memory/SessionMemoryCompactor.java:185-189`）。
-- 每份 history 有独立状态，避免 ReAct、Plan 并行任务、Team worker 之间互相污染（`memory/SessionMemoryCompactor.java:19-24`）。
+- 每份 history 有独立状态，避免 ReAct、`/plan` 并行任务与 Reviewer 之间互相污染（`memory/SessionMemoryCompactor.java:19-24`）。
 
 它的作用只有一个：在真正撞到阈值**之前**，提前把「要总结的那段对话」异步总结好，等撞阈值时直接用，省掉临界点上那一次同步 LLM 调用。详见 5.3。
 
@@ -766,9 +766,9 @@ pruneHistoricalImagePayloads
 
 Agent 注入路径使用 `MemoryRetriever.buildContextForQuery`：先从当前项目可见的 global/project 条目中打分排序，取一个固定的条数上限，再按 `maxTokens` 累加条目的 `tokenCount`，**超预算就在第一条放不下时停止**（`memory/MemoryRetriever.java:60-78`）。无命中返回空字符串，不生成空的「相关长期记忆」章节（`memory/MemoryRetriever.java:62`）。
 
-Plan-and-Execute 路径使用同一套检索：为具体计划任务用任务描述调用 `buildContextForQuery`（`agent/PlanExecuteAgent.java:588-590`），并且**不会**把 ReAct 的短期 history 复制到 `MemoryManager`。
+统一 Plan-and-Execute 路径使用同一套检索：为具体计划任务用任务描述调用 `buildContextForQuery`（`agent/PlanExecuteAgent.java:645-652`），并且**不会**把 ReAct 的短期 history 复制到 `MemoryManager`。
 
-**Multi-Agent 的 SubAgent 是个例外：它不检索、不注入长期记忆。** `SubAgent` 只持有自己的 `AutoCompactionManager`（`agent/SubAgent.java:64`、`81`）并加载 `CODEAGENT.md`（`agent/SubAgent.java:126`、`235-239`）；它构建 prompt 时不调用 `memoryManager.buildContextForQuery`。不过因为 `toolRegistry` 是共享的，worker 仍然可以通过 `save_memory` **写入**长期记忆（`save_memory` 的 saver 由 `AgentOrchestrator` 在启动时挂到 `toolRegistry` 上，`agent/AgentOrchestrator.java:107`）。**即：Team 成员能写、读不到。**
+**当前 Reviewer `SubAgent` 是个例外：它不检索、不注入长期记忆。** `SubAgent` 只持有自己的 `AutoCompactionManager`（`agent/SubAgent.java:64`、`81`）并加载 `CODEAGENT.md`（`agent/SubAgent.java:126`、`235-239`）；它构建 prompt 时不调用 `memoryManager.buildContextForQuery`。生产路径里它只承担 Reviewer 角色，而 `shouldUseTools()` 仅对已不可达的 `WORKER` 角色返回 `true`（`agent/SubAgent.java:557-562`），所以 Reviewer 也不能调用 `save_memory`。相对地，`PlanExecuteAgent` 自己执行的任务既会读取长期记忆，也可通过共享 `ToolRegistry` 写入；saver 由 `Agent` 与 `PlanExecuteAgent` 分别在构造时接线（`agent/Agent.java:94`、`agent/PlanExecuteAgent.java:189`）。
 
 CLI/TUI 的 `/memory search <关键词>` 是另一条管理查询路径：它直接调用 `MemoryManager.searchLongTerm`（`cli/Main.java:626-636`；TUI 在 `tui/TuiSessionController.java:143`），底层是 `LongTermMemory.search(query, limit, currentProject)`，用 jieba token 对正文或 metadata 做大小写不敏感的子串匹配，按底层集合迭代顺序截断 `limit`，**不使用 `MemoryRetriever` 的相关度排序和时间衰减**。所以 CLI 搜索结果与 Agent 自动注入结果的顺序可能不同；前者用于人工管理，后者用于提示词召回。
 
@@ -925,7 +925,7 @@ sequenceDiagram
 | 实验路径的测试 | 以为端到端被覆盖 | `SessionMemoryCompactorTest` 直接调内部方法；`AutoCompactionManagerTest` 用 stub 替换了门控方法 | `SessionMemoryCompactorTest.java:109-124`；`AutoCompactionManagerTest.java:99-118` |
 | 记忆注入位置 | 旧文档称「替换 `conversationHistory[0]`，下一轮容易覆盖上一轮」 | **已改**：检索结果追加到本轮 user 消息末尾（`agent/Agent.java:233-235`），system prompt 不再逐轮承载检索结果；历史消息永不被改写。**代价**：旧记忆不再被覆盖，改为随历史累积、由自动压缩消化 | `agent/Agent.java:227-238`、`agent/Agent.java:543-562`；`docs/dev/11-prompt-cache-friendly-context-injection.md` |
 | system prompt 段序 | 旧文档称 `... → runtime_context → project_context → ...` | **已改**：`runtime_context` 移到 system prompt **末尾**（`prompt/PromptAssembler.java:43`），使跨日变化只影响它自己 | `prompt/PromptAssembler.java:30-44` |
-| SubAgent 的记忆 | 以为所有 Agent 共享长期记忆注入 | **SubAgent 不检索/不注入长期记忆**，只加载 `CODEAGENT.md`；但可通过共享 toolRegistry **写入** | `agent/SubAgent.java:64`、`126`；`agent/AgentOrchestrator.java:107` |
+| Reviewer `SubAgent` 的记忆 | 以为所有 Agent 共享长期记忆注入 | Reviewer **不检索/不注入长期记忆**，只加载 `CODEAGENT.md`；其角色不暴露工具，因此也不能调用 `save_memory`。执行任务由 `PlanExecuteAgent` 自身承担，会读长期记忆且可写入 | `agent/SubAgent.java:126`、`:557-562`；`agent/PlanExecuteAgent.java:189`、`:645-652` |
 | 工具结果回灌 | 以为回灌给模型的是截断版 | 回灌进 `conversationHistory` 的是**完整结果**（`LlmClient.Message.tool(id, result)` 原样追加）；旧文档描述的 `MemoryManager.addToolResult` 截断副本已随短期记忆一并删除 | `agent/Agent.java:330-335` |
 | 原始消息可追溯 | 以为 `conversationHistory` 就是完整原始记录 | 它是投递视图，会被裁图、`/clear`、压缩改写；完整原始消息只在只追加的 ledger | `history/ConversationLedger.java:28-38` |
 | `CODEAGENT.md` 截断 | 以为截到固定字符数 | 保留「字符预算**减去一个余量**」再追加提示，余量给提示文本 | `prompt/ProjectMemoryLoader.java:128-132` |
@@ -1087,7 +1087,7 @@ JSON 文件人可读、可直接备份、可手工编辑，适合少量个人事
 
 - 状态里报告「短期上下文由当前 Agent `conversationHistory` 维护」（`:16-21`）——把「没有第二份短期记忆」固化成了测试；
 - **只在显式请求时清空长期记忆**（`:23-32`）；
-- **默认写 project 作用域**，并断言 metadata 里的项目路径、以及 `global` 条目的 scope（`:34-45`）；
+- **默认写 project 作用域**，并断言 metadata 里的项目路径、以及 `global` 条目的 scope（`:34-45`）；其中项目路径断言硬编码了 Unix 分隔符 `/repo/current`，在 Windows 上会失败，属于测试可移植性问题，不代表生产路径丢失 project scope；
 - 只搜当前项目与 global（`:47-59`）；
 - **压缩触发比率对所有模型一致**，并断言 200k 窗口下比率约 0.835、阈值 167000（`:61-67`）。
 
@@ -1124,7 +1124,8 @@ mvn test -Dtest=MemoryManagerTest,LongTermMemoryTest,MemoryRetrieverTest,Convers
 2. 图片 part 的估算误差、surrogate pair 的估算误差没有测试。
 3. 长期 JSON 的**并发写入**没有跨进程测试（只有单进程内的并发去重原子性）。
 4. 持久会话下 `commitCompaction` 的**持久化分支**（`agent/Agent.java:1226-1277`）只被 `SessionCompactionRecoveryTest` 通过**手动** `compactHistoryNow()` 覆盖；**自动**触发路径（`maybeCompactHistory` → `commitCompaction`）在该测试里没有走到，重放层则是 `SessionReplayerTest` 用构造事件单独测的。
-5. SubAgent 不注入长期记忆这一行为没有测试约束——属于「现状即事实」。
+5. Reviewer `SubAgent` 不注入长期记忆且不暴露工具这一行为没有专门的记忆边界测试约束——属于「现状即事实」。
+6. `MemoryManagerTest.shouldStoreProjectScopedFactsByDefault` 用 `endsWith("/repo/current")` 断言规范化路径，在 Windows 上会因反斜杠失败；回归命令目前不是跨平台全绿基线。
 
 ---
 
@@ -1142,7 +1143,7 @@ mvn test -Dtest=MemoryManagerTest,LongTermMemoryTest,MemoryRetrieverTest,Convers
 
 压缩协调器先尝试已预生成的会话记忆，失败回退完整摘要；两者都统计 user 起点，只摘要 system 之后到最近若干轮之前的完整消息，重建为 system、摘要 user/assistant 对和原始尾部，因此不会在 tool call 和 result 中间切割。手动 `/compact` 一律走稳定路径。持久会话用 append-only 事件流 + 哈希校验的 checkpoint 存盘，压缩写成一组 `compaction/start → summary → replace → append → end` 事件，重放端只在 `status=completed` 时整组生效，所以崩溃不会留下半压缩历史。
 
-边界也很明确：长期记忆靠关键词而非语义向量、不做自动事实抽取；JSON 全量重写没有事务；实验快路径默认关闭且在自动流程里几乎走不到；Team 的 SubAgent 能写长期记忆但读不到。
+边界也很明确：长期记忆靠关键词而非语义向量、不做自动事实抽取；JSON 全量重写没有事务；实验快路径默认关闭且在自动流程里几乎走不到；统一 `/plan` 的执行任务会读写长期记忆，但 Reviewer `SubAgent` 既不检索长期记忆也不暴露工具。
 
 ---
 
@@ -1244,9 +1245,9 @@ base64 图片成本高，而且后续每一轮都会重复携带，会迅速挤�
 
 不是。它按窗口比例算出来，但**生产代码里没有任何消费方**——连 `AgentBudget.java:79` 注释声称的 `/context` 显示都没用它。真正管住循环的是 `AgentBudget`，而它的 token 硬限**默认是 `Integer.MAX_VALUE`（实质不限）**，只有显式系统属性才生效（`context/ContextProfile.java:77-80`；`agent/AgentBudget.java:26`、`79-87`）。
 
-## Q25：为什么 Team 的 SubAgent 不注入长期记忆？
+## Q25：为什么 `/plan` 的 Reviewer `SubAgent` 不注入长期记忆？
 
-代码现状如此：`SubAgent` 只持有 `AutoCompactionManager` 并加载 `CODEAGENT.md`，构建 prompt 时不调用 `buildContextForQuery`（`agent/SubAgent.java:64`、`126`）。但 `toolRegistry` 是共享的，`save_memory` 的 saver 挂在上面，所以 worker **能写、读不到**（`agent/AgentOrchestrator.java:107`）。这是行为差异，不是设计声明；要改的话需要在 SubAgent 构建 prompt 时补一次检索注入。
+代码现状如此：`SubAgent` 只持有 `AutoCompactionManager` 并加载 `CODEAGENT.md`，构建 prompt 时不调用 `buildContextForQuery`（`agent/SubAgent.java:64`、`126`）。生产只构造 Reviewer，而 Reviewer 不暴露工具（`:557-562`），所以它既不读取长期记忆，也不能调用 `save_memory`。执行任务不再由 Worker `SubAgent` 承担，而由 `PlanExecuteAgent.executeTaskWithPolicy` 完成；该路径会按任务描述检索长期记忆（`agent/PlanExecuteAgent.java:645-652`），共享工具的 saver 也已在构造时接线（`:189`）。
 
 ---
 
@@ -1285,7 +1286,7 @@ base64 图片成本高，而且后续每一轮都会重复携带，会迅速挤�
 - **长期记忆写盘失败对用户静默**（仅 warn），而会话事件写失败会**中止本轮 run**。
 - **`MemoryManager.retrieveRelevant` 是无调用方的死 API**，且它传入的 `projectKey` 为 `null`——即便被调用也只会返回 global 条目（`memory/MemoryManager.java:90-92`）。
 - **`ScoredEntry.fromShortTerm` 恒为 false**，是重构残留字段（`memory/MemoryRetriever.java:45`、`113`）。`TokenBudget.isWithinBudget` 同样无生产调用方（`memory/TokenBudget.java:65-68`）。
-- **Team 的 SubAgent 能写、读不到长期记忆**：`save_memory` 通过共享 toolRegistry 生效，但 SubAgent 构建 prompt 时不做长期记忆检索注入。
+- **统一 `/plan` 的记忆边界按角色不同**：执行任务由 `PlanExecuteAgent` 自身承担，会检索长期记忆且可通过工具写入；Reviewer `SubAgent` 不检索长期记忆，也不暴露工具。
 - **`SessionStore` 每次 append 全量重放事件流**，写入成本随事件数线性增长；checkpoint 是性能兜底，哈希不匹配时回退全量重放（只慢不错）。
 - **摘要压缩依赖 LLM 调用**，存在信息损失；完整摘要路径只对「IO 失败」和「空摘要」做防护，不校验摘要质量。
 - **历史图片一旦被 `pruneHistoricalImagePayloads` 移除**，后续轮次无法再让模型观察原图像素。

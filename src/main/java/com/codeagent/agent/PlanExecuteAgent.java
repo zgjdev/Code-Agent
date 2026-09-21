@@ -42,6 +42,7 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
@@ -134,11 +135,14 @@ public class PlanExecuteAgent {
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private SessionStore.SessionHandle parentSession;
     private final ThreadLocal<SessionStore.SessionHandle> childSession = new ThreadLocal<>();
+    private PlanStateStore planStateStore;
+    private final Set<String> interruptedRecoveryTaskIds = ConcurrentHashMap.newKeySet();
     private Supplier<String> externalContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private TurnToolPolicy turnToolPolicy = TurnToolPolicy.forExplicitTask("");
     private String submittedPolicyInput = "";
+    private String planResumeKey = "";
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private static final int MAX_RETRIES_PER_STEP = 2;
     private static final int MAX_REPLANS_PER_RUN = 1;
@@ -244,6 +248,72 @@ public class PlanExecuteAgent {
         this.parentSession = parentSession;
     }
 
+    public void setPlanStateStore(PlanStateStore planStateStore) {
+        this.planStateStore = planStateStore;
+    }
+
+    public void enableDefaultPlanStateStore() {
+        this.planStateStore = openPlanStateStoreSafely();
+    }
+
+    private PlanStateStore openPlanStateStoreSafely() {
+        try {
+            return PlanStateStore.openDefault();
+        } catch (Exception e) {
+            log.warn("Plan state persistence unavailable; continuing in memory-only mode", e);
+            return null;
+        }
+    }
+
+    private Path planWorkspace() {
+        return Path.of(toolRegistry.getProjectPath()).toAbsolutePath().normalize();
+    }
+
+    private Optional<PlanStateStore.ResumeCandidate> findResumablePlan(String goal) {
+        if (planStateStore == null) {
+            return Optional.empty();
+        }
+        try {
+            return planStateStore.findResumable(planWorkspace(), planResumeKey);
+        } catch (SQLException e) {
+            log.warn("Failed to load resumable plan; falling back to a new plan", e);
+            return Optional.empty();
+        }
+    }
+
+    private void savePlanSafely(ExecutionPlan plan) {
+        if (planStateStore == null || plan == null) {
+            return;
+        }
+        try {
+            planStateStore.savePlan(planWorkspace(), planResumeKey, plan);
+        } catch (SQLException e) {
+            log.warn("Failed to save plan {}", plan.getId(), e);
+        }
+    }
+
+    private void checkpointPlanSafely(ExecutionPlan plan) {
+        if (planStateStore == null || plan == null) {
+            return;
+        }
+        try {
+            planStateStore.checkpointPlan(plan);
+        } catch (SQLException e) {
+            log.warn("Failed to checkpoint plan {}", plan.getId(), e);
+        }
+    }
+
+    private void checkpointTaskSafely(String planId, Task task) {
+        if (planStateStore == null || planId == null || task == null) {
+            return;
+        }
+        try {
+            planStateStore.checkpointTask(planId, task);
+        } catch (SQLException e) {
+            log.warn("Failed to checkpoint plan task {}:{}", planId, task.getId(), e);
+        }
+    }
+
     private boolean maybeCompactHistory(List<LlmClient.Message> messages,
                                         PrintStream out,
                                         String actor,
@@ -324,6 +394,7 @@ public class PlanExecuteAgent {
     public String run(String userInput, String submittedUserInput) {
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
         submittedPolicyInput = submittedUserInput == null ? "" : submittedUserInput;
+        planResumeKey = submittedUserInput == null ? (userInput == null ? "" : userInput) : submittedUserInput;
         turnToolPolicy = TurnToolPolicy.fromUserInput(
                 submittedUserInput,
                 toolRegistry.isSharedBrowserSession(),
@@ -365,6 +436,17 @@ public class PlanExecuteAgent {
      * 使用Plan-and-Execute模式执行
      */
     private PlanRunOutcome runWithPlan(String goal, StreamState streamState) throws IOException {
+        Optional<PlanStateStore.ResumeCandidate> resumeCandidate = findResumablePlan(goal);
+        if (resumeCandidate.isPresent()) {
+            PlanStateStore.ResumeCandidate candidate = resumeCandidate.get();
+            interruptedRecoveryTaskIds.clear();
+            interruptedRecoveryTaskIds.addAll(candidate.interruptedTaskIds());
+            out.println("♻️ 已恢复未完成计划 " + candidate.plan().getId()
+                    + "，将跳过已完成节点并继续调度。\n");
+            return reviewAndExecutePlan(candidate.plan(), streamState, 0);
+        }
+
+        interruptedRecoveryTaskIds.clear();
         ExecutionPlan plan = planner.createPlan(goal);
         return reviewAndExecutePlan(plan, streamState, 0);
     }
@@ -374,10 +456,13 @@ public class PlanExecuteAgent {
         while (true) {
             PlanReviewDecision decision = reviewHandler.review(plan.getGoal(), plan);
             if (decision == null || decision.action() == PlanReviewAction.EXECUTE) {
+                savePlanSafely(plan);
                 return PlanRunOutcome.executed(executePlan(plan, streamState, replanDepth));
             }
 
             if (decision.action() == PlanReviewAction.CANCEL) {
+                plan.setStatus(ExecutionPlan.PlanStatus.CANCELLED);
+                checkpointPlanSafely(plan);
                 return PlanRunOutcome.canceled("⏹️ 已取消本次计划执行。");
             }
 
@@ -387,6 +472,9 @@ public class PlanExecuteAgent {
             }
 
             out.println("📝 已收到补充要求，正在重新规划...\n");
+            plan.setStatus(ExecutionPlan.PlanStatus.CANCELLED);
+            checkpointPlanSafely(plan);
+            interruptedRecoveryTaskIds.clear();
             String revisedGoal = plan.getGoal() + "\n补充要求：" + feedback;
             submittedPolicyInput = submittedPolicyInput + "\n补充要求：" + feedback;
             turnToolPolicy = TurnToolPolicy.fromUserInput(
@@ -403,12 +491,15 @@ public class PlanExecuteAgent {
         out.println("🚀 开始执行计划...\n");
 
         plan.markStarted();
+        checkpointPlanSafely(plan);
         StringBuilder finalResult = new StringBuilder();
         Map<String, Boolean> streamedTaskOutputs = new HashMap<>();
         Map<String, TurnToolPolicy.TrustedUrlContext> taskTrustedUrls = new HashMap<>();
 
         while (true) {
             if (CancellationContext.isCancelled()) {
+                plan.setStatus(ExecutionPlan.PlanStatus.CANCELLED);
+                checkpointPlanSafely(plan);
                 return "⏹️ 已取消当前计划执行。";
             }
             List<Task> executableTasks = getExecutableTasksInOrder(plan);
@@ -427,6 +518,8 @@ public class PlanExecuteAgent {
                         || batchResult.verificationReport().outcome() == VerificationOutcome.VERIFIED
                         || batchResult.verificationReport().outcome() == VerificationOutcome.NOT_REQUIRED)) {
                     task.markCompleted(batchResult.result());
+                    checkpointTaskSafely(plan.getId(), task);
+                    interruptedRecoveryTaskIds.remove(task.getId());
                     taskTrustedUrls.put(task.getId(), batchResult.trustedUrls());
                     streamedTaskOutputs.put(task.getId(), batchResult.streamedOutput());
                     log.info("Task completed: {} status={} resultChars={}",
@@ -445,6 +538,8 @@ public class PlanExecuteAgent {
                             ? "verification unavailable"
                             : String.join("; ", batchResult.verificationReport().blockingReasons());
                     task.markUnverified(reason);
+                    checkpointTaskSafely(plan.getId(), task);
+                    interruptedRecoveryTaskIds.remove(task.getId());
                     finalResult.append("任务 ").append(task.getId()).append(" 未验证: ").append(reason);
                     out.println("⚠️ 未验证 [" + task.getId() + "]: " + reason + "\n");
                     continue;
@@ -452,6 +547,8 @@ public class PlanExecuteAgent {
 
                 Exception error = batchResult.error();
                 task.markFailed(error.getMessage());
+                checkpointTaskSafely(plan.getId(), task);
+                interruptedRecoveryTaskIds.remove(task.getId());
                 log.warn("Task failed: {} error={}", task.getId(), error.getMessage());
                 out.println("❌ 失败 [" + task.getId() + "]: " + error.getMessage() + "\n");
 
@@ -466,6 +563,9 @@ public class PlanExecuteAgent {
                         continue;
                     }
                     out.println("🔄 尝试重新规划...\n");
+                    plan.markFailed();
+                    checkpointPlanSafely(plan);
+                    interruptedRecoveryTaskIds.clear();
                     ExecutionPlan replanned = planner.replan(plan, error.getMessage());
                     return "⚠️ 原计划有任务失败，已按重规划结果继续执行。\n"
                             + finalResult + "\n"
@@ -476,6 +576,7 @@ public class PlanExecuteAgent {
 
         if (!plan.isAllCompleted() && !plan.hasFailed()) {
             plan.markFailed();
+            checkpointPlanSafely(plan);
             return "⚠️ 计划未能继续推进，存在未满足依赖的任务。";
         }
 
@@ -485,6 +586,7 @@ public class PlanExecuteAgent {
 
         if (plan.hasFailed()) {
             plan.markFailed();
+            checkpointPlanSafely(plan);
             if (planSummary.isBlank()) {
                 return "⚠️ 计划部分完成，有任务失败。";
             }
@@ -492,6 +594,7 @@ public class PlanExecuteAgent {
         }
 
         plan.markCompleted();
+        checkpointPlanSafely(plan);
         if (planSummary.isBlank()) {
             return "✅ 计划执行完成！";
         }
@@ -517,6 +620,7 @@ public class PlanExecuteAgent {
             log.info("Executing single task: {} type={}", task.getId(), task.getType());
             out.println("▶️ 执行任务 [" + task.getId() + "]: " + task.getDescription());
             task.markStarted();
+            checkpointTaskSafely(plan.getId(), task);
 
             try {
                 return List.of(TaskExecutionResult.success(task, executeTask(
@@ -543,6 +647,7 @@ public class PlanExecuteAgent {
             for (Task task : executableTasks) {
                 out.println("▶️ 并行任务 [" + task.getId() + "]: " + task.getDescription());
                 task.markStarted();
+                checkpointTaskSafely(plan.getId(), task);
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 buffers.put(task.getId(), baos);
                 PrintStream taskOut = new PrintStream(baos, true, StandardCharsets.UTF_8);
@@ -606,8 +711,13 @@ public class PlanExecuteAgent {
                 child = parentSession.createChild("plan", "task:" + task.getId());
                 childSession.set(child);
             }
+            String recoveryFeedback = interruptedRecoveryTaskIds.contains(task.getId())
+                    ? "该任务来自进程中断恢复。请先检查当前 workspace / 外部资源状态和已有产物，"
+                    + "不要假设上次副作用未发生；确认缺失工作后再继续，优先重新验证而不是重复写入。"
+                    : null;
             TaskRunResult result = executeTaskWithPolicy(
-                    goal, plan, task, streamState, out, dependencyUrls, null, taskToolPolicy, evidenceCollector);
+                    goal, plan, task, streamState, out, dependencyUrls, recoveryFeedback,
+                    taskToolPolicy, evidenceCollector);
             result = result.withReport(DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot()));
             int evidenceRetries = 0;
             while (result.verificationReport().outcome() == VerificationOutcome.REJECTED
@@ -620,6 +730,7 @@ public class PlanExecuteAgent {
             }
             if (pipelineOptions.stepReview()) {
                 task.markReviewing();
+                checkpointTaskSafely(plan.getId(), task);
                 result = applyStepReview(
                         goal, plan, task, streamState, out, dependencyUrls, taskToolPolicy,
                         evidenceCollector, result);

@@ -26,6 +26,7 @@ For the primary entry point, see `/AGENTS.md`.
 | 审计日志 | `~/.codeagent/audit/audit-YYYY-MM-DD.jsonl` | `CODEAGENT_AUDIT_DIR` / `-Dcodeagent.audit.dir` |
 | Side-Git 快照 | `~/.codeagent/snapshots/<project_hash>/<worktree_hash>/.git` | `CODEAGENT_SNAPSHOT_DIR` / `-Dcodeagent.snapshot.dir` |
 | 后台任务 | `~/.codeagent/tasks/tasks.db` | — |
+| Plan DAG 状态 | `~/.codeagent/plans/plans.db` | `-Dcodeagent.plan.dir` / `CODEAGENT_PLAN_DIR` |
 | Better Harness 报告 | `<project>/.codeagent/better-harness/<run-id>/` | `/better-harness --inline` 禁止写文件 |
 
 ### Snapshot Config
@@ -263,7 +264,7 @@ ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 system / user / assistant / tool_call / tool_result 原始消息的 append-only JSONL 账本 / mode-actor-source 归因 / POSIX 权限收紧
 
 ### PlanExecuteAgent.java
-统一的多 Agent 协作 Plan-and-Execute：规划后执行 / 可选人工计划门 / DAG 任务执行 / 并行批次 / 可选步骤自动评审与重试 / 失败重规划。两个开关由构造时的 `PipelineOptions` 预设决定（`/plan` = `FULL_PRESET`，两个开关都开）
+统一的多 Agent 协作 Plan-and-Execute：规划后执行 / 可选人工计划门 / DAG 任务执行 / 并行批次 / 可选步骤自动评审与重试 / 失败重规划。CLI/TUI `/plan` 还启用 `PlanStateStore`：将 Plan/DAG 与 Task 状态 checkpoint 到 SQLite；同一 workspace 再次提交完全相同的顶层原始 goal 时恢复最近未终结 Plan，保留 `COMPLETED` 节点并将遗留 `RUNNING/REVIEWING` 转成 `INTERRUPTED` 后从 Task 边界重试。恢复不序列化 `TrustedUrlContext`，也不保证 tool-call 级 exactly-once。两个开关由构造时的 `PipelineOptions` 预设决定（`/plan` = `FULL_PRESET`，两个开关都开）
 
 ### PipelineOptions.java / StepReviewer.java / StepReviewDecision.java
 统一模式的两个开关与审查层契约；`/plan` 映射到 `FULL_PRESET`，`PLAN_PRESET` / `TEAM_PRESET` 仅保留在构造层（CLI 不可触达）
@@ -277,8 +278,8 @@ system / user / assistant / tool_call / tool_result 原始消息的 append-only 
 ### Planner.java
 LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖计算
 
-### ExecutionPlan.java
-DAG 拓扑排序 / 可执行任务判定 / 进度可视化
+### ExecutionPlan.java / PlanStateStore.java
+`ExecutionPlan` 负责 DAG 拓扑排序 / 可执行任务判定 / 进度可视化；`PlanStateStore` 负责 SQLite DAG checkpoint 与 Task 边界恢复。恢复候选仅匹配 workspace + exact submitted goal 的 `CREATED/RUNNING` Plan；终态 Plan 不自动恢复。
 
 ### ToolRegistry.java
 11 个核心内置工具 + MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult。代码理解默认路径是 `glob_files` / `grep_code` / `read_file` 现用现查，`grep_code` 优先走 ripgrep 并按 `max_results` / `head_limit` / `max_chars` 渐进返回，`search_code` 保留为 RAG 语义辅助。确定性搜索链路的回归样例见 `docs/code-search-golden-set.md`。

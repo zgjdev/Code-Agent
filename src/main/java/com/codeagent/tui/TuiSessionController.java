@@ -257,6 +257,7 @@ public final class TuiSessionController implements AutoCloseable {
                                 PipelineOptions.FULL_PRESET
                         );
                         planAgent.setConversationLedger(reactAgent.getConversationLedger());
+                        planAgent.enableDefaultPlanStateStore();
                         yield planAgent.run(input);
                     }
                 }));

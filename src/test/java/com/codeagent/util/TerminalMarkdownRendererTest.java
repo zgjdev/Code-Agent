@@ -6,9 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TerminalMarkdownRendererTest {
-    static {
-        System.setProperty("codeagent.render.color", "false");
-    }
 
     @Test
     void rendersHeadingListTableAndCodeBlockToTerminalFriendlyText() {
@@ -101,7 +98,40 @@ class TerminalMarkdownRendererTest {
         assertTrue(rendered.contains("| 特性"));
         assertFalse(rendered.contains("https://api.deepseek.com/chat/completions |"));
         for (String line : rendered.split("\\R")) {
-            assertTrue(line.length() <= 72, "line exceeds table width: " + line);
+            assertTrue(displayWidth(stripAnsi(line)) <= 72,
+                    "line exceeds table width: " + stripAnsi(line));
         }
+    }
+
+    private static String stripAnsi(String value) {
+        return value.replaceAll("\\u001B\\[[;\\d]*m", "");
+    }
+
+    private static int displayWidth(String value) {
+        int width = 0;
+        for (int offset = 0; offset < value.length();) {
+            int cp = value.codePointAt(offset);
+            Character.UnicodeScript script = Character.UnicodeScript.of(cp);
+            width += switch (script) {
+                case HAN, HIRAGANA, KATAKANA, HANGUL -> 2;
+                default -> isWideSymbol(cp) ? 2 : 1;
+            };
+            offset += Character.charCount(cp);
+        }
+        return width;
+    }
+
+    private static boolean isWideSymbol(int cp) {
+        return (cp >= 0x1100 && cp <= 0x115F)
+                || (cp >= 0x2329 && cp <= 0x232A)
+                || (cp >= 0x2E80 && cp <= 0xA4CF)
+                || (cp >= 0xAC00 && cp <= 0xD7A3)
+                || (cp >= 0xF900 && cp <= 0xFAFF)
+                || (cp >= 0xFE10 && cp <= 0xFE19)
+                || (cp >= 0xFE30 && cp <= 0xFE6F)
+                || (cp >= 0xFF00 && cp <= 0xFF60)
+                || (cp >= 0xFFE0 && cp <= 0xFFE6)
+                || (cp >= 0x2600 && cp <= 0x27BF)
+                || (cp >= 0x1F000 && cp <= 0x1FAFF);
     }
 }

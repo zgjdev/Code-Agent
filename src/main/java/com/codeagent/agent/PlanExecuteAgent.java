@@ -142,7 +142,6 @@ public class PlanExecuteAgent {
     private SkillContextBuffer skillContextBuffer;
     private TurnToolPolicy turnToolPolicy = TurnToolPolicy.forExplicitTask("");
     private String submittedPolicyInput = "";
-    private String planResumeKey = "";
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private static final int MAX_RETRIES_PER_STEP = 2;
     private static final int MAX_REPLANS_PER_RUN = 1;
@@ -269,26 +268,45 @@ public class PlanExecuteAgent {
         return Path.of(toolRegistry.getProjectPath()).toAbsolutePath().normalize();
     }
 
-    private Optional<PlanStateStore.ResumeCandidate> findResumablePlan(String goal) {
-        if (planStateStore == null) {
+    private String currentSessionId() {
+        return parentSession == null ? null : parentSession.sessionId();
+    }
+
+    private Optional<PlanStateStore.ActivePlanInfo> findActivePlanInfo() {
+        String sessionId = currentSessionId();
+        if (planStateStore == null || sessionId == null || sessionId.isBlank()) {
             return Optional.empty();
         }
         try {
-            return planStateStore.findResumable(planWorkspace(), planResumeKey);
+            return planStateStore.findActiveInfo(planWorkspace(), sessionId);
         } catch (SQLException e) {
-            log.warn("Failed to load resumable plan; falling back to a new plan", e);
+            log.warn("Failed to inspect active plan for session {}", sessionId, e);
+            return Optional.empty();
+        }
+    }
+
+    private Optional<PlanStateStore.ResumeCandidate> loadActivePlanForResume() {
+        String sessionId = currentSessionId();
+        if (planStateStore == null || sessionId == null || sessionId.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            return planStateStore.findActive(planWorkspace(), sessionId);
+        } catch (SQLException e) {
+            log.warn("Failed to load active plan for session {}", sessionId, e);
             return Optional.empty();
         }
     }
 
     private void savePlanSafely(ExecutionPlan plan) {
-        if (planStateStore == null || plan == null) {
+        String sessionId = currentSessionId();
+        if (planStateStore == null || plan == null || sessionId == null || sessionId.isBlank()) {
             return;
         }
         try {
-            planStateStore.savePlan(planWorkspace(), planResumeKey, plan);
+            planStateStore.savePlan(planWorkspace(), sessionId, submittedPolicyInput, plan);
         } catch (SQLException e) {
-            log.warn("Failed to save plan {}", plan.getId(), e);
+            log.warn("Failed to save plan {} for session {}", plan.getId(), sessionId, e);
         }
     }
 
@@ -394,7 +412,6 @@ public class PlanExecuteAgent {
     public String run(String userInput, String submittedUserInput) {
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
         submittedPolicyInput = submittedUserInput == null ? "" : submittedUserInput;
-        planResumeKey = submittedUserInput == null ? (userInput == null ? "" : userInput) : submittedUserInput;
         turnToolPolicy = TurnToolPolicy.fromUserInput(
                 submittedUserInput,
                 toolRegistry.isSharedBrowserSession(),
@@ -436,19 +453,80 @@ public class PlanExecuteAgent {
      * 使用Plan-and-Execute模式执行
      */
     private PlanRunOutcome runWithPlan(String goal, StreamState streamState) throws IOException {
-        Optional<PlanStateStore.ResumeCandidate> resumeCandidate = findResumablePlan(goal);
-        if (resumeCandidate.isPresent()) {
-            PlanStateStore.ResumeCandidate candidate = resumeCandidate.get();
-            interruptedRecoveryTaskIds.clear();
-            interruptedRecoveryTaskIds.addAll(candidate.interruptedTaskIds());
-            out.println("♻️ 已恢复未完成计划 " + candidate.plan().getId()
-                    + "，将跳过已完成节点并继续调度。\n");
-            return reviewAndExecutePlan(candidate.plan(), streamState, 0);
+        Optional<PlanStateStore.ActivePlanInfo> activePlan = findActivePlanInfo();
+        if (activePlan.isPresent()) {
+            PlanStateStore.ActivePlanInfo existing = activePlan.get();
+            return PlanRunOutcome.failed(
+                    "⚠️ 当前会话已有未完成计划 " + existing.planId()
+                            + "。使用 /plan resume 继续，或 /plan abandon 放弃后再创建新计划。");
         }
 
         interruptedRecoveryTaskIds.clear();
         ExecutionPlan plan = planner.createPlan(goal);
         return reviewAndExecutePlan(plan, streamState, 0);
+    }
+
+    public Optional<ActivePlanInfo> activePlanInfo() {
+        return findActivePlanInfo().map(info -> new ActivePlanInfo(
+                info.planId(),
+                info.goal(),
+                info.status(),
+                info.completedTasks(),
+                info.totalTasks()));
+    }
+
+    public String resumeActivePlan() {
+        String sessionId = currentSessionId();
+        if (planStateStore == null || sessionId == null || sessionId.isBlank()) {
+            return "⚠️ 当前没有可绑定的持久化 Session，无法恢复 Plan。";
+        }
+
+        Optional<PlanStateStore.ResumeCandidate> candidateOptional = loadActivePlanForResume();
+        if (candidateOptional.isEmpty()) {
+            return "ℹ️ 当前 Session 没有未完成 Plan。";
+        }
+
+        PlanStateStore.ResumeCandidate candidate = candidateOptional.get();
+        interruptedRecoveryTaskIds.clear();
+        interruptedRecoveryTaskIds.addAll(candidate.interruptedTaskIds());
+        submittedPolicyInput = candidate.policyInput();
+        turnToolPolicy = TurnToolPolicy.forExplicitTask(
+                submittedPolicyInput,
+                toolRegistry.isSharedBrowserSession(),
+                toolRegistry.hasAgentOwnedCurrentBrowserPage());
+
+        out.println("♻️ 恢复计划 " + candidate.plan().getId()
+                + "，将跳过已完成节点并继续调度。\n");
+        try {
+            return executePlan(candidate.plan(), new StreamState(), 0);
+        } catch (Exception e) {
+            log.error("Plan resume failed: {}", candidate.plan().getId(), e);
+            return "❌ 恢复计划失败: " + e.getMessage();
+        }
+    }
+
+    public String abandonActivePlan() {
+        String sessionId = currentSessionId();
+        if (planStateStore == null || sessionId == null || sessionId.isBlank()) {
+            return "⚠️ 当前没有可绑定的持久化 Session，无法放弃 Plan。";
+        }
+        try {
+            boolean abandoned = planStateStore.abandonActive(planWorkspace(), sessionId);
+            interruptedRecoveryTaskIds.clear();
+            return abandoned
+                    ? "✅ 已放弃当前 Session 的未完成 Plan。"
+                    : "ℹ️ 当前 Session 没有未完成 Plan。";
+        } catch (SQLException e) {
+            log.warn("Failed to abandon active plan for session {}", sessionId, e);
+            return "❌ 放弃 Plan 失败: " + e.getMessage();
+        }
+    }
+
+    public record ActivePlanInfo(String planId,
+                                 String goal,
+                                 ExecutionPlan.PlanStatus status,
+                                 int completedTasks,
+                                 int totalTasks) {
     }
 
     private PlanRunOutcome reviewAndExecutePlan(ExecutionPlan plan, StreamState streamState,

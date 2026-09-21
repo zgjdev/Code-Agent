@@ -143,7 +143,7 @@ sequenceDiagram
 
 - ReAct 与 PlanExecuteAgent（`/plan` 入口，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
 - PlanExecuteAgent 的 DAG 就绪任务先经 `ConflictAwareBatchSelector` 按任务资源声明组批；资源冲突或 `workspaceWrite` 不得进入同一批次。任务完成前必须通过确定性证据门禁和可用的 Reviewer；失败重试耗尽进入 `UNVERIFIED`，不解锁后继。
-- CLI/TUI 的 `/plan` 会把 DAG 与 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`；同一 workspace 再次提交完全相同的顶层原始 goal 时恢复最近未终结 Plan。已完成节点不重跑，上次 `RUNNING/REVIEWING` 节点恢复为 `INTERRUPTED` 后从 Task 边界重新执行；不承诺 tool-call 级 exactly-once，中断任务必须先检查已有副作用与产物再继续。
+- CLI/TUI 的 `/plan` 会把 DAG 与 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`，并通过当前持久化 Session 的 `session_id` 关联 active Plan；prompt 只表示任务内容，不作为恢复身份。同一 Session 同时最多一个 `CREATED/RUNNING` Plan，`/plan resume` 显式恢复，`/plan abandon` 显式放弃。恢复时已完成节点不重跑，上次 `RUNNING/REVIEWING` 节点转为 `INTERRUPTED` 后从 Task 边界重新执行；Session 恢复只提示，不自动执行副作用。
 - 工具授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard；策略拒绝不能通过换工具、provider 或分支绕过。
 - URL 只能来自顶层用户原文或成功 web_search 的结构化 discoveredUrls；搜索正文、reasoning、普通工具输出和回复文本都不能产生新授权。计划分支默认隔离 URL 凭据，只有声明的 DAG 后继可继承；步骤自动评审（stepReview）不改变这一步的授权继承。
 - @path/MCP resource 展开在进入 Agent 前完成；项目外绝对路径和符号链接逃逸保持原文。

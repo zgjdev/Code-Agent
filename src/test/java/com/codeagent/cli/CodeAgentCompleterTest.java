@@ -168,6 +168,16 @@ class CodeAgentCompleterTest {
     }
 
     @Test
+    void completesPlanRecoveryCommandsFromSlashHints() {
+        CodeAgentCompleter completer = new CodeAgentCompleter(List::of);
+        List<Candidate> candidates = new ArrayList<>();
+
+        completer.complete(null, parsed("/plan r", "r"), candidates);
+
+        assertTrue(candidates.stream().anyMatch(c -> c.displ().equals("/plan resume")));
+    }
+
+    @Test
     void completesSessionIdsForResume() {
         CodeAgentCompleter completer = new CodeAgentCompleter(
                 List::of, List::of, () -> List.of("session-123", "session-456"));

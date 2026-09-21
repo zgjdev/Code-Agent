@@ -73,6 +73,14 @@ public final class TuiSessionController implements AutoCloseable {
             thread.setDaemon(true);
             return thread;
         });
+        try {
+            createPlanAgent().activePlanInfo().ifPresent(info ->
+                    appendSystem("检测到未完成 Plan " + info.planId()
+                            + "（" + info.completedTasks() + "/" + info.totalTasks() + " 已完成）。"
+                            + " 使用 /plan resume 继续，或 /plan abandon 放弃。"));
+        } catch (Exception ignored) {
+            // Plan persistence is optional; TUI startup must remain usable without it.
+        }
     }
 
     public void submit(String rawInput) {
@@ -208,6 +216,24 @@ public final class TuiSessionController implements AutoCloseable {
             ui(showConfigPanel);
             return true;
         }
+        if ("/plan resume".equals(lower)) {
+            if (isTaskRunning()) {
+                appendSystem("当前任务仍在运行，请等待完成或输入 /cancel。");
+                return true;
+            }
+            appendUser(input);
+            currentTask = executor.submit(() -> runAgentTask("", RunMode.PLAN_RESUME));
+            return true;
+        }
+        if ("/plan abandon".equals(lower)) {
+            if (isTaskRunning()) {
+                appendSystem("当前任务仍在运行，请先取消或等待完成。");
+                return true;
+            }
+            PlanExecuteAgent planAgent = createPlanAgent();
+            appendSystem(planAgent.abandonActivePlan());
+            return true;
+        }
         if (lower.startsWith("/plan ")) {
             String task = input.substring(6).trim();
             if (task.isEmpty()) {
@@ -228,7 +254,7 @@ public final class TuiSessionController implements AutoCloseable {
                     /clear, /context, /memory, /memory clear, /save <事实>
                     /hitl, /hitl on, /hitl off
                     /snapshot, /snapshot status, /snapshot clean, /restore <N>
-                    /config, /plan <任务>, /cancel, /exit
+                    /config, /plan <任务>, /plan resume, /plan abandon, /cancel, /exit
                     其余管理命令请暂时在默认 CLI 模式执行。
                     """);
             return true;
@@ -245,21 +271,11 @@ public final class TuiSessionController implements AutoCloseable {
         String output;
         try {
             SnapshotService snapshots = reactAgent.getToolRegistry().getSnapshotService();
-            output = captureStdout(() -> snapshots.runTurn(mode.name().toLowerCase(), input, () -> switch (mode) {
+            String snapshotInput = mode == RunMode.PLAN_RESUME ? "/plan resume" : input;
+            output = captureStdout(() -> snapshots.runTurn(mode.name().toLowerCase(), snapshotInput, () -> switch (mode) {
                     case REACT -> reactAgent.run(input);
-                    case PLAN -> {
-                        PlanExecuteAgent planAgent = new PlanExecuteAgent(
-                                llmClient,
-                                reactAgent.getToolRegistry(),
-                                reactAgent.getMemoryManager(),
-                                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
-                                null,
-                                PipelineOptions.FULL_PRESET
-                        );
-                        planAgent.setConversationLedger(reactAgent.getConversationLedger());
-                        planAgent.enableDefaultPlanStateStore();
-                        yield planAgent.run(input);
-                    }
+                    case PLAN -> createPlanAgent().run(input);
+                    case PLAN_RESUME -> createPlanAgent().resumeActivePlan();
                 }));
         } catch (Exception e) {
             output = "执行失败: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
@@ -272,6 +288,21 @@ public final class TuiSessionController implements AutoCloseable {
             });
         }
         appendAssistant(cleanOutput(output));
+    }
+
+    private PlanExecuteAgent createPlanAgent() {
+        PlanExecuteAgent planAgent = new PlanExecuteAgent(
+                llmClient,
+                reactAgent.getToolRegistry(),
+                reactAgent.getMemoryManager(),
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                null,
+                PipelineOptions.FULL_PRESET
+        );
+        planAgent.setConversationLedger(reactAgent.getConversationLedger());
+        planAgent.setParentSession(reactAgent.getSessionHandle());
+        planAgent.enableDefaultPlanStateStore();
+        return planAgent;
     }
 
     private String formatSnapshots() {
@@ -415,7 +446,8 @@ public final class TuiSessionController implements AutoCloseable {
 
     private enum RunMode {
         REACT("ReAct"),
-        PLAN("Plan");
+        PLAN("Plan"),
+        PLAN_RESUME("Plan Resume");
 
         private final String label;
 

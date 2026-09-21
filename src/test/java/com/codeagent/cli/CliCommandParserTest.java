@@ -24,6 +24,17 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesExplicitPlanRecoveryCommands() {
+        assertEquals(CliCommandParser.CommandType.PLAN_RESUME,
+                CliCommandParser.parse("/plan resume").type());
+        assertNull(CliCommandParser.parse("/plan resume").payload());
+
+        assertEquals(CliCommandParser.CommandType.PLAN_ABANDON,
+                CliCommandParser.parse("/plan abandon").type());
+        assertNull(CliCommandParser.parse("/plan abandon").payload());
+    }
+
+    @Test
     void parsesInitProjectMemoryCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/init");
 

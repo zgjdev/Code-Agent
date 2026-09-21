@@ -1,5 +1,6 @@
 package com.codeagent.agent;
 
+import com.codeagent.history.SessionStore;
 import com.codeagent.llm.GLMClient;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.plan.ExecutionPlan;
@@ -26,47 +27,50 @@ class PlanExecuteRecoveryTest {
     Path tempDir;
 
     @Test
-    void resumesPersistedPlanWithoutReplanningOrRepeatingCompletedTask() throws Exception {
+    void resumesCurrentSessionPlanWithoutReplanningOrRepeatingCompletedTask() throws Exception {
         RecordingClient client = new RecordingClient();
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
 
-        PlanStateStore store = new PlanStateStore(tempDir.resolve("plans.db"));
-        ExecutionPlan persisted = new ExecutionPlan("plan-resume", "继续原计划");
-        Task completed = new Task("task_1", "已经完成", Task.TaskType.ANALYSIS);
-        Task pending = new Task("task_2", "只执行剩余节点", Task.TaskType.ANALYSIS, List.of("task_1"));
-        persisted.addTask(completed);
-        persisted.addTask(pending);
-        persisted.computeExecutionOrder();
-        store.savePlan(tempDir, persisted);
-        persisted.markStarted();
-        store.checkpointPlan(persisted);
-        completed.markCompleted("old-result");
-        store.checkpointTask(persisted.getId(), completed);
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            PlanStateStore store = new PlanStateStore(tempDir.resolve("plans.db"));
+            ExecutionPlan persisted = new ExecutionPlan("plan-resume", "原始复杂任务");
+            Task completed = new Task("task_1", "已经完成", Task.TaskType.ANALYSIS);
+            Task pending = new Task("task_2", "只执行剩余节点", Task.TaskType.ANALYSIS, List.of("task_1"));
+            persisted.addTask(completed);
+            persisted.addTask(pending);
+            persisted.computeExecutionOrder();
+            store.savePlan(tempDir, session.sessionId(), persisted);
+            persisted.markStarted();
+            store.checkpointPlan(persisted);
+            completed.markCompleted("old-result");
+            store.checkpointTask(persisted.getId(), completed);
 
-        FailingIfCalledPlanner planner = new FailingIfCalledPlanner(client);
-        PlanExecuteAgent agent = new PlanExecuteAgent(
-                client,
-                registry,
-                planner,
-                null,
-                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
-                new PrintStream(new ByteArrayOutputStream()),
-                PipelineOptions.PLAN_PRESET);
-        agent.setPlanStateStore(store);
+            FailingIfCalledPlanner planner = new FailingIfCalledPlanner(client);
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    client,
+                    registry,
+                    planner,
+                    null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()),
+                    PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(store);
+            agent.setParentSession(session);
 
-        String result = agent.run("继续原计划");
+            String result = agent.resumeActivePlan();
 
-        assertTrue(result.contains("计划执行完成"), result);
-        assertEquals(0, planner.createCalls.get(), "恢复已有 DAG 时不应重新规划");
-        assertEquals(1, client.snapshots.size(), "只应执行未完成节点");
-        String prompt = client.snapshots.get(0).stream()
-                .map(message -> message.content() == null ? "" : message.content())
-                .reduce("", (left, right) -> left + "\n" + right);
-        assertTrue(prompt.contains("task_2"), prompt);
-        assertFalse(prompt.contains("当前任务：task_1"), prompt);
-        assertTrue(store.findResumable(tempDir, "继续原计划").isEmpty(),
-                "完成后的 Plan 不应继续作为恢复候选");
+            assertTrue(result.contains("计划执行完成"), result);
+            assertEquals(0, planner.createCalls.get(), "恢复已有 DAG 时不应重新规划");
+            assertEquals(1, client.snapshots.size(), "只应执行未完成节点");
+            String prompt = joinedPrompt(client.snapshots.get(0));
+            assertTrue(prompt.contains("task_2"), prompt);
+            assertFalse(prompt.contains("当前任务：task_1"), prompt);
+            assertTrue(store.findActive(tempDir, session.sessionId()).isEmpty(),
+                    "完成后的 Plan 不应继续作为 active Plan");
+        }
     }
 
     @Test
@@ -75,16 +79,106 @@ class PlanExecuteRecoveryTest {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
 
-        PlanStateStore store = new PlanStateStore(tempDir.resolve("plans.db"));
-        ExecutionPlan persisted = new ExecutionPlan("plan-interrupted", "恢复中断节点");
-        Task interrupted = new Task("task_1", "修改已有产物", Task.TaskType.ANALYSIS);
-        persisted.addTask(interrupted);
-        persisted.computeExecutionOrder();
-        store.savePlan(tempDir, persisted);
-        persisted.markStarted();
-        store.checkpointPlan(persisted);
-        interrupted.markStarted();
-        store.checkpointTask(persisted.getId(), interrupted);
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            PlanStateStore store = new PlanStateStore(tempDir.resolve("plans.db"));
+            ExecutionPlan persisted = new ExecutionPlan("plan-interrupted", "恢复中断节点");
+            Task interrupted = new Task("task_1", "修改已有产物", Task.TaskType.ANALYSIS);
+            persisted.addTask(interrupted);
+            persisted.computeExecutionOrder();
+            store.savePlan(tempDir, session.sessionId(), persisted);
+            persisted.markStarted();
+            store.checkpointPlan(persisted);
+            interrupted.markStarted();
+            store.checkpointTask(persisted.getId(), interrupted);
+
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    client,
+                    registry,
+                    new FailingIfCalledPlanner(client),
+                    null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()),
+                    PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(store);
+            agent.setParentSession(session);
+
+            agent.resumeActivePlan();
+
+            String prompt = joinedPrompt(client.snapshots.get(0));
+            assertTrue(prompt.contains("进程中断恢复"), prompt);
+            assertTrue(prompt.contains("不要假设上次副作用未发生"), prompt);
+        }
+    }
+
+    @Test
+    void newPlanIsRejectedWhileSessionAlreadyHasActivePlan() throws Exception {
+        RecordingClient client = new RecordingClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            PlanStateStore store = new PlanStateStore(tempDir.resolve("plans.db"));
+            store.savePlan(tempDir, session.sessionId(), singleTaskPlan("active-plan", "已有任务"));
+
+            FailingIfCalledPlanner planner = new FailingIfCalledPlanner(client);
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    client,
+                    registry,
+                    planner,
+                    null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()),
+                    PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(store);
+            agent.setParentSession(session);
+
+            String result = agent.run("一个全新的任务");
+
+            assertTrue(result.contains("/plan resume"), result);
+            assertTrue(result.contains("/plan abandon"), result);
+            assertEquals(0, planner.createCalls.get(), "存在 active Plan 时不应创建第二个 Plan");
+        }
+    }
+
+    @Test
+    void abandonActivePlanAllowsNewPlanAfterwards() throws Exception {
+        RecordingClient client = new RecordingClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            PlanStateStore store = new PlanStateStore(tempDir.resolve("plans.db"));
+            store.savePlan(tempDir, session.sessionId(), singleTaskPlan("active-plan", "已有任务"));
+
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    client,
+                    registry,
+                    new FailingIfCalledPlanner(client),
+                    null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()),
+                    PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(store);
+            agent.setParentSession(session);
+
+            String result = agent.abandonActivePlan();
+
+            assertTrue(result.contains("已放弃"), result);
+            assertTrue(store.findActive(tempDir, session.sessionId()).isEmpty());
+        }
+    }
+
+    @Test
+    void durableRecoveryCommandsRequireParentSession() throws Exception {
+        RecordingClient client = new RecordingClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
 
         PlanExecuteAgent agent = new PlanExecuteAgent(
                 client,
@@ -94,15 +188,23 @@ class PlanExecuteRecoveryTest {
                 (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
                 new PrintStream(new ByteArrayOutputStream()),
                 PipelineOptions.PLAN_PRESET);
-        agent.setPlanStateStore(store);
+        agent.setPlanStateStore(new PlanStateStore(tempDir.resolve("plans.db")));
 
-        agent.run("恢复中断节点");
+        assertTrue(agent.resumeActivePlan().contains("持久化 Session"));
+        assertTrue(agent.abandonActivePlan().contains("持久化 Session"));
+    }
 
-        String prompt = client.snapshots.get(0).stream()
+    private static ExecutionPlan singleTaskPlan(String id, String goal) {
+        ExecutionPlan plan = new ExecutionPlan(id, goal);
+        plan.addTask(new Task("task_1", "分析", Task.TaskType.ANALYSIS));
+        assertTrue(plan.computeExecutionOrder());
+        return plan;
+    }
+
+    private static String joinedPrompt(List<LlmClient.Message> messages) {
+        return messages.stream()
                 .map(message -> message.content() == null ? "" : message.content())
                 .reduce("", (left, right) -> left + "\n" + right);
-        assertTrue(prompt.contains("进程中断恢复"), prompt);
-        assertTrue(prompt.contains("不要假设上次副作用未发生"), prompt);
     }
 
     private static final class FailingIfCalledPlanner extends Planner {
@@ -115,7 +217,7 @@ class PlanExecuteRecoveryTest {
         @Override
         public ExecutionPlan createPlan(String goal) {
             createCalls.incrementAndGet();
-            throw new AssertionError("恢复路径不应重新调用 Planner");
+            throw new AssertionError("该路径不应调用 Planner");
         }
     }
 

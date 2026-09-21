@@ -363,14 +363,15 @@ prompts/modes/
 | 入口 | 行为 | 源码位置 |
 |---|---|---|
 | CLI `/plan`（无参数） | 置「下一个任务用计划模式」标志，下一条输入才触发；执行完自动复位 | 解析 `CliCommandParser.java:128-130`；置标志 `Main.java:659-663`；消费并复位 `Main.java:992-1014` |
-| CLI `/plan <任务>` | 直接把 payload 当作本次输入，立即走计划模式 | 解析 `CliCommandParser.java:132-134`；同一分支 `Main.java:659-666` → `Main.java:992` |
-| TUI `/plan <任务>` | 立即执行，**固定自动审阅（EXECUTE），不弹交互审阅**；不接受无参数形式 | `TuiSessionController.java:211-224`、`:250-261` |
+| CLI `/plan <任务>` | 直接把 payload 当作本次输入，立即走计划模式 | `CliCommandParser` 的 `SWITCH_PLAN` 分支 |
+| CLI `/plan resume` / `/plan abandon` | 按当前持久化 Session 确定性恢复 / 放弃 active Plan，不把子命令当 prompt | `CliCommandParser` 的 `PLAN_RESUME` / `PLAN_ABANDON` 分支，`Main` 直接调用 Plan 管理方法 |
+| TUI `/plan <任务>` / `resume` / `abandon` | 普通 Plan 固定自动审阅（EXECUTE）；恢复/放弃同样按当前 Session 处理 | `TuiSessionController.handleCommand` |
 | Runtime API / 后台 DurableTask | **绕过 DAG**，走 `runHeadlessTask` → 普通 `Agent`（ReAct） | `Main.java:1082-1084`、`:1119-1130`、`:1132-1134` |
 
 三个 CLI/TUI 差异必须知道：
 
 1. **CLI 的审阅是真交互**（`Main.java:1551-1625`），TUI 传的是固定 `EXECUTE`（`TuiSessionController.java:255`），命令行的 `--headless` 路径则根本不经过这里。
-2. **TUI 没有调用 `setParentSession`**（对比 `Main.java:1305`、`:1321`），所以 TUI 下计划任务不会写子会话记录；CLI 下会（见 9.4）。
+2. **CLI 与 TUI 都会把 `reactAgent.getSessionHandle()` 注入 `PlanExecuteAgent`**，因此两条入口都能把 Plan 绑定到当前 Session，也都会生成任务级 child session；两者仍有计划审阅交互差异（见 2.2、9.4）。
 3. 计划模式一旦进入，工具集仍是 `reactAgent.getToolRegistry()` 那一份（`Main.java:1298`、`:1314`），不是新建的。
 
 生产代码里构造 `PlanExecuteAgent` 的地方有**三处**，且三处都硬编码 `FULL_PRESET`：
@@ -383,7 +384,7 @@ prompts/modes/
 
 ## 1.5 边界：这个模块不覆盖什么
 
-- **计划现在有独立的持久化与 Task 边界恢复**。CLI/TUI 的 `/plan` 会启用 `PlanStateStore`，把 DAG、资源声明、验收条件、证据要求和 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`。同一 workspace 再次提交完全相同的顶层原始 goal 时，恢复最近 `CREATED/RUNNING` Plan；`COMPLETED` 节点跳过，遗留 `RUNNING/REVIEWING` 转成 `INTERRUPTED` 后从整个 Task 边界重试。它**不是** tool-call 级续跑，也不承诺外部副作用 exactly-once。Runtime API / `DurableTaskManager` 仍是另一套后台队列机制。
+- **计划现在有独立的持久化与 Task 边界恢复**。CLI/TUI 的 `/plan` 会启用 `PlanStateStore`，把 DAG、资源声明、验收条件、证据要求和 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`，并用当前持久化 Session 的 `session_id` 关联 active Plan。prompt 只表示任务内容，不再承担恢复身份；同一 Session 同时最多一个 `CREATED/RUNNING` Plan。Session 恢复只提示，用户通过 `/plan resume` 显式继续或 `/plan abandon` 放弃；继续时 `COMPLETED` 节点跳过，遗留 `RUNNING/REVIEWING` 转成 `INTERRUPTED` 后从整个 Task 边界重试。它**不是** tool-call 级续跑，也不承诺外部副作用 exactly-once。Runtime API / `DurableTaskManager` 仍是另一套后台队列机制。
 - **不做跨进程/分布式调度**。就是单进程内的一个 `ExecutorService`。
 - **不做资源冲突检测**。两个任务写同一个文件但模型没建边，代码不会拦。
 - **不做任务级重试**（除了审查驱动的重跑）。任务失败只有两个走向：整个计划重新规划，或者保留已完成结果继续往下走（见 8.1）。
@@ -414,19 +415,16 @@ prompts/modes/
 
 ## 2.1 `/plan` = 人工计划门 + 步骤自动评审串联
 
-`CliCommandParser` 只有两个分支产出 `SWITCH_PLAN`：
+`CliCommandParser` 现在把“创建新 Plan”和“管理当前 Session 的 active Plan”拆成确定性命令：
 
 ```java
-if (trimmed.equalsIgnoreCase("/plan")) {
-    return new ParsedCommand(CommandType.SWITCH_PLAN, null);
-}
-
-if (trimmed.regionMatches(true, 0, "/plan ", 0, 6)) {
-    return new ParsedCommand(CommandType.SWITCH_PLAN, trimmed.substring(6).trim());
-}
+/plan             -> SWITCH_PLAN(null)
+/plan <任务>      -> SWITCH_PLAN(payload)
+/plan resume      -> PLAN_RESUME
+/plan abandon     -> PLAN_ABANDON
 ```
 
-（`CliCommandParser.java:128-134`。）裸 `/plan` 表示「下一条任务走计划模式」，带 payload 的 `/plan <任务>` 表示「直接执行这条任务」。
+裸 `/plan` 表示「下一条任务走计划模式」，`/plan <任务>` 表示直接创建新 Plan；`resume` / `abandon` 是保留子命令，不会作为 Planner prompt 下发。
 
 CLI 的派发条件是「上一条设了标志 **或** 本次命令是 `SWITCH_PLAN`」（`Main.java:992`），两条路最终都走 `createPlanAgent(...)` → `FULL_PRESET`。
 
@@ -476,7 +474,7 @@ src/test/java/com/codeagent/agent/PipelineOptionsTest.java:24:        assertTrue
 | 审查 + 重试上限 | `applyStepReview`（`MAX_RETRIES_PER_STEP`） |
 | 无依赖步骤并行 | `executeTaskBatch` 的并行分支 |
 | 步骤级 URL 凭据隔离 | `forkWithTrustedUrls` |
-| child session 审计 | `PlanExecuteAgent.executeTask`（注意：TUI 不注入 `parentSession`，见 9.4） |
+| child session 审计 | `PlanExecuteAgent.executeTask`；CLI/TUI 生产入口都会注入当前 `parentSession`，见 9.4 |
 
 `/team` 现在会走到解析器末尾的兜底分支（`CliCommandParser.java:334-336`）：
 
@@ -893,7 +891,7 @@ private record TaskExecutionResult(Task task, String result, boolean streamedOut
 并行批次里每个任务有**两个隔离机制**（`PlanExecuteAgent.java:513-566`、`:571-601`）：
 
 - **输出隔离**：每个任务一个 `ByteArrayOutputStream` + `PrintStream`，批内并行时互不交错；批次结束后按 `executableTasks` 的顺序统一 flush 到真实 `out`（`:553-560`）。所以用户看到的是「按任务顺序连续输出」，而不是「谁先跑完谁先打印」。
-- **会话隔离（仅注入 `parentSession` 时）**：任务开始时 `parentSession.createChild("plan", "task:" + id)`，任务结束 `recordChildResult` 并关闭（`:581-595`）。child session 句柄存在 `ThreadLocal` 里（`:128`），所以并行线程各自指向自己的 child。当前 CLI 会注入，TUI 不会注入，因此 TUI 没有任务级 child session（见 9.4）。
+- **会话隔离（注入 `parentSession` 时）**：任务开始时 `parentSession.createChild("plan", "task:" + id)`，任务结束 `recordChildResult` 并关闭。child session 句柄存在 `ThreadLocal` 里，所以并行线程各自指向自己的 child。当前 CLI 与 TUI 生产入口都会注入当前 `reactAgent` Session，因此两者都有任务级 child session。
 
 **注意 `finally` 里做了两件事**：`taskToolPolicy.releaseBrowserLease()`（`:599`）——浏览器租约必须成对释放，否则下一个任务拿不到浏览器；以及 `childSession.remove()` 防 `ThreadLocal` 泄漏（线程池里的线程会被复用）。
 
@@ -936,7 +934,7 @@ private record TaskExecutionResult(Task task, String result, boolean streamedOut
 | 追加 Skill 正文 | 从 `SkillContextBuffer` drain | `:653` |
 | 建独立消息列表 | 每个任务一份，不共享 | `:655-664` |
 | 建预算 | `AgentBudget.fromLlmClient`，**每任务一个** | `:668` |
-| 建子会话（CLI 下） | `parentSession.createChild("plan", "task:<id>")`，用 `ThreadLocal` 存放 | `:581-583`、`:128` |
+| 建子会话（CLI/TUI 持久化 Session 下） | `parentSession.createChild("plan", "task:<id>")`，用 `ThreadLocal` 存放 | `PlanExecuteAgent.executeTask` |
 
 循环体每轮：
 
@@ -952,7 +950,7 @@ private record TaskExecutionResult(Task task, String result, boolean streamedOut
 
 **（2）多轮工具调用的并发。** `executeToolCalls`（`:898-919`）把工具调用交给 `taskToolPolicy.execute` → `ToolRegistry.executeTools`。工具层的并发规则是：只有一个调用时内联执行；**批次里含任何浏览器工具就整批串行**；否则开固定上限的线程池（`ToolRegistry.java:1310-1336`）。此外，`TurnToolPolicy` 在每个任务 fork 时**共享同一个浏览器租约协调器**（`TurnToolPolicy.java:181` 复用 `browserLeaseCoordinator`），任务申请到租约后在整个任务生命周期结束时才释放（`PlanExecuteAgent.java:599`）。所以**并行批次的多个任务里，需要浏览器的那些会互相排队**——这是有意的，避免共享页面状态被交叉覆盖。
 
-**（3）子会话只在 CLI 路径存在。** `parentSession` 由 `Main.java:1321` 注入；TUI 没有注入，`childSession.get()` 恒为 `null`，`persistChildMessage` 直接返回（`:950-970`）。所以「计划任务的消息持久化粒度到任务级」这个能力**只在 CLI 下生效**。
+**（3）子会话依赖持久化父 Session。** CLI 与 TUI 生产入口现在都会把 `reactAgent.getSessionHandle()` 注入 `PlanExecuteAgent`，因此两条入口都能把任务消息写到独立 child session。只有直接构造 Agent 且未设置 `parentSession` 的测试/嵌入式调用会退化为无 child session。
 
 ## 6.2 简报：`StepBriefing` 渲染了什么
 
@@ -1413,10 +1411,10 @@ TurnToolPolicy activeToolPolicy = turnToolPolicy == null
 
 | 入口 | `setParentSession`？ | 结果 |
 |---|---|---|
-| CLI（`Main.java:1305`、`:1321`） | 是 | 每个任务一个 child session，含完整消息流水 |
-| TUI（`TuiSessionController.java:252-260`） | **否** | 没有 child session，只有共享账本里的条目 |
+| CLI | 是 | 每个任务一个 child session，含完整消息流水 |
+| TUI | 是 | 每个任务一个 child session，含完整消息流水 |
 
-所以 CLI 与 TUI 在「可审计粒度」上也不等价：TUI 下拿不到任务级的独立会话文件。这和 2.2 的计划门接线差异是两个独立问题。
+CLI 与 TUI 在任务级会话审计上现在一致；仍然不一致的是计划门交互方式：CLI 有人工计划门，TUI 仍固定 `EXECUTE`。
 
 **一处口径不一致**：审查侧写账本用的是**旧模式名 `"team"`**。`SubAgentStepReviewer` 每次 `review` 之后调 `reviewer.clearHistory()`（`SubAgentStepReviewer.java:26`），而 `SubAgent.clearHistory` 会追加一条 `history_clear` 事件，其中 mode 硬编码为 `"team"`：
 
@@ -2108,7 +2106,7 @@ Reviewer 的本质是一次 LLM 调用，输出只能是文本；「结构化」
 `mode` 恒为 `plan`，actor 有三类：`plan-agent`（用户输入/最终结果/错误/取消）、`planner`（提示词/请求/响应）、`task:<id>`（每个任务的完整消息流水）。账本是 append-only 原始流水，压缩只改发送视图、不回写账本。
 
 **Q：CLI 和 TUI 在审计上一样吗？**
-不一样。CLI 注入了 `parentSession`，每个任务有独立 child session；TUI 没注入，只有共享账本里的条目。
+任务级 child session 这一点现在一致：两者都会注入当前持久化 `parentSession`。计划门交互仍不一样：CLI 有人工确认，TUI 固定自动执行。
 
 **Q：有一处口径不一致吗？**
 有。审查侧 `SubAgent.clearHistory` 写的 ledger mode 硬编码是 `"team"`——`/team` 已删除但字符串留下了。所以每次步骤审查都会写一条 mode 为 `team` 的事件。
@@ -2150,7 +2148,7 @@ Reviewer 的本质是一次 LLM 调用，输出只能是文本；「结构化」
 | （隐含）计划审阅与补充要求 | `PlanReviewHandler` / `PlanReviewDecision` — `PlanExecuteAgent.java:92-105`；决策循环 — `:364-389`；CLI 逐键交互 — `Main.java:1551-1625`；文本决策解析 `PlanReviewInputParser` |
 | （隐含）失败重新规划 | `Planner.replan` — `Planner.java:186-205`；进度阈值与封顶 — `PlanExecuteAgent.java:441-451` |
 | （隐含）节点内多轮工具调用 | `executeTaskWithPolicy` 的 `while (true)` — `PlanExecuteAgent.java:670-792`；预算兜底收尾 `finalizePartialTask` — `:797-843`；预算三条件 — `AgentBudget.java:127-138` |
-| （隐含）任务级可观测性 | CLI 下每任务开子会话 — `PlanExecuteAgent.java:581-584`、`:950-970`；CLI 装配 `parentSession` — `Main.java:1305`、`:1321`（**TUI 未装配**，`TuiSessionController.java:252-260`） |
+| （隐含）任务级可观测性 | 每任务开 child session；CLI 与 TUI 都把当前 `reactAgent` Session 注入 `PlanExecuteAgent` |
 
 **这条句子完全成立，不需要修订。** 唯一要主动补充的口径是「4 路并行」的前提——见 12.1。
 
@@ -2179,7 +2177,7 @@ Reviewer 的本质是一次 LLM 调用，输出只能是文本；「结构化」
 | 无依赖步骤按批并行（最多 4 并发） | `PlanExecuteAgent.java:490-566`；并发路径测试 — `PlanExecuteAgentTest.java:405` |
 | URL 凭据按 DAG 边隔离 | 顶层策略来自提交态原文 — `PlanExecuteAgent.java:319-322`；每任务 `forkWithTrustedUrls` — `:574-578`；只继承直接依赖 — `:1180-1191`；测试 — `PlanExecuteAgentTest.java:293` |
 | 子 Agent 运行时 | `SubAgent` 的角色化 ReAct 循环（现服务 Reviewer）— `SubAgent.java:502-510`、`:557-562` |
-| child session 审计 | **CLI 路径**的任务级 child session — `PlanExecuteAgent.java:581-584`、`:950-970`；CLI 装配 — `Main.java:1305`、`:1321`；TUI 未注入，见 9.4 |
+| child session 审计 | CLI/TUI 都在任务执行时创建独立 child session；两条入口都注入当前持久化父 Session |
 
 ---
 
@@ -2218,7 +2216,7 @@ Reviewer 的本质是一次 LLM 调用，输出只能是文本；「结构化」
 
 ## 17.2 已实现 / 未实现
 
-**已经实现的**：唯一入口 `/plan`（两个环节串联）、规划阶段不暴露工具、简单目标零调用快速路径、计划 JSON 解析与稳定重编号、解析期环检测、按依赖的分层调度、单任务串行与多任务并行两条路径、并行输出缓冲与按序 flush、步骤级上下文统一渲染（全文注入）、结构化审查结论、fail-closed 的结论解析、三级回退的意见提取、按任务的审查重试闭环、每任务独立的 URL 凭据分支与直接依赖继承、CLI 路径的每任务 child session 审计、补充要求重建工具策略、失败重规划（含次数封顶与不丢账）、Plan DAG / Task 状态 SQLite checkpoint 与 Task 边界恢复、CLI 与 TUI 两条接线、`/team` 的 CLI 层拒绝（有测试钉住）。TUI 不注入 `parentSession`，因此仍没有任务级 child session，但 DAG 状态恢复不依赖 child session。
+**已经实现的**：唯一入口 `/plan`（两个环节串联）、规划阶段不暴露工具、简单目标零调用快速路径、计划 JSON 解析与稳定重编号、解析期环检测、按依赖的分层调度、单任务串行与多任务并行两条路径、并行输出缓冲与按序 flush、步骤级上下文统一渲染（全文注入）、结构化审查结论、fail-closed 的结论解析、三级回退的意见提取、按任务的审查重试闭环、每任务独立的 URL 凭据分支与直接依赖继承、CLI/TUI 的每任务 child session 审计、补充要求重建工具策略、失败重规划（含次数封顶与不丢账）、Plan DAG / Task 状态 SQLite checkpoint、Session-bound active Plan、`/plan resume` / `/plan abandon` 与 Task 边界恢复、CLI 与 TUI 两条接线、`/team` 的 CLI 层拒绝（有测试钉住）。
 
 **尚未实现的**：「未验证」独立终态、确定性证据门禁（编译/测试/静态检查喂给 Reviewer）、重试复用执行上下文、重试路径的取消检查、审查反馈驱动的重规划（现在只把反馈当文本喂回去）、tool-call 级精确续跑 / exactly-once 副作用恢复、共享黑板 / 结构化 Artifact、远程 Worker / 消息队列 / 租约心跳、CLI 侧关闭步骤评审的开关、三处 ReAct 循环的公共内核抽取。
 

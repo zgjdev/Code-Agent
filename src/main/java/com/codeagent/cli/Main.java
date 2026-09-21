@@ -34,6 +34,7 @@ import com.codeagent.mcp.McpServerManager;
 import com.codeagent.mcp.McpServerStatus;
 import com.codeagent.mcp.mention.AtMentionExpander;
 import com.codeagent.plan.ExecutionPlan;
+import com.codeagent.plan.PlanStateStore;
 import com.codeagent.rag.CodeIndex;
 import com.codeagent.hitl.ApprovalPolicy;
 import com.codeagent.policy.AuditLog;
@@ -362,6 +363,9 @@ public class Main {
                 reactAgent.attachSession(initialSession);
                 activeSession.set(initialSession);
                 sessionIdCandidates.set(sessionIds(openedSessionStore, workspace));
+                startupNote = appendStartupNote(
+                        startupNote,
+                        activePlanNotice(workspace, initialSession));
             } catch (Exception e) {
                 startupNote = appendStartupNote(startupNote,
                         "可恢复会话初始化失败，当前仅使用内存上下文: " + e.getMessage());
@@ -537,7 +541,12 @@ public class Main {
                             SessionStore.SessionHandle previous = activeSession.getAndSet(prepared);
                             closeSessionQuietly(previous);
                             sessionIdCandidates.set(sessionIds(sessionStore, workspace));
-                            ui.println("✅ 已恢复会话 " + prepared.sessionId() + "\n");
+                            ui.println("✅ 已恢复会话 " + prepared.sessionId());
+                            String planNotice = activePlanNotice(workspace, prepared);
+                            if (!planNotice.isBlank()) {
+                                ui.println(planNotice);
+                            }
+                            ui.println();
                         } catch (Exception e) {
                             closeSessionQuietly(prepared);
                             ui.println("❌ 恢复会话失败，当前会话保持不变: " + e.getMessage() + "\n");
@@ -653,6 +662,43 @@ public class Main {
                         } else {
                             reactAgent.getMemoryManager().storeFact(saveRequest.fact(), saveRequest.scope());
                             ui.println("💾 已保存到长期记忆(" + saveRequest.scope() + "): " + saveRequest.fact() + "\n");
+                        }
+                        continue;
+                    }
+                    case PLAN_RESUME -> {
+                        nextTaskUsePlanMode = false;
+                        LlmClient activeClient = llmClient;
+                        PlanExecuteAgent planAgent = createPlanAgent(
+                                activeClient, reactAgent, terminal, lineReader, ui);
+                        planAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
+                        planAgent.setSkillRegistry(skillRegistry);
+                        planAgent.setSkillContextBuffer(skillContextBuffer);
+                        SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
+                        renderer.updateStatus(statusInfo(
+                                reactAgent, mcpServerManager, skillRegistry, "plan"));
+                        String response = runWithCancelSupport(
+                                terminal,
+                                ui,
+                                () -> snapshotService.runTurn(
+                                        "plan",
+                                        "/plan resume",
+                                        planAgent::resumeActivePlan));
+                        renderer.updateStatus(statusInfo(
+                                reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        if (response != null && !response.isBlank()) {
+                            ui.println(response);
+                            ui.println();
+                        }
+                        continue;
+                    }
+                    case PLAN_ABANDON -> {
+                        nextTaskUsePlanMode = false;
+                        PlanExecuteAgent planAgent = createPlanAgent(
+                                llmClient, reactAgent, terminal, lineReader, ui);
+                        String response = planAgent.abandonActivePlan();
+                        if (response != null && !response.isBlank()) {
+                            ui.println(response);
+                            ui.println();
                         }
                         continue;
                     }
@@ -1047,6 +1093,26 @@ public class Main {
     static boolean isAutomaticSessionResumeEnabled(String propertyValue, String environmentValue) {
         String configured = firstNonBlank(propertyValue, environmentValue);
         return configured == null || !"off".equalsIgnoreCase(configured.trim());
+    }
+
+    static String activePlanNotice(Path workspace, SessionStore.SessionHandle session) {
+        if (session == null) {
+            return "";
+        }
+        try {
+            PlanStateStore store = PlanStateStore.openDefault();
+            Optional<PlanStateStore.ActivePlanInfo> active =
+                    store.findActiveInfo(workspace, session.sessionId());
+            if (active.isEmpty()) {
+                return "";
+            }
+            PlanStateStore.ActivePlanInfo plan = active.get();
+            return "检测到未完成 Plan " + plan.planId()
+                    + "（" + plan.completedTasks() + "/" + plan.totalTasks() + " 已完成）。"
+                    + " 使用 /plan resume 继续，或 /plan abandon 放弃。";
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private static void closeSessionNormally(SessionStore.SessionHandle handle, String reason) {
@@ -1816,6 +1882,8 @@ public class Main {
                 new SlashCommandHint("/compact", "/compact", "手动压缩当前对话历史"),
                 new SlashCommandHint("/sessions", "/sessions", "列出当前项目的持久化会话"),
                 new SlashCommandHint("/resume ", "/resume <session-id>", "恢复指定会话"),
+                new SlashCommandHint("/plan resume", "/plan resume", "继续当前 Session 的未完成 Plan"),
+                new SlashCommandHint("/plan abandon", "/plan abandon", "放弃当前 Session 的未完成 Plan"),
                 new SlashCommandHint("/new", "/new", "关闭当前会话并创建新会话"),
                 new SlashCommandHint("/init", "/init", "生成项目级记忆 CODEAGENT.md"),
                 new SlashCommandHint("/init --force", "/init --force", "重写项目级记忆 CODEAGENT.md"),

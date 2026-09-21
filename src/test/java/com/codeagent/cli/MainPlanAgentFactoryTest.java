@@ -4,6 +4,7 @@ import com.codeagent.agent.Agent;
 import com.codeagent.agent.PipelineOptions;
 import com.codeagent.agent.PlanExecuteAgent;
 import com.codeagent.history.ConversationLedger;
+import com.codeagent.history.SessionStore;
 import com.codeagent.llm.GLMClient;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.memory.MemoryManager;
@@ -30,16 +31,23 @@ class MainPlanAgentFactoryTest {
         reactAgent.setConversationLedger(ledger);
         MemoryManager sharedMemoryManager = reactAgent.getMemoryManager();
 
-        PlanExecuteAgent planAgent = Main.createPlanAgent(
-                llmClient,
-                reactAgent,
-                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.cancel()
-        );
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("session-store"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            reactAgent.attachSession(session);
 
-        assertSame(sharedToolRegistry, readField(planAgent, "toolRegistry"));
-        assertSame(sharedMemoryManager, readField(planAgent, "memoryManager"));
-        assertSame(ledger, readField(planAgent, "conversationLedger"));
-        assertSame(ledger, readField(readField(planAgent, "planner"), "conversationLedger"));
+            PlanExecuteAgent planAgent = Main.createPlanAgent(
+                    llmClient,
+                    reactAgent,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.cancel()
+            );
+
+            assertSame(sharedToolRegistry, readField(planAgent, "toolRegistry"));
+            assertSame(sharedMemoryManager, readField(planAgent, "memoryManager"));
+            assertSame(ledger, readField(planAgent, "conversationLedger"));
+            assertSame(ledger, readField(readField(planAgent, "planner"), "conversationLedger"));
+            assertSame(session, readField(planAgent, "parentSession"));
+        }
     }
 
     @Test

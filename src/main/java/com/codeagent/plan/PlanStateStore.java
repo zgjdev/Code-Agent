@@ -15,9 +15,9 @@ import java.util.*;
 /**
  * SQLite-backed checkpoint store for Plan-and-Execute DAG state.
  *
- * <p>The recovery boundary is a whole Task. Model/tool sub-steps remain recorded
- * by SessionStore/ConversationLedger, while this store owns the resumable DAG
- * structure and scheduling state.</p>
+ * <p>Plan identity is bound to the durable parent Session. Prompt text is task
+ * content, not recovery identity. Legacy prompt-bound rows remain readable at
+ * the schema level but are never guessed into a Session.</p>
  */
 public final class PlanStateStore {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -41,6 +41,7 @@ public final class PlanStateStore {
             throw new SQLException("无法创建 Plan 状态目录: " + e.getMessage(), e);
         }
         initTables();
+        migrateSchema();
         setPosixPermissionsIfSupported(this.dbPath, FILE_PERMISSIONS);
     }
 
@@ -59,23 +60,42 @@ public final class PlanStateStore {
         return dbPath;
     }
 
+    /**
+     * Legacy/unbound save path retained only for callers that do not have a
+     * durable parent Session. Such plans are deliberately not resumable.
+     */
     public synchronized void savePlan(Path workspace, ExecutionPlan plan) throws SQLException {
-        savePlan(workspace, plan == null ? null : plan.getGoal(), plan);
+        savePlan(workspace, null, "", plan);
     }
 
-    public synchronized void savePlan(Path workspace, String resumeKey, ExecutionPlan plan) throws SQLException {
+    public synchronized void savePlan(Path workspace, String sessionId, ExecutionPlan plan) throws SQLException {
+        savePlan(workspace, sessionId, plan == null ? "" : plan.getGoal(), plan);
+    }
+
+    /**
+     * Persists a Plan and binds it to one durable parent Session. policyInput is
+     * stored only to reconstruct the original top-level authorization boundary;
+     * it is never used as Plan identity.
+     */
+    public synchronized void savePlan(Path workspace,
+                                      String sessionId,
+                                      String policyInput,
+                                      ExecutionPlan plan) throws SQLException {
         Objects.requireNonNull(plan, "plan");
+        String normalizedSessionId = normalizeSessionId(sessionId);
         String now = Instant.now().toString();
         try (Connection connection = openConnection()) {
             connection.setAutoCommit(false);
             try {
                 try (PreparedStatement ps = connection.prepareStatement("""
                         INSERT INTO plan_runs (
-                            id, workspace, resume_key, goal, status, summary, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            id, workspace, session_id, resume_key, policy_input,
+                            goal, status, summary, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(id) DO UPDATE SET
                             workspace = excluded.workspace,
-                            resume_key = excluded.resume_key,
+                            session_id = excluded.session_id,
+                            policy_input = excluded.policy_input,
                             goal = excluded.goal,
                             status = excluded.status,
                             summary = excluded.summary,
@@ -83,12 +103,19 @@ public final class PlanStateStore {
                         """)) {
                     ps.setString(1, plan.getId());
                     ps.setString(2, normalizeWorkspace(workspace));
-                    ps.setString(3, resumeKey == null ? "" : resumeKey);
-                    ps.setString(4, plan.getGoal());
-                    ps.setString(5, plan.getStatus().name());
-                    ps.setString(6, plan.getSummary());
-                    ps.setString(7, now);
-                    ps.setString(8, now);
+                    if (normalizedSessionId == null) {
+                        ps.setNull(3, Types.VARCHAR);
+                    } else {
+                        ps.setString(3, normalizedSessionId);
+                    }
+                    // Keep the old NOT NULL column populated for schema compatibility only.
+                    ps.setString(4, "");
+                    ps.setString(5, policyInput == null ? "" : policyInput);
+                    ps.setString(6, plan.getGoal());
+                    ps.setString(7, plan.getStatus().name());
+                    ps.setString(8, plan.getSummary());
+                    ps.setString(9, now);
+                    ps.setString(10, now);
                     ps.executeUpdate();
                 }
 
@@ -151,27 +178,79 @@ public final class PlanStateStore {
         }
     }
 
-    public synchronized Optional<ResumeCandidate> findResumable(Path workspace, String resumeKey) throws SQLException {
-        String workspaceKey = normalizeWorkspace(workspace);
-        String exactResumeKey = resumeKey == null ? "" : resumeKey;
+    /**
+     * Read-only lookup used for status prompts and duplicate-plan prevention.
+     * It must not reinterpret RUNNING tasks as interrupted.
+     */
+    public synchronized Optional<ActivePlanInfo> findActiveInfo(Path workspace, String sessionId)
+            throws SQLException {
+        String normalizedSessionId = normalizeSessionId(sessionId);
+        if (normalizedSessionId == null) {
+            return Optional.empty();
+        }
         try (Connection connection = openConnection();
              PreparedStatement ps = connection.prepareStatement("""
-                     SELECT id, goal, status, summary
+                     SELECT r.id, r.goal, r.status,
+                            SUM(CASE WHEN t.status = ? THEN 1 ELSE 0 END) AS completed_tasks,
+                            COUNT(t.task_id) AS total_tasks
+                     FROM plan_runs r
+                     LEFT JOIN plan_tasks t ON t.plan_id = r.id
+                     WHERE r.workspace = ?
+                       AND r.session_id = ?
+                       AND r.status IN (?, ?)
+                     GROUP BY r.id, r.goal, r.status, r.updated_at, r.created_at
+                     ORDER BY r.updated_at DESC, r.created_at DESC
+                     LIMIT 1
+                     """)) {
+            ps.setString(1, Task.TaskStatus.COMPLETED.name());
+            ps.setString(2, normalizeWorkspace(workspace));
+            ps.setString(3, normalizedSessionId);
+            ps.setString(4, ExecutionPlan.PlanStatus.CREATED.name());
+            ps.setString(5, ExecutionPlan.PlanStatus.RUNNING.name());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return Optional.empty();
+                }
+                return Optional.of(new ActivePlanInfo(
+                        rs.getString("id"),
+                        rs.getString("goal"),
+                        ExecutionPlan.PlanStatus.valueOf(rs.getString("status")),
+                        rs.getInt("completed_tasks"),
+                        rs.getInt("total_tasks")));
+            }
+        }
+    }
+
+    /**
+     * Finds the active Plan owned by one Session. This is the only recovery lookup.
+     */
+    public synchronized Optional<ResumeCandidate> findActive(Path workspace, String sessionId) throws SQLException {
+        String normalizedSessionId = normalizeSessionId(sessionId);
+        if (normalizedSessionId == null) {
+            return Optional.empty();
+        }
+
+        String workspaceKey = normalizeWorkspace(workspace);
+        try (Connection connection = openConnection();
+             PreparedStatement ps = connection.prepareStatement("""
+                     SELECT id, goal, status, summary, policy_input
                      FROM plan_runs
                      WHERE workspace = ?
-                       AND resume_key = ?
+                       AND session_id = ?
                        AND status IN (?, ?)
                      ORDER BY updated_at DESC, created_at DESC
                      LIMIT 1
                      """)) {
             ps.setString(1, workspaceKey);
-            ps.setString(2, exactResumeKey);
+            ps.setString(2, normalizedSessionId);
             ps.setString(3, ExecutionPlan.PlanStatus.CREATED.name());
             ps.setString(4, ExecutionPlan.PlanStatus.RUNNING.name());
+
             String planId;
             String persistedGoal;
             String persistedSummary;
             ExecutionPlan.PlanStatus persistedStatus;
+            String policyInput;
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
                     return Optional.empty();
@@ -180,6 +259,7 @@ public final class PlanStateStore {
                 persistedGoal = rs.getString("goal");
                 persistedSummary = rs.getString("summary");
                 persistedStatus = ExecutionPlan.PlanStatus.valueOf(rs.getString("status"));
+                policyInput = rs.getString("policy_input");
             }
 
             ExecutionPlan plan = new ExecutionPlan(planId, persistedGoal);
@@ -190,7 +270,31 @@ public final class PlanStateStore {
                 throw new SQLException("持久化 Plan 存在循环依赖: " + planId);
             }
             persistInterruptedRecovery(connection, planId, interruptedTaskIds);
-            return Optional.of(new ResumeCandidate(plan, interruptedTaskIds));
+            return Optional.of(new ResumeCandidate(plan, interruptedTaskIds,
+                    policyInput == null ? "" : policyInput));
+        }
+    }
+
+    public synchronized boolean abandonActive(Path workspace, String sessionId) throws SQLException {
+        String normalizedSessionId = normalizeSessionId(sessionId);
+        if (normalizedSessionId == null) {
+            return false;
+        }
+        try (Connection connection = openConnection();
+             PreparedStatement ps = connection.prepareStatement("""
+                     UPDATE plan_runs
+                     SET status = ?, updated_at = ?
+                     WHERE workspace = ?
+                       AND session_id = ?
+                       AND status IN (?, ?)
+                     """)) {
+            ps.setString(1, ExecutionPlan.PlanStatus.CANCELLED.name());
+            ps.setString(2, Instant.now().toString());
+            ps.setString(3, normalizeWorkspace(workspace));
+            ps.setString(4, normalizedSessionId);
+            ps.setString(5, ExecutionPlan.PlanStatus.CREATED.name());
+            ps.setString(6, ExecutionPlan.PlanStatus.RUNNING.name());
+            return ps.executeUpdate() > 0;
         }
     }
 
@@ -338,6 +442,13 @@ public final class PlanStateStore {
         return base.toAbsolutePath().normalize().toString();
     }
 
+    private static String normalizeSessionId(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return null;
+        }
+        return sessionId.trim();
+    }
+
     private Connection openConnection() throws SQLException {
         return DriverManager.getConnection("jdbc:sqlite:" + dbPath);
     }
@@ -349,7 +460,9 @@ public final class PlanStateStore {
                     CREATE TABLE IF NOT EXISTS plan_runs (
                         id TEXT PRIMARY KEY,
                         workspace TEXT NOT NULL,
-                        resume_key TEXT NOT NULL,
+                        session_id TEXT,
+                        resume_key TEXT NOT NULL DEFAULT '',
+                        policy_input TEXT NOT NULL DEFAULT '',
                         goal TEXT NOT NULL,
                         status TEXT NOT NULL,
                         summary TEXT,
@@ -378,11 +491,46 @@ public final class PlanStateStore {
                         FOREIGN KEY(plan_id) REFERENCES plan_runs(id) ON DELETE CASCADE
                     )
                     """);
-            stmt.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_plan_runs_resume
-                    ON plan_runs(workspace, resume_key, status, updated_at)
-                    """);
         }
+    }
+
+    private void migrateSchema() throws SQLException {
+        try (Connection connection = openConnection()) {
+            if (!hasColumn(connection, "plan_runs", "session_id")) {
+                try (Statement stmt = connection.createStatement()) {
+                    stmt.execute("ALTER TABLE plan_runs ADD COLUMN session_id TEXT");
+                }
+            }
+            if (!hasColumn(connection, "plan_runs", "policy_input")) {
+                try (Statement stmt = connection.createStatement()) {
+                    stmt.execute("ALTER TABLE plan_runs ADD COLUMN policy_input TEXT NOT NULL DEFAULT ''");
+                }
+            }
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_plan_runs_session
+                        ON plan_runs(workspace, session_id, status, updated_at)
+                        """);
+                stmt.execute("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_runs_one_active_per_session
+                        ON plan_runs(workspace, session_id)
+                        WHERE session_id IS NOT NULL
+                          AND status IN ('CREATED', 'RUNNING')
+                        """);
+            }
+        }
+    }
+
+    private static boolean hasColumn(Connection connection, String table, String column) throws SQLException {
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (rs.next()) {
+                if (column.equalsIgnoreCase(rs.getString("name"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static void setPosixPermissionsIfSupported(Path path,
@@ -396,12 +544,22 @@ public final class PlanStateStore {
         }
     }
 
-    public record ResumeCandidate(ExecutionPlan plan, Set<String> interruptedTaskIds) {
+    public record ActivePlanInfo(String planId,
+                                 String goal,
+                                 ExecutionPlan.PlanStatus status,
+                                 int completedTasks,
+                                 int totalTasks) {
+    }
+
+    public record ResumeCandidate(ExecutionPlan plan,
+                                  Set<String> interruptedTaskIds,
+                                  String policyInput) {
         public ResumeCandidate {
             Objects.requireNonNull(plan, "plan");
             interruptedTaskIds = interruptedTaskIds == null
                     ? Set.of()
                     : Collections.unmodifiableSet(new LinkedHashSet<>(interruptedTaskIds));
+            policyInput = policyInput == null ? "" : policyInput;
         }
     }
 }

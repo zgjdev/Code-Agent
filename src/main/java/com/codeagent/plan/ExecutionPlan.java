@@ -324,6 +324,7 @@ public class ExecutionPlan {
         return switch (status) {
             case REVIEWING -> "REVIEW";
             case UNVERIFIED -> "UNVERIFIED";
+            case INTERRUPTED -> "INTERRUPTED";
             case PENDING -> "⏳";
             case RUNNING -> "▶️";
             case COMPLETED -> "✅";

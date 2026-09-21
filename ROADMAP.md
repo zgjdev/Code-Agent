@@ -28,6 +28,7 @@
 - 子任务依赖管理
 - 执行计划可视化
 - 计划失败时的重规划
+- Plan DAG / Task 状态 SQLite checkpoint；同 workspace + exact submitted goal 可恢复未终结计划，已完成节点跳过，中断节点从 Task 边界重试
 
 **核心知识点**：
 - Plan-and-Solve模式

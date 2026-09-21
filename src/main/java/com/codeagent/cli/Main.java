@@ -1319,6 +1319,7 @@ public class Main {
         );
         planAgent.setConversationLedger(reactAgent.getConversationLedger());
         planAgent.setParentSession(reactAgent.getSessionHandle());
+        planAgent.enableDefaultPlanStateStore();
         return planAgent;
     }
 

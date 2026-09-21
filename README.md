@@ -46,6 +46,8 @@ mvn test -DskipTests=false
 - 支持先拆解任务，再按照依赖顺序执行
 - 新增 `/plan` 入口，以一次性计划执行方式增强默认的 `ReAct`
 - 计划生成后，会先与用户确认再执行
+- CLI/TUI 的 Plan DAG 与 Task 状态会 checkpoint 到 `~/.codeagent/plans/plans.db`；同一项目再次提交完全相同的顶层原始目标时，会恢复未终结 Plan、跳过已完成节点，并把上次中断中的节点从 Task 边界重新执行
+- 恢复粒度是 Task，不承诺单个 tool call 的 exactly-once；中断任务会先收到检查已有副作用/产物的恢复提示
 - 更适合多步骤、带依赖关系的复杂任务
 
 ### 第三期：Memory + 上下文工程

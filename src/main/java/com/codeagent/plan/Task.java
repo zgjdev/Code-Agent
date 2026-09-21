@@ -32,6 +32,7 @@ public class Task {
     public enum TaskStatus {
         REVIEWING,
         UNVERIFIED,
+        INTERRUPTED,   // 上次运行在进程退出时中断，可从任务边界恢复
         PENDING,       // 等待执行
         RUNNING,       // 执行中
         COMPLETED,     // 已完成
@@ -129,6 +130,12 @@ public class Task {
         this.endTime = System.currentTimeMillis();
     }
 
+    public void markInterrupted(String reason) {
+        this.status = TaskStatus.INTERRUPTED;
+        this.error = reason;
+        this.endTime = System.currentTimeMillis();
+    }
+
     public void markSkipped() {
         this.status = TaskStatus.SKIPPED;
         this.endTime = System.currentTimeMillis();
@@ -147,7 +154,7 @@ public class Task {
      * 是否可以执行（所有依赖都已完成）
      */
     public boolean isExecutable(Map<String, Task> allTasks) {
-        if (status != TaskStatus.PENDING) return false;
+        if (status != TaskStatus.PENDING && status != TaskStatus.INTERRUPTED) return false;
         for (String depId : dependencies) {
             Task dep = allTasks.get(depId);
             if (dep == null || dep.getStatus() != TaskStatus.COMPLETED) {

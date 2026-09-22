@@ -704,7 +704,7 @@ Plan user 不能在刚收到输入时就写 Parent semantic conversation。
 固定顺序：
 
 ```text
-1. 读取 priorConversationSnapshot
+1. 读取并冻结 priorConversationContextSnapshot
 2. Planner.createPlan(prior + current goal)
 3. HITL Plan Review / supplement
 4. 用户最终选择 EXECUTE
@@ -719,7 +719,7 @@ Plan user 不能在刚收到输入时就写 Parent semantic conversation。
 
 只有步骤 6 成功的 Plan 才进入 Top-level Conversation View。
 
-这里的“成功”不是当前 `savePlanSafely()` 的 best-effort 语义。实现时必须新增严格的 initial persistence gate：`savePlanDurably(...)`：SQLite 写入失败时抛错/返回失败，**不得调用 `executePlan()`，不得创建 TURN_START，也不得把该 Plan 当成可恢复工作流**。所有能够进入 `executePlan()` 的新 Plan 路径（包括 Review EXECUTE、空 supplement fallback、execution replan 后的新 Plan）都必须先通过这一 gate。
+这里的“成功”不是当前 `savePlanSafely()` 的 best-effort 语义。实现时必须新增严格的 initial persistence gate `savePlanDurably(...)`。SQLite 写入失败时抛错/返回失败，**不得调用 `executePlan()`，不得创建 TURN_START，也不得把该 Plan 当成可恢复工作流**。所有能够进入 `executePlan()` 的新 Plan 路径（包括 Review EXECUTE、空 supplement fallback、execution replan 后的新 Plan）都必须先通过这一 gate。
 
 终态也采用同样原则：只有 terminal Plan 状态成功 checkpoint 到 SQLite 后，才允许写 top-level assistant + TURN_END；若 terminal checkpoint 失败，保持 turn open，向用户返回持久化失败，后续由 active Plan recovery/reconciliation 收敛，而不是把 Session 先标记成已完成。
 

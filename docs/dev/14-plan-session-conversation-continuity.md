@@ -73,9 +73,9 @@ ReAct tool loop 与 Plan Task context 继续独立
 
 具体目标：
 
-1. ReAct 与 Plan 共享同一个父 Session 的顶层有效对话，使跨模式引用“刚才”“之前那个方案”“上一轮修改”等能够被后续模式理解。
-2. Plan 顶层用户输入和 Plan 最终语义结果进入父 Session 的 durable active surface，而不只写入 raw `ConversationLedger`。
-3. Planner 在创建新 Plan 时可以读取受控的历史语义上下文，而不是永远只看到当前 `goal`。
+1. ReAct 与 Plan 共享同一个 Parent Session 中的 **Top-level Conversation View**，使跨模式引用“刚才”“之前那个方案”“上一轮修改”等能够被后续模式理解；该语义视图与 ReAct 的 Provider Surface 明确分离。
+2. Plan 顶层用户输入和 Plan 最终语义结果写入 Parent Session 的 append-only Event Log，并同时进入 Provider Surface 与 Top-level Conversation View；不再只写 raw `ConversationLedger`。
+3. Planner 只读取 Top-level Conversation View，不读取完整 Provider Surface，也不通过 role 过滤猜测“哪些消息是用户语义”。
 4. Plan Task 仍保持独立的 task-local `messages` 和 child Session，不继承完整父会话或其他 Task transcript。
 5. `/plan resume` 仍以 SQLite DAG 状态为工作流恢复 source of truth；已完成 Task 的 `result` 恢复后继续作为依赖 handoff。
 6. 保持当前安全边界：历史上下文只用于理解语义，不能扩大当前 Turn 的工具、URL、路径或浏览器权限。
@@ -336,824 +336,773 @@ Task.result
 
 本次仅保证 `Task.result` 在恢复后的依赖链继续正确注入，不扩大到 transcript replay。
 
-## 3. 方案设计
+## 3. 目标架构与核心不变量
 
-总体原则：
+本次重构不再把 Parent Session 的 `activeSurface` 等同于“用户语义对话”。最终明确维护四层状态：
 
-> **统一 Session 级用户对话，隔离执行级上下文。**
+```text
+1. Provider Surface
+   = ReAct 真正发送给模型并可恢复的 provider-facing context
 
-目标架构：
+2. Top-level Conversation View
+   = User ↔ Assistant 的跨 ReAct / Plan 顶层语义历史
+
+3. Plan Workflow State
+   = SQLite 中的 Plan / DAG / Task / status / result
+
+4. Task Child Session
+   = 单个 Task 的 durable execution transcript
+```
+
+核心不变量：
+
+- Provider Surface 是 ReAct provider request 的 durable source of truth。
+- Top-level Conversation View 是 Planner 多轮语义上下文的唯一 source of truth。
+- Planner 不读取 Tool Result、synthetic user、Skill body、长期记忆注入或 Reviewer/Task transcript。
+- PlanStateStore 仍是 workflow recovery 的 source of truth。
+- Task Child Session 仍只承担 Task 执行审计；中断恢复不 replay child transcript。
+- 当前 Turn 的 authority 仍只来自当前 `submittedUserInput`。
+
+目标结构：
 
 ```mermaid
 graph TB
-    SESSION[Durable Parent Session]
-
-    SESSION --> SURFACE[SessionConversationSurface]
-    SURFACE --> REACT[ReAct]
-    SURFACE --> PCTX[Planner Conversation Context]
-
-    PCTX --> PLANNER[Planner]
+    SESSION[Durable Parent Session Event Log]
+    SESSION --> PS[Provider Surface]
+    SESSION --> CV[Top-level Conversation View]
+    PS --> REACT[ReAct Agent]
+    CV --> PLANNER[Planner]
     PLANNER --> DAG[ExecutionPlan]
-
-    DAG --> T1[Task A local context]
-    DAG --> T2[Task B local context]
-    DAG --> T3[Task C local context]
-
+    DAG --> DB[(PlanStateStore SQLite)]
+    DAG --> T1[Task A local messages]
+    DAG --> T2[Task B local messages]
     T1 --> C1[Child Session A]
     T2 --> C2[Child Session B]
-    T3 --> C3[Child Session C]
-
-    DAG --> SQLITE[(PlanStateStore SQLite)]
-
     T1 --> R1[Task.result]
     R1 --> T2
-
-    SESSION -. audit .-> LEDGER[ConversationLedger]
+    REACT -. raw audit .-> LEDGER[ConversationLedger]
+    PLANNER -. raw audit .-> LEDGER
 ```
 
-核心边界：
+---
+
+## 4. Session Event 与双 Projection 设计
+
+### 4.1 不新增第三套持久化文件
+
+继续使用 Parent Session 现有的：
 
 ```text
-Parent Session
-= 用户可感知的跨模式连续对话
-
-PlanStateStore
-= 工作流状态
-
-Task messages
-= 当前 Task attempt working context
-
-Task Child Session
-= Task durable execution transcript
+events.jsonl
++
+checkpoints/
 ```
 
-### 3.1 接口与数据结构
+不新建 `conversation.jsonl`，也不使用 `ConversationLedger` 反向恢复语义历史。
 
-#### 3.1.1 抽取 `SessionConversationSurface`
+### 4.2 Message Event 增加可选 conversation 元数据
 
-建议新增：
+现有 `payload.message` 继续表示 provider-facing message。新增可选字段：
 
-```text
-src/main/java/com/codeagent/history/SessionConversationSurface.java
-```
-
-职责是统一管理 Parent Session 的 model-visible active surface，不负责 Plan DAG，也不负责 raw audit ledger。
-
-建议接口概念：
-
-```java
-final class SessionConversationSurface {
-
-    List<LlmClient.Message> snapshot();
-
-    long historyVersion();
-
-    void attach(SessionStore.SessionHandle handle,
-                Supplier<LlmClient.Message> initialSystem);
-
-    void append(
-            LlmClient.Message message,
-            String mode,
-            String actor,
-            String source);
-
-    void replaceMessage(...);
-
-    void commitCompaction(...);
-
-    void clearAndSeed(...);
-
-    void synchronizeFromProjection();
-
-    SessionStore.SessionHandle sessionHandle();
+```json
+{
+  "message": { "...": "provider-facing LlmClient.Message" },
+  "conversation": {
+    "turnId": "turn-...",
+    "planId": "plan-... or null",
+    "mode": "react | plan",
+    "role": "user | assistant",
+    "content": "top-level semantic content"
+  }
 }
 ```
 
-该组件封装目前散落在 `Agent` 中的：
+语义规则是确定的：
 
-```text
-conversationHistory.add/set/clear
-SessionHandle.append
-projection.messages()
-historyVersion
-compaction replace
-```
+- 没有 `conversation`：只影响 Provider Surface。
+- 有 `conversation`：除 Provider Surface 外，同时进入 Top-level Conversation View。
 
-`ConversationLedger` 不放入该类，避免将 raw audit 与 durable sending surface 耦合。
+**ReAct User**：Provider message 保持现有 `Skill + userInput + long-term memory` 内容；`conversation.content` 必须保存用户实际提交的 `submittedUserInput`，不得带 Skill 或长期记忆。
 
-#### 3.1.2 Agent 改为使用共享 surface
+**ReAct Final Assistant**：最终无 tool-call 的 committed assistant message 同时作为 conversation assistant；中间 tool-call assistant 不带 conversation 元数据。
 
-当前：
+**Plan User**：只有 Review 最终为 EXECUTE 且 Plan 已 durable 保存后才写入；语义内容使用最终 `submittedPolicyInput`，Review SUPPLEMENT 已合并在其中。
 
-```java
-private final List<LlmClient.Message> conversationHistory;
-```
+**Plan Final Assistant**：Provider message 与 conversation message 都使用确定性的 `conversationResult`。
 
-重构后由：
+Tool result、synthetic image user、Planner JSON、Reviewer transcript、Task child transcript 一律不带 conversation 元数据。
 
-```text
-SessionConversationSurface
-```
-
-作为唯一 Parent conversation mutable owner。
-
-Agent 调 LLM 时读取：
-
-```text
-surface snapshot / live view
-```
-
-用户消息、tool result、assistant response、图片裁剪、`/clear`、compaction 等操作统一经 surface 修改。
-
-这一阶段首先要求做到 **行为不变**，再接 Plan，避免一次提交同时修改两类语义。
-
-#### 3.1.3 Main 将同一 surface 注入 PlanExecuteAgent
-
-当前 Main 已共享：
-
-```text
-ToolRegistry
-MemoryManager
-ConversationLedger
-SessionHandle
-```
-
-新增共享：
-
-```text
-SessionConversationSurface
-```
-
-因此：
-
-```text
-ReAct Agent
-PlanExecuteAgent
-```
-
-在同一个 CLI Session 内看到同一 Parent active surface，不再维护两个会发生漂移的副本。
-
-`PlanExecuteAgent` 仍可保留 `parentSession` 用于：
-
-```text
-session_id
-createChild()
-recordChildResult()
-```
-
-但顶层 conversational state 必须走 shared surface。
-
-#### 3.1.4 新增 Planner 语义上下文构造器
+### 4.3 SessionProjection 增加 Top-level Conversation View
 
 建议新增：
 
-```text
-src/main/java/com/codeagent/plan/PlannerConversationContextBuilder.java
+```java
+record ConversationNode(
+        long sequence,
+        String turnId,
+        String planId,
+        String mode,
+        LlmClient.Message message,
+        ConversationKind kind) {}
+
+enum ConversationKind { USER, ASSISTANT, SUMMARY }
 ```
 
-输入：
-
-```text
-Parent Session active surface
-```
-
-输出：
-
-```text
-Planner 可消费的历史语义 messages
-```
-
-过滤规则：
-
-1. 排除 Parent system message，Planner 使用自己的 system prompt。
-2. 排除 `tool` message。
-3. 排除带 `toolCalls` 的 assistant 中间消息。
-4. 保留普通 user message。
-5. 保留最终普通 assistant message。
-6. 保留已经由 Session compaction 生成的 summary/ack，因为它们本身已经位于 active surface。
-7. 保持原顺序，不重新总结、不修改 Parent Session。
-
-因此：
-
-```text
-ReAct:
-User
-Assistant tool-call
-Tool
-Assistant tool-call
-Tool
-Final Assistant
-```
-
-给 Planner 的历史只保留：
-
-```text
-User
-Final Assistant
-```
-
-而：
-
-```text
-Plan User
-Plan Final Result
-```
-
-也会进入同一语义历史。
-
-首版不从 `ConversationLedger` 重建 Planner context，避免把审计存储变成运行时 source of truth。
-
-#### 3.1.5 Planner API 从 goal 升级为 request
-
-当前：
+`SessionProjection` 新增：
 
 ```java
-createPlan(String goal)
-```
-
-建议增加：
-
-```java
-record PlannerRequest(
-        String goal,
-        List<LlmClient.Message> conversationContext) {}
+List<ConversationNode> topLevelConversation
+Map<String, OpenTurn> openTurns
 ```
 
 并提供：
 
 ```java
-createPlan(PlannerRequest request)
+List<LlmClient.Message> conversationMessages()
+Optional<OpenTurn> openPlanTurn(String planId)
 ```
 
-Planner messages：
+现有 `messages()` 仍只返回 `activeSurface`，保持 ReAct 行为不变。
+
+### 4.4 使用现有 TURN_START / TURN_END 管理 Plan 顶层生命周期
+
+不新增 required event type。Plan turn 固定为：
 
 ```text
-Planner System Prompt
-
-[此前语义 conversation context]
-
-Current User Goal
+TURN_START(surface=none, payload={turnId, planId, mode:"plan"})
+USER_MESSAGE(surface=append, conversation=...)
+...
+ASSISTANT_MESSAGE(surface=append, conversation=...)
+TURN_END(surface=none, payload={turnId, planId, status})
 ```
 
-当前 Goal 必须始终是最后一条 user message。
+`SessionReplayer` 用 TURN_START/TURN_END 维护 `openTurns`。ReAct 首版无需强制补 TURN_START/TURN_END。
 
-`ExecutionPlan.goal` 仍保存当前顶层目标，不把完整聊天历史序列化进 SQLite。
+### 4.5 Checkpoint
 
-#### 3.1.6 修正 simple-goal shortcut
+Checkpoint 的 projection 新增：
 
-当前 `Planner.isSimpleGoal()` 对部分短请求直接创建 minimal plan，不调用 LLM。
+```json
+{
+  "conversationProjectionVersion": 1,
+  "topLevelConversation": [],
+  "openTurns": []
+}
+```
 
-加入多轮上下文后：
+**不提升 `SessionEvent.CURRENT_SCHEMA_VERSION`。** 新数据只是现有 event payload/checkpoint 的可选字段。
+
+新版本加载 checkpoint 时：
+
+- 有 `conversationProjectionVersion=1`：正常使用。
+- 没有该字段：该 checkpoint 不足以证明 semantic projection 完整，丢弃 checkpoint 并从 event log 全量 replay。
+
+这样即使经历“新版本 → 旧版本 → 新版本”，也不会因为旧版本重写 checkpoint 而丢掉 event log 中已经存在的 conversation metadata。
+
+### 4.6 Legacy Session
+
+升级前的事件没有 conversation metadata，无法可靠区分真实用户输入与 memory/skill-enhanced/synthetic user。
+
+因此明确禁止基于 role/content 猜测回填：
+
+> **Top-level Conversation View 只从新版本产生的显式 conversation metadata 构建。升级前历史仍保留在 Provider Surface 中，但不进入 Planner semantic history。**
+
+---
+
+## 5. ParentConversationContext：共享但只有一个可变所有者
+
+新增：
 
 ```text
-查看刚才那个文件
+src/main/java/com/codeagent/history/ParentConversationContext.java
 ```
 
-可能被误判为 simple goal，却需要历史解析。
+它不是简单共享一个 mutable `List<Message>`，而是 Parent provider context 的唯一 mutation coordinator。
 
-因此增加 context-dependent 判断，例如：
+职责固定为：
 
 ```text
-刚才
-之前
-上一个
-那个
-上述
-继续
-它
-刚刚
-前面
+稳定的 providerMessages list identity
+SessionHandle
+historyVersion
+append / replace / clear
+compaction commit
+从 SessionProjection 同步
+读取 Top-level Conversation View
+Parent AutoCompactionManager 生命周期
 ```
 
-只有：
-
-```text
-isSimpleGoal(goal)
-&& !requiresConversationResolution(goal)
-```
-
-才允许跳过 Planner LLM。
-
-例如：
-
-```text
-列出当前目录文件
-```
-
-仍走 minimal plan。
-
-而：
-
-```text
-查看刚才那个文件
-```
-
-必须走带历史上下文的 Planner。
-
-该规则必须有单测，不能仅依赖 prompt。
-
-#### 3.1.7 Plan 顶层 Turn 写入 Parent Session
-
-新 Plan run 的时序调整为：
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant P as PlanExecuteAgent
-    participant S as Parent Session Surface
-    participant PL as Planner
-    participant DB as PlanStateStore
-    participant T as Task Workers
-
-    U->>P: 当前 Plan 请求
-    P->>S: snapshot 历史语义上下文
-    P->>S: append 当前 user message
-    P->>PL: prior context + current goal
-    PL-->>P: ExecutionPlan
-    P->>DB: save Plan/DAG
-    P->>T: execute Tasks
-    T-->>P: Task results
-    P->>DB: checkpoint statuses/results
-    P->>S: append Plan final semantic result
-    P-->>U: 输出结果
-```
-
-必须先取得“历史快照”，再 append 当前 user，以避免 Planner context 中当前请求出现两次。
-
-顶层 Parent Session 只写：
-
-```text
-User Plan request
-Assistant Plan final semantic result
-```
-
-不得写入：
-
-```text
-Planner JSON
-Task tool logs
-Reviewer transcript
-Task child transcript
-```
-
-后者继续只进入 raw ledger / child Session。
-
-#### 3.1.8 Plan final result 与终端展示解耦
-
-跨轮记忆需要一份稳定的语义结果，即使终端任务输出采用 streaming。
-
-因此明确：
-
-```text
-display output
-≠
-conversation semantic result
-```
-
-Plan 执行结束后应始终得到非空的顶层语义结果：
-
-```text
-✅ 计划执行完成
-+ 关键 leaf Task result
-```
-
-即使部分 Task 内容此前已经 stream 到终端，也必须为 Parent Session 保存一份紧凑结果。
-
-避免出现：
-
-```text
-用户请求已进入 Parent Session
-但因为 streamedOutput 导致没有 Assistant 结果
-```
-
-留下长期悬空 turn。
-
-### 3.2 策略、安全、并发与恢复
-
-#### 3.2.1 历史只提供语义，不提供授权
-
-必须保持：
+概念接口：
 
 ```java
-TurnToolPolicy.fromUserInput(submittedUserInput, ...)
+final class ParentConversationContext {
+    List<LlmClient.Message> providerMessages();
+    List<LlmClient.Message> conversationMessages();
+    long historyVersion();
+    long compactionGeneration();
+
+    void appendProviderOnly(...);
+    void appendTopLevel(...);
+    void commitCompaction(...);
+    void clearAndSeed(...);
+    void synchronizeFromProjection();
+    SessionStore.SessionHandle sessionHandle();
+}
 ```
 
-其输入仍然只来自当前顶层用户原始提交。
+`Agent` 与 `PlanExecuteAgent` 必须持有 **同一个** ParentConversationContext 实例。
 
-禁止：
+`Agent.getConversationHistory()` 为兼容测试/API，可返回 provider messages 的只读视图或快照；不再存在第二份可变 Parent history。
+
+并行 Task 不得写 ParentConversationContext，只能写各自 child Session。
+
+### 5.1 ContextTokenTracker 失效规则
+
+普通 append 不强制 invalidate，现有 usage-anchor delta 仍可工作。
+
+以下 Parent mutation 必须使 ReAct tracker 在下一次请求前失效：
 
 ```text
-历史 conversation
-长期记忆
-旧 Plan result
-旧 browser/tool call
+compactionGeneration 改变 -> COMPACTION
+clear                       -> CLEAR
+Session restore/switch      -> SESSION_RESTORED
+provider/model change       -> PROVIDER_CHANGED
 ```
 
-参与当前 Turn 权限推导。
+`Agent` 在构造 RequestSnapshot 前比较 ParentConversationContext 的 generation 与自己最后观察值。
 
-例如历史里即使存在：
+Plan 估算 Planner request 时不得复用 ReAct measured usage anchor，只使用完整本地估算。
 
-```text
-“以后都允许访问 example.com”
-```
+---
 
-也不得自动变成当前 URL authority。
+## 6. Planner Context 的确定规则
 
-Planner conversation context 与：
+### 6.1 Planner 只读取 Top-level Conversation View
 
-```text
-TurnToolPolicy
-TrustedUrlContext
-HITL
-PathGuard
-CommandGuard
-```
+新增 `PlannerConversationContextBuilder`，输入 `SessionProjection.topLevelConversation`，不再对 Provider Surface 做 role-based 过滤。
 
-之间必须保持单向隔离。
+### 6.2 Current goal 不得重复
 
-#### 3.2.2 Task context 不继承 Parent transcript
-
-Task 仍执行：
+新增：
 
 ```java
-List<LlmClient.Message> messages = new ArrayList<>();
+record PlannerRequest(
+        String goal,
+        List<LlmClient.Message> priorConversation) {}
 ```
 
-Task briefing 继续只包含：
+Planner request 固定为：
 
 ```text
-Plan goal
-Task description
-completed direct dependency results
-trusted dependency URLs（仅当前运行允许的规则）
-retry/recovery feedback
-CODEAGENT.md
-long-term memory
-skill/external context
-```
-
-不得改成：
-
-```text
-Parent Session full history
+Planner system prompt
 +
-Task messages
+priorConversation
++
+"请为以下任务制定执行计划：\n" + current goal
 ```
 
-这样可避免长 Session 被复制到每个并行 Task。
+current goal 只出现一次，并始终是最后一条 user request。
 
-#### 3.2.3 Task recovery 保持 Task-boundary
+### 6.3 Simple Goal Shortcut
 
-`PlanStateStore` 当前逻辑保持：
+取消“刚才/那个/它”等关键词枚举。
+
+确定规则：
 
 ```text
-PENDING → PENDING
-COMPLETED → COMPLETED + result
-RUNNING/REVIEWING → INTERRUPTED
+priorConversation 为空 AND isSimpleGoal(goal)
+→ 允许 createMinimalPlan()
+
+priorConversation 非空
+→ 统一走 LLM Planner
 ```
 
-中断 Task：
+这是有意用少量额外 planner 调用换取多轮语义正确性。
+
+### 6.4 Review Supplement / Replan
+
+初始 Planning 前保存 `priorConversationSnapshot`。
+
+- Plan Review SUPPLEMENT：继续使用同一 prior snapshot，只更新 goal/submittedPolicyInput。
+- execution failure replan：继续使用同一 prior snapshot，显式加入 failure reason 与已完成结果。
+- 本次 Plan 自己的 top-level turn 不得重新作为历史注入本轮 replan。
+- `/plan resume` 不重新 Planner，所以不需要恢复 prior snapshot。
+
+---
+
+## 7. Parent Context 的 Token Budget 与 Compaction
+
+### 7.1 Parent 与 Task compaction 严格分离
 
 ```text
-new task-local messages
-+
-recovery feedback
-+
-current workspace inspection
+Parent compaction
+= ReAct/Plan 跨模式 Session 上下文管理
+
+Task compaction
+= 单个 Task attempt 的 working context 管理
 ```
 
-不 replay 旧 child Session transcript。
+Task `AutoCompactionManager` 不参与 Parent Session 恢复。
 
-#### 3.2.4 Completed dependency result 必须显式验证
+### 7.2 Plan-only 会话也必须触发 Parent compaction
 
-当前代码已执行：
+不能依赖“下次进入 ReAct 时再压缩”。每次 Planner LLM 请求前：
+
+1. 估算 `Planner system + Top-level Conversation View + current goal`。
+2. 若接近 Planner context profile 的 compression trigger，要求 ParentConversationContext 对 Provider Surface 执行 durable compaction。
+3. compaction 完成后重新读取 Top-level Conversation View。
+4. 重新估算 Planner request。
+5. 若仍超过安全阈值，request-local fallback 只保留：最近一个 SUMMARY（若有）+ 最近 3 个完整 top-level user turns/assistant + current goal。
+
+第 5 步不修改 durable Session，只用于保证当前 Planner 请求可发送。
+
+### 7.3 Provider compaction 必须同步更新 Conversation View
+
+`SessionReplayer.completeCompaction()` 在应用现有 replacement range 时，同时：
+
+1. 删除 Top-level Conversation View 中 sequence 位于 replacement range 的节点。
+2. 若该范围包含至少一个 conversation node，则插入一个 `ConversationKind.SUMMARY`。
+3. SUMMARY 内容直接使用现有 compaction replacement summary message。
+4. compaction ack assistant 不进入 Top-level Conversation View。
+
+这样不维护第二套独立 summary LLM，同时保证 semantic history 随 durable compaction 收敛。
+
+---
+
+## 8. Plan 顶层 Turn：durable 时序与崩溃一致性
+
+### 8.1 新 Plan 的固定时序
+
+Plan user 不能在刚收到输入时就写 Parent semantic conversation。
+
+固定顺序：
+
+```text
+1. 读取 priorConversationSnapshot
+2. Planner.createPlan(prior + current goal)
+3. HITL Plan Review / supplement
+4. 用户最终选择 EXECUTE
+5. savePlanSafely(plan, sessionId, final submittedPolicyInput)
+6. 确认 Plan durable 写入 SQLite
+7. TURN_START(planId, turnId)
+8. USER_MESSAGE(top-level, final submittedPolicyInput)
+9. executePlan(...)
+10. ASSISTANT_MESSAGE(top-level, conversationResult)
+11. TURN_END(planId, turnId, terminalStatus)
+```
+
+只有步骤 6 成功的 Plan 才进入 Top-level Conversation View。
+
+以下情况只写 CLI/raw ledger，不进入 semantic conversation：
+
+- Planner 失败；
+- Review CANCEL；
+- 已有 active Plan 导致新请求被拒绝；
+- SQLite save 失败。
+
+### 8.2 为什么 SQLite 在前、Session turn 在后
+
+SQLite 是 workflow source of truth。先写 user turn 再 save Plan 会制造“有 durable 对话、没有可恢复 Plan”的悬空状态，因此顺序固定为 PlanStateStore first。
+
+### 8.3 两套存储不是同一事务：新增 PlanConversationReconciler
+
+新增 `PlanConversationReconciler`，在以下时机运行：
+
+- CLI attach/resume Parent Session 后；
+- `/session switch` 后；
+- 创建/使用 PlanExecuteAgent 前保证当前 Session 已 reconcile。
+
+#### A. SQLite 有 active Plan，但没有对应 open Plan turn
+
+表示可能 crash 在 SQLite save 后、TURN_START 前。
+
+处理：
+
+1. 读取 planId、policy_input、goal。
+2. semantic user 优先用 `policy_input`，为空才 fallback goal。
+3. append TURN_START + USER_MESSAGE。
+4. **不自动执行 Plan**，仍等待显式 `/plan resume`。
+
+#### B. Parent 有 open Plan turn，SQLite Plan 仍 active
+
+正常中断状态，不修改 turn；`/plan resume` 复用同一 turnId。
+
+#### C. Parent 有 open Plan turn，SQLite Plan 已 terminal
+
+表示可能 crash 在 SQLite terminal checkpoint 后、assistant/TURN_END 前。
+
+处理：
+
+1. 按 planId 读取 terminal Plan/Task 状态。
+2. `buildConversationResult(restoredPlan)`。
+3. append top-level assistant。
+4. TURN_END。
+5. 不重跑任何 Task。
+
+#### D. open Plan turn 对应 SQLite Plan 不存在
+
+视为跨存储损坏/旧异常状态。关闭本轮：
+
+```text
+⚠️ 该计划的持久化工作流状态不可用，本轮已关闭，未自动重试。
+```
+
+并写 TURN_END(status=orphaned) + warning。禁止凭 transcript 推测并执行任务。
+
+---
+
+## 9. `/plan resume` 与 `/plan abandon`
+
+### 9.1 `/plan resume`
+
+`/plan resume` 是控制命令，不作为新的 top-level user goal。
+
+```text
+findActive(workspace, sessionId)
+→ 恢复 DAG
+→ COMPLETED 保留 result
+→ RUNNING/REVIEWING -> INTERRUPTED
+→ 找到/由 reconciler 创建 planId 对应 open turn
+→ executePlan(restoredPlan)
+→ append conversationResult + TURN_END
+```
+
+legacy active Plan 没有 turn 时，reconciler 用 `policy_input`/goal 创建 recovered turn。
+
+### 9.2 `/plan abandon`
+
+如果被 abandon 的 Plan 存在 open turn：
+
+```text
+append assistant: "✅ 已放弃当前 Session 的未完成 Plan。"
++
+TURN_END(status=abandoned)
+```
+
+如果 legacy/inconsistent Plan 没有 turn，不为单纯 abandon 命令额外创建 synthetic user turn。
+
+---
+
+## 10. `displayResult` 与 `conversationResult` 分离
+
+当前 `buildFinalResult(plan, streamedTaskOutputs)` 会跳过已经 stream 到终端的 Task result，因此不能直接作为 durable conversation result。
+
+将 PlanRunOutcome 明确为：
+
+```java
+record PlanRunOutcome(
+        String displayResult,
+        String conversationResult,
+        TerminalStatus status) {}
+```
+
+### 10.1 displayResult
+
+保持当前 CLI/TUI 体验，可以继续考虑 `streamedTaskOutputs`，避免重复打印。
+
+### 10.2 conversationResult
+
+必须非空、确定性生成、不依赖 streaming、不额外调用 LLM。
+
+COMPLETED 固定算法：
+
+1. 按 execution order 找所有 leaf tasks。
+2. 取其中所有非空 `Task.result`。
+3. 拼成 `✅ 计划执行完成！` + `[task_id] result`。
+4. 若 leaf 都无 result，取最后一个 COMPLETED 且 result 非空的 Task。
+5. 再无结果时仅保存 `✅ 计划执行完成！`。
+
+FAILED / UNVERIFIED / CANCELLED 使用当前确定性的状态、`Task.result`、error 生成；不读取 child transcript，不调用总结 LLM。
+
+---
+
+## 11. Task 恢复与依赖 Handoff 保持现状
+
+COMPLETED Task 继续：
 
 ```java
 case COMPLETED -> task.markCompleted(result);
 ```
 
-并且：
+下游 `StepBriefing` 继续注入 completed direct dependency results。
+
+INTERRUPTED Task 继续创建全新的 task-local messages：
+
+```text
+Plan goal
++ Task description
++ completed dependency results
++ recovery feedback
++ CODEAGENT.md
++ long-term memory
+```
+
+旧 child Session transcript 不 replay。
+
+Task 不读取 Parent full Provider Surface，也不直接读取 Top-level Conversation View；多轮语义在 Planning 阶段解析为当前 Plan/DAG。
+
+---
+
+## 12. 安全边界
+
+必须继续以当前显式提交计算 authority：
 
 ```java
-buildStepBriefing(...)
+TurnToolPolicy.fromUserInput(submittedUserInput, ...)
 ```
 
-会读取 completed direct dependencies。
+历史 conversation、SUMMARY、长期记忆、旧 Plan result 均不得成为 authority source。
 
-本次补充恢复测试，明确验证：
+历史 URL 不自动成为当前 trusted URL。当前 Plan 内 trusted URL 仍只来自当前 submitted input 和本次 run 内显式允许传播的 dependency context。
 
-```text
-SQLite 中 old-result
-↓
-restore Task
-↓
-下游 Task briefing 中仍存在 old-result
-```
+Planner 可以“理解”历史权限文本，但 runtime tool exposure/PathGuard/CommandGuard/HITL 不得因此改变。
 
-防止未来重构误伤依赖 handoff。
+---
 
-#### 3.2.5 并发
+## 13. 并发规则
 
-Parent Session 顶层 surface 只由中央 Plan run 线程写入：
+ParentConversationContext 只允许中央 Session/Plan runner 串行修改。
 
-```text
-Plan user
-Plan final assistant
-```
+并行 Task：
 
-并行 Task 不写 Parent surface，只写各自 child Session。
+- 最多 4 worker；
+- 只写各自 child Session；
+- 不写 Parent Provider Surface；
+- 不写 Top-level Conversation View。
 
-因此保持：
+ParentConversationContext mutation 方法仍应同步/串行保护，避免未来调用方破坏该不变量。
 
-```text
-Parent conversation：串行
+---
 
-Task child sessions：最多 4 Task 并行、彼此隔离
-```
+## 14. 兼容性与迁移
 
-避免多个 Task 并发 append 到同一顶层 conversation。
+### 14.1 Plan SQLite
 
-#### 3.2.6 Compaction
+不修改 schema。允许新增只读 API，如 `findById(planId)`，用于 reconciliation。
 
-Parent Session 继续沿用现有 Session/ReAct compaction 语义。
+### 14.2 Event Log
 
-Plan 顶层 turn 成为 Parent active surface 的普通：
+继续使用现有 message event 类型和 schemaVersion=2，只增加可选 payload 字段；旧版本会忽略未知 payload。
 
-```text
-user / assistant
-```
+### 14.3 Checkpoint
 
-消息后，自然参与后续 Session 压缩和 checkpoint。
+增加 conversation projection 字段和版本标记。新版本遇到没有 marker 的 checkpoint 时 full replay。
 
-Task-local `messages` 的现有 `AutoCompactionManager` 不变。
+### 14.4 升级前历史
 
-需要明确区分：
+不从旧 Provider Surface 猜测 semantic conversation。Planner 的干净跨模式语义记忆从新版本首个显式 top-level turn 开始。
 
-```text
-Parent Session compaction
-= 跨 ReAct/Plan 顶层 conversational memory
+### 14.5 回滚
 
-Task compaction
-= 当前 Task attempt 的 Context Window 管理
-```
+因为不增加旧版本未知的 required event type，也不提升 event schemaVersion：
 
-二者不能互相 replay。
+- 旧版本仍可读取 `payload.message`；
+- conversation payload 被忽略；
+- checkpoint 额外字段被旧 decoder 忽略；
+- Provider Surface 仍可恢复。
 
-### 3.3 兼容性、迁移与回滚
+---
 
-#### 数据格式
+## 15. 实现阶段
 
-首版不新增 Plan SQLite 字段。
+### Phase A：双 Projection，ReAct provider 行为零变化
 
-Parent Plan turn 使用 SessionStore 已存在的：
+- SessionProjection 增加 Top-level Conversation View/openTurns。
+- SessionReplayer 解析 optional conversation metadata。
+- checkpoint round-trip 支持 semantic projection。
+- legacy checkpoint 缺 marker 时 full replay。
+- ReAct user/final assistant 写 conversation metadata。
+- Provider Surface 内容和顺序不得改变。
 
-```text
-USER_MESSAGE
-ASSISTANT_MESSAGE
-SurfaceOperation.append()
-```
+### Phase B：ParentConversationContext
 
-因此：
+- 抽取 Agent 的 Parent list、historyVersion、append/replace/clear/compaction commit。
+- 保持稳定 list identity，兼容 SessionMemoryCompactor。
+- ReAct tracker 对外部 compaction/clear/session switch 正确失效。
+- Main 将同一实例注入 PlanExecuteAgent。
 
-```text
-events.jsonl schema
-checkpoint projection schema
-plans.db schema
-```
+### Phase C：Plan 顶层 Turn + Reconciliation
 
-均无需迁移。
+- accepted Plan 在 SQLite save 后写 TURN_START + user。
+- terminal Plan 写 conversationResult + TURN_END。
+- PlanConversationReconciler 覆盖所有跨存储 crash window。
+- `/plan resume` 复用 open turn。
+- `/plan abandon` 关闭已有 open turn。
 
-#### 旧 Session
+### Phase D：Planner 使用 Top-level Conversation View
 
-升级前的 Session 没有 Plan 顶层 messages。
+- PlannerRequest + PlannerConversationContextBuilder。
+- prior 非空时不走 minimal shortcut。
+- review/replan 使用固定 prior snapshot。
+- Planner 调用前执行 Parent budget/compaction。
 
-升级后：
+---
 
-```text
-旧 ReAct history
-+
-新版本开始后的 Plan top-level turns
-```
+## 16. 测试矩阵
 
-可以正常共存。
+### 16.1 Session / Projection
 
-不会尝试从旧 ConversationLedger 反推历史 Plan turn。
-
-#### 旧 active Plan
-
-升级前已经存在于 SQLite 的 active Plan：
+必须覆盖：
 
 ```text
-/plan resume
-```
-
-仍按原有：
-
-```text
-workspace + session_id
-```
-
-恢复。
-
-不要求 Parent Session 中必须存在对应 Plan user turn。
-
-#### 回滚
-
-由于只使用现有 Session message event：
-
-```text
-user/message
-assistant/message
-append
-```
-
-旧版本 `SessionReplayer` 仍能读取。
-
-回滚后旧 ReAct 会把已经写入 Parent Session 的 Plan 顶层 turn 当普通历史消息处理，行为可接受。
-
-因此该设计具备较好的向后格式兼容性。
-
-## 4. 实现任务与测试矩阵
-
-建议分三阶段完成，避免同时修改会话持久化与 Planner 行为。
-
-### Phase A：抽取共享 Parent conversation surface，不改变现有行为
-
-实现：
-
-- 新增 `SessionConversationSurface`。
-- 将 `Agent` 的 Session surface append/replace/clear/compaction commit 逐步迁入共享组件。
-- 保持 ReAct provider 输入、Session JSONL 和恢复结果完全一致。
-- Main 将同一个 surface 实例提供给 `PlanExecuteAgent`。
-
-重点测试：
-
-```text
-AgentSessionResumeTest
-SessionStoreTest
 SessionReplayerTest
+SessionStoreTest
 SessionCheckpointStoreTest
 SessionCompactionRecoveryTest
-ConversationHistoryCompactorTest
-MainPlanAgentFactoryTest
-```
-
-验收：
-
-```text
-ReAct 行为零变化
-现有 session 可恢复
-compaction 可恢复
-Main 中 ReAct/Plan 持有同一 parent surface
-```
-
-### Phase B：Plan 顶层 Turn 进入 Parent Session
-
-实现：
-
-- `PlanExecuteAgent.run()` 在开始时 append Plan user。
-- 成功、失败、active-plan reject 等用户可见终态 append semantic assistant result。
-- `/plan resume` 不记录 `/plan resume` 为新的用户目标；恢复完成后写入恢复后的 Plan semantic result。
-- Task child transcript 继续隔离。
-
-重点测试：
-
-```text
-PlanExecuteAgentTest
-PlanExecuteRecoveryTest
-MainPlanAgentFactoryTest
 AgentSessionResumeTest
 ```
 
-新增场景：
+新增断言：
+
+- provider message 与 semantic message 内容可不同；
+- tool/synthetic user 不进入 Conversation View；
+- checkpoint round-trip 保留 Conversation View/openTurns；
+- 缺 marker 的旧 checkpoint full replay；
+- compaction replace 同步压缩 Conversation View；
+- compaction ack 不进入 Conversation View。
+
+### 16.2 Context / Compaction
+
+必须覆盖：
 
 ```text
-Plan run 完成
-→ Parent Session 含 User + Assistant
-
-随后切 ReAct
-→ ReAct history 中可看到 Plan turn
-
-进程重启
-→ attachSession 后仍存在 Plan turn
+ContextTokenTrackerTest
+ConversationHistoryCompactorTest
+AutoCompactionManagerTest
+SessionMemoryCompactorTest
 ```
 
-### Phase C：Planner 消费历史语义 context
+新增：
 
-实现：
+- Plan 触发 Parent compaction 后 ReAct anchor 正确失效；
+- 连续只运行 Plan 也能触发 Parent durable compaction；
+- Planner durable compaction 后重建 semantic context；
+- 仍超预算时 fallback 为 summary + 最近 3 turns。
 
-- 新增 `PlannerConversationContextBuilder`。
-- 新增 `PlannerRequest`。
-- Planner 使用 prior semantic context + current goal。
-- 修正 simple-goal shortcut 的 anaphora/context-dependent 判断。
-- replan 同样可以获得当前 Parent semantic context，但不改变 Plan identity。
-
-重点测试：
+### 16.3 Planner
 
 ```text
 PlannerTest
+PlannerPromptTest
+```
+
+新增：
+
+- prior 在 current goal 之前；
+- current goal 只出现一次；
+- prior 非空时不走 minimal shortcut；
+- 空历史简单任务仍保留当前优化；
+- replan 不重复当前 Plan turn。
+
+### 16.4 Plan Workflow / Recovery
+
+```text
 PlanExecuteAgentTest
 PlanExecuteRecoveryTest
+PlanStateStoreTest
+MainPlanAgentFactoryTest
+```
+
+必须新增：
+
+1. SQLite save 成功、TURN_START 前 crash → reconcile 创建 open turn，不自动执行。
+2. TURN_START 后执行中断 → resume 复用相同 turnId。
+3. SQLite terminal checkpoint 后、TURN_END 前 crash → reconcile 构造 result，不重跑 Task。
+4. legacy active Plan 无 turn → policy_input/goal recovered turn。
+5. Completed dependency old-result 恢复并进入 downstream briefing。
+6. streamed Task：display 可避免重复，但 conversationResult 仍含 Task.result。
+7. active Plan reject / review cancel 不进入 Conversation View。
+
+### 16.5 Security
+
+至少覆盖：
+
+```text
 TurnToolPolicyTest
+ToolExposurePolicyTest
+TrustedUrlPolicyTest
 ```
 
-新增场景：
+场景：历史有 URL/写权限语言而当前输入没有时，不继承 authority；Planner 可见历史文本也不能改变 runtime trusted URL。
 
-```text
-历史：
-User: 重构认证模块
-Assistant: 已修改 TokenCache
+### 16.6 验证命令
 
-当前：
-“把刚才那个缓存再优化一下”
-
-Planner request
-→ 包含历史 TokenCache
-→ current goal 仍是最后一条 user
-```
-
-权限回归：
-
-```text
-历史包含 URL / 写文件授权语言
-当前输入不包含授权
-→ TurnToolPolicy 不继承历史权限
-```
-
-### 推荐针对性测试命令
+针对性：
 
 ```bash
 mvn test \
-  -Dtest=MainPlanAgentFactoryTest,PlannerTest,PlanExecuteAgentTest,PlanExecuteRecoveryTest,AgentSessionResumeTest,SessionStoreTest,SessionReplayerTest,SessionCheckpointStoreTest,SessionCompactionRecoveryTest,ConversationHistoryCompactorTest,TurnToolPolicyTest \
+  -Dtest=SessionReplayerTest,SessionStoreTest,SessionCheckpointStoreTest,SessionCompactionRecoveryTest,AgentSessionResumeTest,ContextTokenTrackerTest,ConversationHistoryCompactorTest,AutoCompactionManagerTest,SessionMemoryCompactorTest,PlannerTest,PlannerPromptTest,PlanExecuteAgentTest,PlanExecuteRecoveryTest,PlanStateStoreTest,MainPlanAgentFactoryTest,TurnToolPolicyTest,ToolExposurePolicyTest,TrustedUrlPolicyTest \
   -DskipTests=false
 ```
 
-常规回归：
+然后：
 
 ```bash
 mvn test -Pquick
-```
-
-由于本次修改触及 Session、Plan、Context 三个核心边界，完成后应再执行：
-
-```bash
 mvn test -DskipTests=false
 mvn clean package
 git diff --check
 ```
 
-## 5. 验收清单
+---
 
-- [ ] ReAct 与 Plan 使用同一 Parent `SessionConversationSurface`。
-- [ ] Plan 顶层用户请求和最终语义结果进入 Parent Session active surface。
-- [ ] Plan Task tool/result transcript 不进入 Parent surface。
-- [ ] Planner 可以读取同一 Session 中此前 ReAct 和 Plan 的语义历史。
-- [ ] Planner 不直接消费完整 tool transcript。
-- [ ] “刚才 / 上一个 / 那个 / 继续”等上下文依赖请求不会被 simple-goal shortcut 错误绕过历史解析。
-- [ ] Plan 完成后切回 ReAct，可以理解此前 Plan 的用户请求和最终结果。
-- [ ] ReAct 完成后切 Plan，Planner 可以利用此前 ReAct 顶层语义。
-- [ ] 重启 Session 后跨模式历史仍能恢复。
-- [ ] `/plan resume` 仍按 `workspace + session_id` 恢复 DAG，不重新 Planner。
-- [ ] COMPLETED Task 不重新执行。
-- [ ] COMPLETED Task 的 `result` 从 SQLite 恢复并重新进入下游 Task briefing。
-- [ ] INTERRUPTED Task 仍创建全新的 task-local `messages`。
-- [ ] Interrupted Task 不 replay 旧 child Session transcript。
-- [ ] 历史 conversation 不参与 `TurnToolPolicy` 权限计算。
-- [ ] 历史 URL 不自动成为当前 Turn trusted URL。
-- [ ] Plan SQLite schema 无变化。
-- [ ] Session JSONL/checkpoint 格式保持兼容。
-- [ ] raw `ConversationLedger` 继续只承担审计职责，不变成运行时恢复 source of truth。
-- [ ] 针对性测试通过。
-- [ ] `mvn test -Pquick` 通过。
-- [ ] 全量测试通过。
-- [ ] `mvn clean package` 通过。
-- [ ] `git diff --check` 通过。
-- [ ] 实现完成后同步 `AGENTS.md`、`docs/agents-reference.md` 和必要的 README 行为说明。
+## 17. 验收标准
 
-## 设计结论
+- [ ] Provider Surface 与 Top-level Conversation View 是两个明确 projection。
+- [ ] ReAct provider-facing history 行为与改造前一致。
+- [ ] ReAct semantic user 保存原始 submitted input，不含 Skill/Memory 注入。
+- [ ] Tool result / synthetic user / tool-call assistant 不进入 Top-level Conversation View。
+- [ ] Plan 只在 Review EXECUTE 且 SQLite durable save 成功后创建 top-level turn。
+- [ ] Plan top-level turn 与 planId/turnId 明确关联。
+- [ ] 所有 SQLite ↔ Session crash window 都能由 reconciler 收敛。
+- [ ] `/plan resume` 不重新 Planner，不新增第二个 user goal。
+- [ ] `/plan resume` 复用 open turn；legacy active Plan 可创建 recovered turn。
+- [ ] terminal Plan 一定产生非空 conversationResult。
+- [ ] displayResult 与 conversationResult 不共享 streamed-output 过滤规则。
+- [ ] Planner 只读取 Top-level Conversation View。
+- [ ] current goal 在 Planner request 中只出现一次。
+- [ ] prior conversation 非空时不走 context-free minimal shortcut。
+- [ ] 连续 Plan-only 会话也会触发 Parent durable compaction。
+- [ ] Parent compaction 后 Top-level Conversation View 同步压缩。
+- [ ] Plan 触发 Parent compaction 后 ReAct ContextTokenTracker 不使用失效 anchor。
+- [ ] Task 仍使用独立 task-local messages。
+- [ ] Child Session transcript 仍不 replay 给 resumed Worker。
+- [ ] COMPLETED Task.result 从 SQLite 恢复并进入下游 briefing。
+- [ ] 历史 conversation 不参与工具/URL authority。
+- [ ] Plan SQLite schema 不变化。
+- [ ] 不新增第三套 conversation persistence file。
+- [ ] event schemaVersion 不提升，旧 Provider Surface 可回滚读取。
+- [ ] 针对性测试、quick、全量测试、package、diff-check 全部通过。
+- [ ] 实现完成后同步 `AGENTS.md`、`docs/agents-reference.md` 与必要 README。
 
-本次重构不应简单地“给 `PlanExecuteAgent` 再加一个 `conversationHistory`”。
+---
 
-正确边界是：
+## 18. 最终设计结论
+
+本次重构不是“给 PlanExecuteAgent 增加一个 conversationHistory”，也不是“把 ReAct activeSurface 全部传给 Planner”。
+
+最终模型：
 
 ```text
-Session-level conversational memory
-              │
-      ReAct / Plan 共享
-              │
-      用户语义连续性
-              │
-        ┌─────┴─────┐
-        │           │
-      ReAct        Plan DAG
-                    │
-             Task-local context
-                    │
-              Child Session
+                    Durable Parent Session
+                             │
+            ┌────────────────┴────────────────┐
+            │                                 │
+     Provider Surface                 Top-level Conversation
+     provider-facing                  user-facing semantic
+            │                                 │
+          ReAct                             Planner
+                                              │
+                                          Plan/DAG
+                                              │
+                     ┌────────────────────────┼──────────────────────┐
+                     │                        │                      │
+                  Task A                   Task B                 Task C
+                local context            local context          local context
+                     │                        │                      │
+               Child Session             Child Session          Child Session
 ```
 
-即：
+> **Provider Surface 负责 ReAct 的真实模型上下文；Top-level Conversation View 负责 ReAct/Plan 跨模式语义连续性；PlanStateStore 负责 durable workflow recovery；Task.result 负责依赖 handoff；Child Session 负责 Task 审计轨迹。**
 
-> **用户层共享，执行层隔离；Parent Session 负责跨模式语义连续性，PlanStateStore 负责 DAG 工作流恢复，Child Session 负责 Task 执行审计，Task.result 负责依赖节点之间的语义 handoff。**
-
-这样可以解决当前 Plan 多轮上下文缺口，同时不破坏已有 Task 边界恢复、并行隔离、权限模型和 Session 持久化结构。
+共享的是用户层会话语义，不共享执行层 transcript；恢复的是正确层级的状态，不把不同目的的上下文混为一体。

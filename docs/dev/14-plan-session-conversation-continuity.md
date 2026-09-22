@@ -434,7 +434,7 @@ Tool result、synthetic image user、Planner JSON、Reviewer transcript、Task c
 
 ### 4.3 SessionProjection 增加 Top-level Conversation View
 
-建议新增：
+新增：
 
 ```java
 record ConversationNode(
@@ -455,7 +455,7 @@ List<ConversationNode> topLevelConversation
 Map<String, OpenTurn> openTurns
 ```
 
-`OpenTurn` 至少保存：
+`OpenTurn` 固定保存：
 
 ```java
 record OpenTurn(
@@ -591,7 +591,16 @@ Plan 估算 Planner request 时不得复用 ReAct measured usage anchor，只使
 
 ### 6.1 Planner 只读取 Top-level Conversation View
 
-新增 `PlannerConversationContextBuilder`，输入 `SessionProjection.topLevelConversation`，不再对 Provider Surface 做 role-based 过滤。
+新增 `PlannerConversationContextBuilder`，输入 `SessionProjection.topLevelConversation`，不再对 Provider Surface 做 role-based 过滤。Builder 不直接返回 provider message 列表，而是确定性序列化成一个纯文本历史块：
+
+```text
+[历史会话上下文]
+[User] ...
+[Assistant] ...
+[Summary] ...
+```
+
+只保留节点顺序和语义内容，不包含 turnId/planId 等内部字段。
 
 ### 6.2 Current goal 不得重复
 
@@ -600,20 +609,25 @@ Plan 估算 Planner request 时不得复用 ReAct measured usage anchor，只使
 ```java
 record PlannerRequest(
         String goal,
-        List<LlmClient.Message> priorConversation) {}
+        String priorConversationContext) {}
 ```
 
-Planner request 固定为：
+Planner 最终仍只构造两条 provider message：
 
 ```text
+System:
 Planner system prompt
-+
-priorConversation
-+
-"请为以下任务制定执行计划：\n" + current goal
+
+User:
+<若非空，先放 priorConversationContext>
+
+[当前任务]
+<current goal>
+
+请为当前任务制定执行计划。
 ```
 
-current goal 只出现一次，并始终是最后一条 user request。
+current goal 在整个 Planner request 中只出现一次。Top-level SUMMARY 只作为 `[Summary]` 文本存在，不需要制造 synthetic assistant ack，也不存在连续 user-role 的 provider 兼容问题。
 
 ### 6.3 Simple Goal Shortcut
 
@@ -622,10 +636,10 @@ current goal 只出现一次，并始终是最后一条 user request。
 确定规则：
 
 ```text
-priorConversation 为空 AND isSimpleGoal(goal)
+priorConversationContext 为空 AND isSimpleGoal(goal)
 → 允许 createMinimalPlan()
 
-priorConversation 非空
+priorConversationContext 非空
 → 统一走 LLM Planner
 ```
 
@@ -633,10 +647,10 @@ priorConversation 非空
 
 ### 6.4 Review Supplement / Replan
 
-初始 Planning 前保存 `priorConversationSnapshot`。
+初始 Planning 前保存已经序列化完成的不可变 `priorConversationContextSnapshot`。
 
-- Plan Review SUPPLEMENT：继续使用同一 prior snapshot，只更新 goal/submittedPolicyInput。
-- execution failure replan：继续使用同一 prior snapshot，显式加入 failure reason 与已完成结果；新 Plan 必须先通过 `savePlanDurably`，随后用同一 `turnId` 追加 continuation TURN_START，把 open turn 的 `activePlanId` rebind 到新 planId，不创建新的 user conversation node。
+- Plan Review SUPPLEMENT：继续使用同一 priorConversationContextSnapshot，只更新 goal/submittedPolicyInput。
+- execution failure replan：继续使用同一 priorConversationContextSnapshot，显式加入 failure reason 与已完成结果；新 Plan 必须先通过 `savePlanDurably`，随后用同一 `turnId` 追加 continuation TURN_START，把 open turn 的 `activePlanId` rebind 到新 planId，不创建新的 user conversation node。
 - 本次 Plan 自己的 top-level turn 不得重新作为历史注入本轮 replan。
 - `/plan resume` 不重新 Planner，所以不需要恢复 prior snapshot。
 
@@ -660,7 +674,7 @@ Task `AutoCompactionManager` 不参与 Parent Session 恢复。
 
 不能依赖“下次进入 ReAct 时再压缩”。每次 Planner LLM 请求前：
 
-1. 估算 `Planner system + Top-level Conversation View + current goal`。
+1. 通过 PlannerConversationContextBuilder 序列化当前 Top-level Conversation View，并估算 `Planner system + priorConversationContext + current goal`。
 2. 若接近 Planner context profile 的 compression trigger，要求 ParentConversationContext 对 Provider Surface 执行 durable compaction。
 3. compaction 完成后重新读取 Top-level Conversation View。
 4. 重新估算 Planner request。
@@ -705,7 +719,7 @@ Plan user 不能在刚收到输入时就写 Parent semantic conversation。
 
 只有步骤 6 成功的 Plan 才进入 Top-level Conversation View。
 
-这里的“成功”不是当前 `savePlanSafely()` 的 best-effort 语义。实现时必须新增严格的 initial persistence gate，例如 `savePlanDurably(...)`：SQLite 写入失败时抛错/返回失败，**不得调用 `executePlan()`，不得创建 TURN_START，也不得把该 Plan 当成可恢复工作流**。所有能够进入 `executePlan()` 的新 Plan 路径（包括 Review EXECUTE、空 supplement fallback、execution replan 后的新 Plan）都必须先通过这一 gate。
+这里的“成功”不是当前 `savePlanSafely()` 的 best-effort 语义。实现时必须新增严格的 initial persistence gate：`savePlanDurably(...)`：SQLite 写入失败时抛错/返回失败，**不得调用 `executePlan()`，不得创建 TURN_START，也不得把该 Plan 当成可恢复工作流**。所有能够进入 `executePlan()` 的新 Plan 路径（包括 Review EXECUTE、空 supplement fallback、execution replan 后的新 Plan）都必须先通过这一 gate。
 
 终态也采用同样原则：只有 terminal Plan 状态成功 checkpoint 到 SQLite 后，才允许写 top-level assistant + TURN_END；若 terminal checkpoint 失败，保持 turn open，向用户返回持久化失败，后续由 active Plan recovery/reconciliation 收敛，而不是把 Session 先标记成已完成。
 
@@ -753,7 +767,7 @@ SQLite 是 workflow source of truth。先写 user turn 再 save Plan 会制造�
 
 处理：
 
-1. 使用 `openTurn.activePlanId`（必要时取 `planIds` 中最后一个）读取最终 terminal Plan/Task 状态。
+1. 使用 `openTurn.activePlanId` 读取最终 terminal Plan/Task 状态；`activePlanId` 为空属于 projection 损坏，按 orphaned 路径处理，不再用 planIds 猜测。
 2. `buildConversationResult(restoredPlan)`。
 3. append top-level assistant。
 4. TURN_END。
@@ -818,7 +832,7 @@ record PlanRunOutcome(
 
 ### 10.1 displayResult
 
-保持当前 CLI/TUI 体验，可以继续考虑 `streamedTaskOutputs`，避免重复打印。
+保持当前 CLI/TUI 行为，继续沿用 `streamedTaskOutputs` 的过滤逻辑，避免已经流式输出的 Task result 再打印一次。
 
 ### 10.2 conversationResult
 
@@ -898,7 +912,7 @@ ParentConversationContext mutation 方法仍应同步/串行保护，避免未�
 
 ### 14.1 Plan SQLite
 
-不修改 schema。允许新增只读 API，如 `findById(planId)`，用于 reconciliation。
+不修改 schema。新增只读 API `findById(planId)`，用于 reconciliation；现有 `findActiveInfo(workspace, sessionId)` / `findActive(...)` 继续负责 active Plan 查询。
 
 ### 14.2 Event Log
 
@@ -1040,7 +1054,7 @@ MainPlanAgentFactoryTest
 
 ### 16.5 Security
 
-至少覆盖现有：
+在现有以下测试类中新增安全回归：
 
 ```text
 TurnToolPolicyTest

@@ -693,6 +693,12 @@ Plan user 不能在刚收到输入时就写 Parent semantic conversation。
 
 只有步骤 6 成功的 Plan 才进入 Top-level Conversation View。
 
+这里的“成功”不是当前 `savePlanSafely()` 的 best-effort 语义。实现时必须新增严格的 initial persistence gate，例如 `savePlanDurably(...)`：SQLite 写入失败时抛错/返回失败，**不得调用 `executePlan()`，不得创建 TURN_START，也不得把该 Plan 当成可恢复工作流**。所有能够进入 `executePlan()` 的新 Plan 路径（包括 Review EXECUTE、空 supplement fallback、execution replan 后的新 Plan）都必须先通过这一 gate。
+
+终态也采用同样原则：只有 terminal Plan 状态成功 checkpoint 到 SQLite 后，才允许写 top-level assistant + TURN_END；若 terminal checkpoint 失败，保持 turn open，向用户返回持久化失败，后续由 active Plan recovery/reconciliation 收敛，而不是把 Session 先标记成已完成。
+
+Task checkpoint 仍保持现有 best-effort/Task-boundary recovery 语义，本次不提升为 exactly-once；因此 crash 后 reconciliation 只能基于已经成功持久化的 Task.result 构造结果，不得声称未落盘结果一定可恢复。
+
 以下情况只写 CLI/raw ledger，不进入 semantic conversation：
 
 - Planner 失败；
@@ -923,6 +929,7 @@ ParentConversationContext mutation 方法仍应同步/串行保护，避免未�
 
 ### Phase C：Plan 顶层 Turn + Reconciliation
 
+- 新增严格 `savePlanDurably` / terminal checkpoint gate；任何新 Plan 未持久化成功不得执行。
 - accepted Plan 在 SQLite save 后写 TURN_START + user。
 - terminal Plan 写 conversationResult + TURN_END。
 - PlanConversationReconciler 覆盖所有跨存储 crash window。
@@ -1005,13 +1012,15 @@ MainPlanAgentFactoryTest
 
 必须新增：
 
-1. SQLite save 成功、TURN_START 前 crash → reconcile 创建 open turn，不自动执行。
-2. TURN_START 后执行中断 → resume 复用相同 turnId。
-3. SQLite terminal checkpoint 后、TURN_END 前 crash → reconcile 构造 result，不重跑 Task。
-4. legacy active Plan 无 turn → policy_input/goal recovered turn。
-5. Completed dependency old-result 恢复并进入 downstream briefing。
-6. streamed Task：display 可避免重复，但 conversationResult 仍含 Task.result。
-7. active Plan reject / review cancel 不进入 Conversation View。
+1. initial SQLite durable save 失败 → 不执行、不创建 turn。
+2. SQLite save 成功、TURN_START 前 crash → reconcile 创建 open turn，不自动执行.
+3. TURN_START 后执行中断 → resume 复用相同 turnId。
+4. terminal checkpoint 失败 → 不写 TURN_END，turn 保持 open。
+5. SQLite terminal checkpoint 成功、TURN_END 前 crash → reconcile 构造 result，不重跑 Task。
+6. legacy active Plan 无 turn → policy_input/goal recovered turn。
+7. Completed dependency old-result 恢复并进入 downstream briefing。
+8. streamed Task：display 可避免重复，但 conversationResult 仍含 Task.result。
+9. active Plan reject / review cancel 不进入 Conversation View。
 
 ### 16.5 Security
 
@@ -1030,7 +1039,7 @@ ToolRegistryTest
 
 ```bash
 mvn test \
-  -Dtest=SessionReplayerTest,SessionStoreTest,SessionCheckpointStoreTest,SessionCompactionRecoveryTest,AgentSessionResumeTest,ContextTokenTrackerTest,ConversationHistoryCompactorTest,AutoCompactionManagerTest,SessionMemoryCompactorTest,PlannerTest,PlannerPromptTest,PlanExecuteAgentTest,PlanExecuteRecoveryTest,PlanStateStoreTest,MainPlanAgentFactoryTest,TurnToolPolicyTest,ToolExposurePolicyTest,TrustedUrlPolicyTest \
+  -Dtest=SessionReplayerTest,SessionStoreTest,SessionCheckpointStoreTest,SessionCompactionRecoveryTest,AgentSessionResumeTest,ContextTokenTrackerTest,ConversationHistoryCompactorTest,AutoCompactionManagerTest,SessionMemoryCompactorTest,PlannerTest,PlannerPromptTest,PlanExecuteAgentTest,PlanExecuteRecoveryTest,PlanStateStoreTest,MainPlanAgentFactoryTest,TurnToolPolicyTest,ToolRegistryTest \
   -DskipTests=false
 ```
 
@@ -1051,7 +1060,9 @@ git diff --check
 - [ ] ReAct provider-facing history 行为与改造前一致。
 - [ ] ReAct semantic user 保存原始 submitted input，不含 Skill/Memory 注入。
 - [ ] Tool result / synthetic user / tool-call assistant 不进入 Top-level Conversation View。
-- [ ] Plan 只在 Review EXECUTE 且 SQLite durable save 成功后创建 top-level turn。
+- [ ] Plan 只在 Review EXECUTE 且严格 SQLite durable save 成功后创建 top-level turn。
+- [ ] 任一新 Plan 执行路径都不能绕过 initial persistence gate。
+- [ ] terminal Plan checkpoint 失败时不得提前写 TURN_END。
 - [ ] Plan top-level turn 与 planId/turnId 明确关联。
 - [ ] 所有 SQLite ↔ Session crash window 都能由 reconciler 收敛。
 - [ ] `/plan resume` 不重新 Planner，不新增第二个 user goal。

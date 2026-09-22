@@ -1015,15 +1015,14 @@ MainPlanAgentFactoryTest
 
 ### 16.5 Security
 
-至少覆盖：
+至少覆盖现有：
 
 ```text
 TurnToolPolicyTest
-ToolExposurePolicyTest
-TrustedUrlPolicyTest
+ToolRegistryTest
 ```
 
-场景：历史有 URL/写权限语言而当前输入没有时，不继承 authority；Planner 可见历史文本也不能改变 runtime trusted URL。
+在上述测试类中新增场景：历史有 URL/写权限语言而当前输入没有时，不继承 authority；Planner 可见历史文本也不能改变 runtime trusted URL。若实现过程中拆出独立 trusted-url policy 类，再为该新类新增对应测试文件。
 
 ### 16.6 验证命令
 

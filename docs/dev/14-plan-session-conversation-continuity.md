@@ -455,6 +455,18 @@ List<ConversationNode> topLevelConversation
 Map<String, OpenTurn> openTurns
 ```
 
+`OpenTurn` 至少保存：
+
+```java
+record OpenTurn(
+        String turnId,
+        String rootPlanId,
+        String activePlanId,
+        List<String> planIds) {}
+```
+
+一个用户顶层 Plan turn 可以经历多个 execution replan，因此 **turnId 是用户会话轮次身份，planId 是工作流 attempt 身份，二者不是一一对应**。
+
 并提供：
 
 ```java
@@ -476,7 +488,7 @@ ASSISTANT_MESSAGE(surface=append, conversation=...)
 TURN_END(surface=none, payload={turnId, planId, status})
 ```
 
-`SessionReplayer` 用 TURN_START/TURN_END 维护 `openTurns`。ReAct 首版无需强制补 TURN_START/TURN_END。
+`SessionReplayer` 用 TURN_START/TURN_END 维护 `openTurns`。首次 TURN_START 创建 open turn；如果同一个 `turnId` 后续因 execution replan 绑定新的 planId，则允许追加另一个 TURN_START，payload 标记 `continuation=true`，只更新该 turn 的 `activePlanId/planIds`，**不新增第二条 semantic user message**。ReAct 首版无需强制补 TURN_START/TURN_END。
 
 ### 4.5 Checkpoint
 
@@ -624,7 +636,7 @@ priorConversation 非空
 初始 Planning 前保存 `priorConversationSnapshot`。
 
 - Plan Review SUPPLEMENT：继续使用同一 prior snapshot，只更新 goal/submittedPolicyInput。
-- execution failure replan：继续使用同一 prior snapshot，显式加入 failure reason 与已完成结果。
+- execution failure replan：继续使用同一 prior snapshot，显式加入 failure reason 与已完成结果；新 Plan 必须先通过 `savePlanDurably`，随后用同一 `turnId` 追加 continuation TURN_START，把 open turn 的 `activePlanId` rebind 到新 planId，不创建新的 user conversation node。
 - 本次 Plan 自己的 top-level turn 不得重新作为历史注入本轮 replan。
 - `/plan resume` 不重新 Planner，所以不需要恢复 prior snapshot。
 
@@ -682,7 +694,7 @@ Plan user 不能在刚收到输入时就写 Parent semantic conversation。
 2. Planner.createPlan(prior + current goal)
 3. HITL Plan Review / supplement
 4. 用户最终选择 EXECUTE
-5. savePlanSafely(plan, sessionId, final submittedPolicyInput)
+5. savePlanDurably(plan, sessionId, final submittedPolicyInput)
 6. 确认 Plan durable 写入 SQLite
 7. TURN_START(planId, turnId)
 8. USER_MESSAGE(top-level, final submittedPolicyInput)
@@ -731,15 +743,17 @@ SQLite 是 workflow source of truth。先写 user turn 再 save Plan 会制造�
 
 #### B. Parent 有 open Plan turn，SQLite Plan 仍 active
 
-正常中断状态，不修改 turn；`/plan resume` 复用同一 turnId。
+正常中断状态。若 `openTurn.activePlanId == activePlan.id`，不修改；`/plan resume` 复用同一 turnId。
 
-#### C. Parent 有 open Plan turn，SQLite Plan 已 terminal
+若二者不同，典型场景是 execution replan 的新 Plan 已保存但进程在 continuation TURN_START 前崩溃。由于当前设计保证同一 Session 同时只有一个 active Plan，reconciler 将该 open turn rebind 到唯一 active planId，并追加 `TURN_START(continuation=true)`；不新增 user message，不自动执行。
 
-表示可能 crash 在 SQLite terminal checkpoint 后、assistant/TURN_END 前。
+#### C. Parent 有 open Plan turn，且当前 Session 已没有 active Plan
+
+表示可能 crash 在最终 active Plan 的 SQLite terminal checkpoint 后、assistant/TURN_END 前。不要仅看到 `rootPlanId` 已 FAILED 就关闭 turn，因为它可能已经 execution replan 到后续 planId。
 
 处理：
 
-1. 按 planId 读取 terminal Plan/Task 状态。
+1. 使用 `openTurn.activePlanId`（必要时取 `planIds` 中最后一个）读取最终 terminal Plan/Task 状态。
 2. `buildConversationResult(restoredPlan)`。
 3. append top-level assistant。
 4. TURN_END。
@@ -1013,14 +1027,16 @@ MainPlanAgentFactoryTest
 必须新增：
 
 1. initial SQLite durable save 失败 → 不执行、不创建 turn。
-2. SQLite save 成功、TURN_START 前 crash → reconcile 创建 open turn，不自动执行.
+2. SQLite save 成功、TURN_START 前 crash → reconcile 创建 open turn，不自动执行。
 3. TURN_START 后执行中断 → resume 复用相同 turnId。
-4. terminal checkpoint 失败 → 不写 TURN_END，turn 保持 open。
-5. SQLite terminal checkpoint 成功、TURN_END 前 crash → reconcile 构造 result，不重跑 Task。
-6. legacy active Plan 无 turn → policy_input/goal recovered turn。
-7. Completed dependency old-result 恢复并进入 downstream briefing。
-8. streamed Task：display 可避免重复，但 conversationResult 仍含 Task.result。
-9. active Plan reject / review cancel 不进入 Conversation View。
+4. execution replan 产生新 planId → 同一 turn rebind activePlanId，不新增 user node。
+5. replan 新 Plan save 成功、continuation TURN_START 前 crash → reconciler rebind 到唯一 active Plan。
+6. terminal checkpoint 失败 → 不写 TURN_END，turn 保持 open。
+7. SQLite terminal checkpoint 成功、TURN_END 前 crash → reconcile 构造 result，不重跑 Task。
+8. legacy active Plan 无 turn → policy_input/goal recovered turn。
+9. Completed dependency old-result 恢复并进入 downstream briefing。
+10. streamed Task：display 可避免重复，但 conversationResult 仍含 Task.result。
+11. active Plan reject / review cancel 不进入 Conversation View。
 
 ### 16.5 Security
 
@@ -1063,7 +1079,8 @@ git diff --check
 - [ ] Plan 只在 Review EXECUTE 且严格 SQLite durable save 成功后创建 top-level turn。
 - [ ] 任一新 Plan 执行路径都不能绕过 initial persistence gate。
 - [ ] terminal Plan checkpoint 失败时不得提前写 TURN_END。
-- [ ] Plan top-level turn 与 planId/turnId 明确关联。
+- [ ] turnId 与 planId 语义明确分离：一个用户 turn 可以关联多个 replan planId，但任一时刻只有一个 activePlanId。
+- [ ] execution replan 不创建第二个 semantic user turn。
 - [ ] 所有 SQLite ↔ Session crash window 都能由 reconciler 收敛。
 - [ ] `/plan resume` 不重新 Planner，不新增第二个 user goal。
 - [ ] `/plan resume` 复用 open turn；legacy active Plan 可创建 recovered turn。

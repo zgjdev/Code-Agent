@@ -261,10 +261,16 @@ CLI 入口 / Banner / .env 读取 / 日志初始化 / 模式切换 / JLine raw m
 ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 
 ### ConversationLedger.java
-system / user / assistant / tool_call / tool_result 原始消息的 append-only JSONL 账本 / mode-actor-source 归因 / POSIX 权限收紧
+system / user / assistant / tool_call / tool_result 原始消息的 append-only JSONL 账本 / mode-actor-source 归因 / POSIX 权限收紧。它只承担审计/调试，不是 Session 恢复或 Planner 多轮上下文的 source of truth。
+
+### ParentConversationContext.java / SessionProjection.java / SessionReplayer.java
+ParentConversationContext 是 Parent Session provider context 的共享协调器，ReAct 与 Plan 持有同一实例；SessionProjection 同时维护两套 projection：`activeSurface` 是 ReAct provider-facing context，`topLevelConversation` 是只含顶层 user/final assistant/summary 的跨模式语义视图。message event 通过可选 `payload.conversation` 同时更新语义视图；checkpoint 同步保存 semantic projection/open Plan turns，旧 checkpoint 缺 semantic marker 时回退 full event replay。durable compaction 替换 Provider Surface 的同时，用同一 summary 收敛 Top-level Conversation View。
+
+### PlanConversationReconciler.java / PlanConversationResultBuilder.java
+Reconciler 负责 SQLite PlanStateStore 与 Parent Session Plan turn 的跨存储崩溃收敛：active Plan 缺 turn 时补 recovered turn，execution replan 用同一 turnId 绑定新的 activePlanId，terminal Plan 缺 assistant/TURN_END 时从已持久化 Task state 确定性补齐。PlanConversationResultBuilder 生成不依赖 streaming、也不额外调用 LLM 的 durable 顶层语义结果。
 
 ### PlanExecuteAgent.java
-统一的多 Agent 协作 Plan-and-Execute：规划后执行 / 可选人工计划门 / DAG 任务执行 / 并行批次 / 可选步骤自动评审与重试 / 失败重规划。CLI/TUI `/plan` 还启用 `PlanStateStore`：将 Plan/DAG 与 Task 状态 checkpoint 到 SQLite，并用当前持久化 Session 的 `session_id` 绑定 active Plan；prompt 不再参与恢复身份。同一 Session 同时最多一个未终结 Plan，`/plan resume` 显式继续，`/plan abandon` 显式放弃；恢复保留 `COMPLETED` 节点并将遗留 `RUNNING/REVIEWING` 转成 `INTERRUPTED` 后从 Task 边界重试。恢复不序列化 `TrustedUrlContext`，也不保证 tool-call 级 exactly-once。两个开关由构造时的 `PipelineOptions` 预设决定（`/plan` = `FULL_PRESET`，两个开关都开）
+统一的多 Agent 协作 Plan-and-Execute：规划后执行 / 可选人工计划门 / DAG 任务执行 / 并行批次 / 可选步骤自动评审与重试 / 失败重规划。CLI/TUI `/plan` 启用 `PlanStateStore`，新 Plan 必须先通过严格 durable save gate 才开始执行；接受执行后以 TURN_START + semantic user 进入 Parent Session，终态 SQLite checkpoint 成功后再写 durable conversationResult + TURN_END。ReAct/Plan 共享 ParentConversationContext，因此 Plan 顶层结果立即进入后续 ReAct provider history。恢复仍保留 `COMPLETED` 节点并将遗留 `RUNNING/REVIEWING` 转成 `INTERRUPTED` 后从 Task 边界重试；Task child transcript 不 replay，TrustedUrlContext 也不持久化，不保证 tool-call 级 exactly-once。
 
 ### PipelineOptions.java / StepReviewer.java / StepReviewDecision.java
 统一模式的两个开关与审查层契约；`/plan` 映射到 `FULL_PRESET`，`PLAN_PRESET` / `TEAM_PRESET` 仅保留在构造层（CLI 不可触达）
@@ -276,10 +282,10 @@ system / user / assistant / tool_call / tool_result 原始消息的 append-only 
 可配置角色子代理 / 独立对话历史 / 统一模式中只承担 Reviewer 角色，不调用工具
 
 ### Planner.java
-LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖计算
+LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖计算。PlannerRequest 可携带由 PlannerConversationContextBuilder 从 Top-level Conversation View 确定性序列化出的历史文本；有历史时禁用 context-free minimal shortcut，current goal 在请求中只出现一次。Plan-only 长会话在 Planner 调用前也会检查 Parent context budget，必要时触发 durable Parent compaction。
 
 ### ExecutionPlan.java / PlanStateStore.java
-`ExecutionPlan` 负责 DAG 拓扑排序 / 可执行任务判定 / 进度可视化；`PlanStateStore` 负责 SQLite DAG checkpoint 与 Task 边界恢复。active Plan 按 workspace + `session_id` 关联，终态 Plan 不参与恢复；旧版仅有 `resume_key` 且没有 `session_id` 的记录视为 legacy unbound plan，不做猜测式绑定。
+`ExecutionPlan` 负责 DAG 拓扑排序 / 可执行任务判定 / 进度可视化；`PlanStateStore` 负责 SQLite DAG checkpoint 与 Task 边界恢复。active Plan 按 workspace + `session_id` 关联，终态 Plan 不参与 active lookup；`findById` / `findActiveRecord` 提供 reconciliation 所需的只读持久化视图。COMPLETED Task 的 result 会恢复并继续进入下游 StepBriefing；旧版仅有 `resume_key` 且没有 `session_id` 的记录视为 legacy unbound plan，不做猜测式绑定。
 
 ### ToolRegistry.java
 11 个核心内置工具 + MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult。代码理解默认路径是 `glob_files` / `grep_code` / `read_file` 现用现查，`grep_code` 优先走 ripgrep 并按 `max_results` / `head_limit` / `max_chars` 渐进返回，`search_code` 保留为 RAG 语义辅助。确定性搜索链路的回归样例见 `docs/code-search-golden-set.md`。

@@ -127,7 +127,7 @@ sequenceDiagram
     end
 ```
 
-上下文接近阈值时，先使用 RequestSnapshotFactory + ContextTokenTracker 预测；触发压缩后原地重建同一份 conversationHistory，保留最近 1 个 user 轮次及 tool 边界，并向 ledger 追加边界事件而不删除旧记录。
+上下文接近阈值时，先使用 RequestSnapshotFactory + ContextTokenTracker 预测；触发压缩后通过 ParentConversationContext 对 Parent Session 做 durable compaction，保留最近 3 个 user 轮次及 tool 边界。SessionProjection 同时维护 Provider Surface 与 Top-level Conversation View：前者是 ReAct 实际发送上下文，后者只保留 ReAct/Plan 的顶层用户请求、最终结果和压缩摘要，供 Planner 做跨模式多轮理解。
 
 ## 5. 功能改造的标准落点
 
@@ -143,7 +143,8 @@ sequenceDiagram
 
 - ReAct 与 PlanExecuteAgent（`/plan` 入口，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
 - PlanExecuteAgent 的 DAG 就绪任务先经 `ConflictAwareBatchSelector` 按任务资源声明组批；资源冲突或 `workspaceWrite` 不得进入同一批次。任务完成前必须通过确定性证据门禁和可用的 Reviewer；失败重试耗尽进入 `UNVERIFIED`，不解锁后继。
-- CLI/TUI 的 `/plan` 会把 DAG 与 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`，并通过当前持久化 Session 的 `session_id` 关联 active Plan；prompt 只表示任务内容，不作为恢复身份。同一 Session 同时最多一个 `CREATED/RUNNING` Plan，`/plan resume` 显式恢复，`/plan abandon` 显式放弃。恢复时已完成节点不重跑，上次 `RUNNING/REVIEWING` 节点转为 `INTERRUPTED` 后从 Task 边界重新执行；Session 恢复只提示，不自动执行副作用。
+- CLI/TUI 的 `/plan` 会把 DAG 与 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`，并通过当前持久化 Session 的 `session_id` 关联 active Plan；prompt 只表示任务内容，不作为恢复身份。同一 Session 同时最多一个 `CREATED/RUNNING` Plan，`/plan resume` 显式恢复，`/plan abandon` 显式放弃。新 Plan 必须先严格写入 SQLite 才能进入执行和 Parent Conversation；SQLite 与 Session Event Log 之间通过 planId/turnId + PlanConversationReconciler 收敛崩溃窗口。恢复时已完成节点不重跑，上次 `RUNNING/REVIEWING` 节点转为 `INTERRUPTED` 后从 Task 边界重新执行；Session 恢复只提示，不自动执行副作用。
+- ReAct 与 PlanExecuteAgent 共享同一个 ParentConversationContext，但只共享 Session 级顶层语义连续性；Planner 只读取 Top-level Conversation View，不读取 tool result、synthetic user、Skill/Memory 注入或 Task child transcript。Task Worker 仍使用独立 task-local messages；历史对话只用于语义理解，绝不能成为当前 Turn 的权限来源。
 - 工具授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard；策略拒绝不能通过换工具、provider 或分支绕过。
 - URL 只能来自顶层用户原文或成功 web_search 的结构化 discoveredUrls；搜索正文、reasoning、普通工具输出和回复文本都不能产生新授权。计划分支默认隔离 URL 凭据，只有声明的 DAG 后继可继承；步骤自动评审（stepReview）不改变这一步的授权继承。
 - @path/MCP resource 展开在进入 Agent 前完成；项目外绝对路径和符号链接逃逸保持原文。
@@ -165,7 +166,7 @@ sequenceDiagram
 ```text
 命令解析：mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest
 工具/策略：mvn test -Dtest=ToolRegistryTest,TurnToolPolicyTest,ApprovalPolicyTest
-计划/多 Agent：mvn test -Dtest=ExecutionPlanTest,PlanStateStoreTest,PlannerTest,PlanExecuteAgentTest,PlanExecuteRecoveryTest,StepBriefingTest,SubAgentStepReviewerTest,PipelineOptionsTest
+计划/多 Agent：mvn test -Dtest=ExecutionPlanTest,PlanStateStoreTest,PlannerTest,PlanExecuteAgentTest,PlanExecuteRecoveryTest,PlanConversationReconcilerTest,MainPlanAgentFactoryTest,StepBriefingTest,SubAgentStepReviewerTest,PipelineOptionsTest
 Memory/RAG：mvn test -Dtest=MemoryManagerTest,ConversationHistoryCompactorTest,VectorStoreTest,CodeIndexTest
 MCP/Web：mvn test -Dtest=McpSchemaSanitizerTest,JsonRpcClientTest,NetworkPolicyTest,WebFetcherTest
 TUI：mvn test -Pphase16-smoke

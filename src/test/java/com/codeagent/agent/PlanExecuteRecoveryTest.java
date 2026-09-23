@@ -191,13 +191,15 @@ class PlanExecuteRecoveryTest {
         try (SessionStore sessions = SessionStore.open(tempDir.resolve("history-conversation"));
              SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
                      tempDir, "glm", "test", null, "react", "agent"))) {
-            ParentConversationContext context = parentContext(session);
+            Agent reactAgent = new Agent(client, registry);
+            reactAgent.attachSession(session);
+            ParentConversationContext context = reactAgent.getParentConversationContext();
             PlanStateStore store = new PlanStateStore(tempDir.resolve("conversation-plans.db"));
             PlanExecuteAgent agent = new PlanExecuteAgent(
                     client,
                     registry,
                     new SingleTaskPlanner(client),
-                    null,
+                    reactAgent.getMemoryManager(),
                     (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
                     new PrintStream(new ByteArrayOutputStream()),
                     PipelineOptions.PLAN_PRESET);
@@ -214,6 +216,15 @@ class PlanExecuteRecoveryTest {
                     session.projection().conversationMessages().get(0).content());
             assertTrue(session.projection().conversationMessages().get(1).content()
                     .contains("剩余任务完成"));
+            assertTrue(reactAgent.getConversationHistory().stream()
+                    .anyMatch(message -> "user".equals(message.role())
+                            && "完成当前分析".equals(message.content())),
+                    "Plan 顶层 user 必须立即进入共享 ReAct Provider Surface");
+            assertTrue(reactAgent.getConversationHistory().stream()
+                    .anyMatch(message -> "assistant".equals(message.role())
+                            && message.content() != null
+                            && message.content().contains("剩余任务完成")),
+                    "Plan 顶层 result 必须立即进入共享 ReAct Provider Surface");
             assertTrue(session.projection().openTurns().isEmpty());
             assertTrue(store.findActive(tempDir, session.sessionId()).isEmpty());
         }

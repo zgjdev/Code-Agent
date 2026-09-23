@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.codeagent.history.ConversationLedger;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.llm.LlmTraceLogger;
+import com.codeagent.memory.TokenBudget;
 import com.codeagent.prompt.PromptAssembler;
 import com.codeagent.prompt.PromptContext;
 import com.codeagent.prompt.PromptMode;
@@ -76,21 +77,7 @@ public class Planner {
             return createMinimalPlan(goal);
         }
 
-        StringBuilder planningRequest = new StringBuilder();
-        if (!priorConversationContext.isBlank()) {
-            planningRequest.append(priorConversationContext).append("\n\n");
-        }
-        planningRequest.append("[当前任务]\n")
-                .append(goal)
-                .append("\n\n请为当前任务制定执行计划。");
-
-        // 构建规划请求
-        List<LlmClient.Message> messages = Arrays.asList(
-                LlmClient.Message.system(promptAssembler.assemble(PromptMode.PLANNER, PromptContext.builder()
-                        .projectMemoryContext(buildProjectMemoryContext())
-                        .build())),
-                LlmClient.Message.user(planningRequest.toString())
-        );
+        List<LlmClient.Message> messages = buildPlanningMessages(request);
         conversationLedger.appendMessage("plan", "planner", "system_prompt", messages.get(0));
         conversationLedger.appendMessage("plan", "planner", "planning_request", messages.get(1));
 
@@ -108,6 +95,26 @@ public class Planner {
 
         // 解析JSON计划
         return parsePlan(goal, planJson);
+    }
+
+    public int estimateRequestTokens(PlannerRequest request) {
+        return TokenBudget.estimateMessagesTokens(buildPlanningMessages(request));
+    }
+
+    private List<LlmClient.Message> buildPlanningMessages(PlannerRequest request) {
+        StringBuilder planningRequest = new StringBuilder();
+        if (!request.priorConversationContext().isBlank()) {
+            planningRequest.append(request.priorConversationContext()).append("\n\n");
+        }
+        planningRequest.append("[当前任务]\n")
+                .append(request.goal())
+                .append("\n\n请为当前任务制定执行计划。");
+        return Arrays.asList(
+                LlmClient.Message.system(promptAssembler.assemble(PromptMode.PLANNER, PromptContext.builder()
+                        .projectMemoryContext(buildProjectMemoryContext())
+                        .build())),
+                LlmClient.Message.user(planningRequest.toString())
+        );
     }
 
     private String buildProjectMemoryContext() {

@@ -14,8 +14,8 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: maven
-      - name: Core targeted tests
+      - name: Continuity targeted tests
         run: >
           mvn -q -DskipTests=false
-          -Dtest=SessionReplayerTest,SessionCheckpointStoreTest,AgentSessionResumeTest,PlannerTest,PlanStateStoreTest,PlanConversationReconcilerTest,PlanExecuteRecoveryTest,MainPlanAgentFactoryTest
+          -Dtest=SessionReplayerTest,SessionStoreTest,SessionCheckpointStoreTest,SessionCompactionRecoveryTest,AgentSessionResumeTest,ContextTokenTrackerTest,ConversationHistoryCompactorTest,AutoCompactionManagerTest,SessionMemoryCompactorTest,PlannerTest,PlannerPromptTest,PlanExecuteAgentTest,PlanExecuteRecoveryTest,PlanStateStoreTest,PlanConversationReconcilerTest,MainPlanAgentFactoryTest,TurnToolPolicyTest,ToolRegistryTest
           test

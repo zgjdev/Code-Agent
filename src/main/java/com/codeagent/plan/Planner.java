@@ -53,22 +53,43 @@ public class Planner {
                 : conversationLedger;
     }
 
+    public record PlannerRequest(String goal, String priorConversationContext) {
+        public PlannerRequest {
+            goal = goal == null ? "" : goal;
+            priorConversationContext = priorConversationContext == null ? "" : priorConversationContext.trim();
+        }
+    }
+
     /**
-     * 为复杂任务创建执行计划
+     * 为复杂任务创建执行计划。
      */
     public ExecutionPlan createPlan(String goal) throws IOException {
+        return createPlan(new PlannerRequest(goal, ""));
+    }
+
+    public ExecutionPlan createPlan(PlannerRequest request) throws IOException {
+        String goal = request.goal();
+        String priorConversationContext = request.priorConversationContext();
         out.println("📋 正在规划任务: " + goal + "\n");
 
-        if (isSimpleGoal(goal)) {
+        if (priorConversationContext.isBlank() && isSimpleGoal(goal)) {
             return createMinimalPlan(goal);
         }
+
+        StringBuilder planningRequest = new StringBuilder();
+        if (!priorConversationContext.isBlank()) {
+            planningRequest.append(priorConversationContext).append("\n\n");
+        }
+        planningRequest.append("[当前任务]\n")
+                .append(goal)
+                .append("\n\n请为当前任务制定执行计划。");
 
         // 构建规划请求
         List<LlmClient.Message> messages = Arrays.asList(
                 LlmClient.Message.system(promptAssembler.assemble(PromptMode.PLANNER, PromptContext.builder()
                         .projectMemoryContext(buildProjectMemoryContext())
                         .build())),
-                LlmClient.Message.user("请为以下任务制定执行计划：\n" + goal)
+                LlmClient.Message.user(planningRequest.toString())
         );
         conversationLedger.appendMessage("plan", "planner", "system_prompt", messages.get(0));
         conversationLedger.appendMessage("plan", "planner", "planning_request", messages.get(1));
@@ -224,6 +245,11 @@ public class Planner {
      * 根据执行结果重新规划
      */
     public ExecutionPlan replan(ExecutionPlan failedPlan, String failureReason) throws IOException {
+        return replan(failedPlan, failureReason, "");
+    }
+
+    public ExecutionPlan replan(ExecutionPlan failedPlan, String failureReason,
+                                String priorConversationContext) throws IOException {
         out.println("🔄 重新规划，原因: " + failureReason + "\n");
 
         StringBuilder context = new StringBuilder();
@@ -241,7 +267,7 @@ public class Planner {
 
         context.append("\n请制定新的执行计划，避开之前的问题。");
 
-        return createPlan(context.toString());
+        return createPlan(new PlannerRequest(context.toString(), priorConversationContext));
     }
 
     private boolean isSimpleGoal(String goal) {

@@ -47,13 +47,15 @@ mvn test -DskipTests=false
 - 新增 `/plan` 入口，以一次性计划执行方式增强默认的 `ReAct`
 - 计划生成后，会先与用户确认再执行
 - CLI/TUI 的 Plan DAG 与 Task 状态会 checkpoint 到 `~/.codeagent/plans/plans.db`，并绑定当前持久化 Session；同一 Session 同时最多一个未终结 Plan
+- ReAct 与 Plan 共享同一 Parent Session 的顶层语义对话：Plan 完成后切回 ReAct 可以引用刚才的 Plan 结果，ReAct 后切入 Plan 时 Planner 也会读取此前顶层对话；Tool Result、Task transcript、Skill/Memory 注入不会直接进入 Planner 历史
+- 新 Plan 必须先成功写入 SQLite 才开始执行；Session Event Log 与 SQLite 之间的中断窗口会按 planId/turnId 自动校对，但不会因此自动恢复执行副作用
 - 恢复 Session 后如检测到未完成 Plan 只做提示；使用 `/plan resume` 显式继续，`/plan abandon` 显式放弃。恢复会跳过已完成节点，并把上次中断中的节点从 Task 边界重新执行
 - 恢复粒度是 Task，不承诺单个 tool call 的 exactly-once；中断任务会先收到检查已有副作用/产物的恢复提示
 - 更适合多步骤、带依赖关系的复杂任务
 
 ### 第三期：Memory + 上下文工程
 
-- 每个 Agent 实例用自己的 `conversationHistory` 管理当前对话与工具结果，不再复制第二份影子短期记忆
+- Parent Session 通过同一 append-only Event Log 同时派生 Provider Surface 与 Top-level Conversation View：ReAct 使用前者作为真实模型上下文，ReAct/Plan 跨模式多轮语义使用后者；Task Worker 仍保留隔离的 task-local context
 - 长期记忆通过 `/save <事实>` 或用户明确说“记一下 / 记住”时的 `save_memory` 保存关键事实，默认项目级作用域，跨会话复用
 - 项目级记忆通过 `CODEAGENT.md` / `.codeagent/CODEAGENT.md` 启动自动注入，适合提交到仓库的团队共享规则；`CODEAGENT.local.md` / `.codeagent/CODEAGENT.local.md` 只做本地覆盖
 - 注入给模型的相关记忆只使用长期稳定事实，不把当前轮短期对话误当成“历史记忆”

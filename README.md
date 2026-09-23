@@ -672,7 +672,7 @@ I
 - `list_dir` - 列出目录内容
 - `glob_files` - 按文件名 glob 实时查找项目内文件（只读，自动跳过常见构建/依赖目录）
 - `grep_code` - 按关键字或正则实时搜索项目内代码，优先使用 ripgrep，返回文件、行号、可选上下文、partial 状态与 suggested_reads
-- `execute_command` - 在当前项目目录执行短时 Shell 命令（默认 60 秒超时，黑名单拦截破坏性命令）
+- `execute_command` - 在当前项目目录执行短时 Shell 命令（Windows 使用 PowerShell，Linux/macOS 使用 Bash；默认 60 秒超时，黑名单拦截破坏性命令）
 - `create_project` - 创建项目结构（java/python/node）
 - `search_code` - 语义检索代码库（自然语言查询，适合作为模糊语义或常规搜索无果时的辅助）
 - `web_search` - 在用户目标明确且需要联网时搜索互联网信息

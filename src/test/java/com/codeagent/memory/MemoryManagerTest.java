@@ -40,7 +40,8 @@ class MemoryManagerTest {
         manager.storeFact("默认用中文回答", "global");
         MemoryEntry projectEntry = longTerm.search("Java", 5, manager.getCurrentProject()).get(0);
         assertEquals("project", projectEntry.getMetadata().get("scope"));
-        assertTrue(projectEntry.getMetadata().get("project").endsWith("/repo/current"));
+        assertTrue(Path.of(projectEntry.getMetadata().get("project"))
+                .endsWith(Path.of("repo", "current")));
         assertEquals("global", longTerm.search("中文", 5).get(0).getMetadata().get("scope"));
     }
 

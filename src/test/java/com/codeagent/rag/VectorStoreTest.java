@@ -83,4 +83,17 @@ class VectorStoreTest {
         store.clearProject();
         assertEquals(0, store.getStats().chunkCount());
     }
+
+    @Test
+    void equivalentProjectPathsShareTheSameIndex() throws Exception {
+        CodeChunk chunk = CodeChunk.classChunk(
+                "Agent.java", "Agent", "class Agent {}", 1, 1);
+        store.insertChunks(List.of(
+                new VectorStore.CodeChunkEntry(chunk, new float[]{1.0f, 0.0f})));
+
+        String absoluteProject = Path.of(TEST_PROJECT).toAbsolutePath().normalize().toString();
+        try (VectorStore equivalent = new VectorStore(absoluteProject)) {
+            assertEquals(1, equivalent.getStats().chunkCount());
+        }
+    }
 }

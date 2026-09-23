@@ -417,7 +417,7 @@ public class ToolRegistry {
                 }
                 Path relative = projectRoot.relativize(path);
                 if (matcher.matches(relative) || fileNameMatcher.matches(path.getFileName())) {
-                    matches.add(relative.toString());
+                    matches.add(ToolPathFormatter.portable(relative));
                 }
             }));
         } catch (Exception e) {
@@ -1422,7 +1422,8 @@ public class ToolRegistry {
 
         Process process = null;
         try {
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", normalized);
+            ProcessBuilder pb = new ProcessBuilder(
+                    CommandShell.forCurrentPlatform().command(normalized));
             pb.directory(new File(projectPath));
             pb.redirectErrorStream(true);
             if (sanitizeCommandEnvironment) {

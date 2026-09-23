@@ -122,6 +122,28 @@ class ImageReferenceParserTest {
     }
 
     @Test
+    void resolvesStandardFileUri(@TempDir Path tempDir) throws Exception {
+        Path image = tempDir.resolve("standard uri.png");
+        Files.write(image, new byte[]{1, 2, 3});
+
+        LlmClient.Message message = ImageReferenceParser.userMessage(
+                "看看 @image:<" + image.toUri() + ">",
+                tempDir);
+
+        assertTrue(message.hasImageContent(), "标准 file URI 应能解析为本地路径");
+    }
+
+    @Test
+    void convertsFileUrisForWindowsAndPosix() {
+        assertEquals("D:/path with spaces/image.png",
+                ImageReferenceParser.fileUriToLocalPath("file:///D:/path%20with%20spaces/image.png", true));
+        assertEquals("\\\\server\\share\\image.png",
+                ImageReferenceParser.fileUriToLocalPath("file://server/share/image.png", true));
+        assertEquals("/tmp/path with spaces/image.png",
+                ImageReferenceParser.fileUriToLocalPath("file:///tmp/path%20with%20spaces/image.png", false));
+    }
+
+    @Test
     void barePathStopsAtFullWidthPunctuation(@TempDir Path tempDir) throws Exception {
         // 用例对应 docs/phase-21-image-input-manual-test.md Case 9：
         // "@image:./shot.png。这是什么？"  —— 路径应在全角句号处截断，不再吞掉后面的中文。

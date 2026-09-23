@@ -220,8 +220,12 @@ class ToolRegistryTest {
     void shouldTimeoutLongRunningCommandWithoutHanging(@TempDir Path tempDir) {
         ToolRegistry registry = new ToolRegistry(1);
         registry.setProjectPath(tempDir.toString());
+        String command = CommandShell.forCurrentPlatform().isWindows()
+                ? "Start-Sleep -Seconds 2"
+                : "sleep 2";
 
-        String result = registry.executeTool("execute_command", "{\"command\":\"sleep 2\"}");
+        String result = registry.executeTool(
+                "execute_command", "{\"command\":\"" + command + "\"}");
 
         assertTrue(result.contains("命令执行超时"));
     }

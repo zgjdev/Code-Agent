@@ -78,7 +78,11 @@ public final class SessionCheckpointStore {
                             || sequence < 0 || sequence >= events.size()
                             || !root.path("eventPrefixSha256").asText()
                                     .equals(prefixHash(events, sequence))) continue;
-                    SessionProjection checkpoint = decodeProjection(root.path("projection"));
+                    JsonNode projectionNode = root.path("projection");
+                    if (projectionNode.path("conversationProjectionVersion").asInt(0) != 1) {
+                        continue;
+                    }
+                    SessionProjection checkpoint = decodeProjection(projectionNode);
                     if (checkpoint.lastAppliedSequence() != sequence
                             || !checkpoint.incompleteRequestIds().isEmpty()) continue;
                     SessionProjection projection = replayer.replayFrom(manifest, checkpoint,
@@ -99,11 +103,31 @@ public final class SessionCheckpointStore {
                 .put("lastAppliedSequence", value.lastAppliedSequence())
                 .put("historyVersion", value.historyVersion())
                 .put("compactionGeneration", value.compactionGeneration())
-                .put("cleanlyClosed", value.cleanlyClosed());
+                .put("cleanlyClosed", value.cleanlyClosed())
+                .put("conversationProjectionVersion", 1);
         ArrayNode surface = node.putArray("activeSurface");
         value.activeSurface().forEach(item -> {
             ObjectNode entry = surface.addObject().put("sequence", item.sequence());
             entry.set("message", JSON.valueToTree(item.message()));
+        });
+        ArrayNode conversation = node.putArray("topLevelConversation");
+        value.topLevelConversation().forEach(item -> {
+            ObjectNode entry = conversation.addObject()
+                    .put("sequence", item.sequence())
+                    .put("kind", item.kind().name());
+            if (item.turnId() != null) entry.put("turnId", item.turnId());
+            if (item.planId() != null) entry.put("planId", item.planId());
+            if (item.mode() != null) entry.put("mode", item.mode());
+            entry.set("message", JSON.valueToTree(item.message()));
+        });
+        ArrayNode openTurns = node.putArray("openTurns");
+        value.openTurns().values().forEach(turn -> {
+            ObjectNode entry = openTurns.addObject()
+                    .put("turnId", turn.turnId())
+                    .put("rootPlanId", turn.rootPlanId())
+                    .put("activePlanId", turn.activePlanId());
+            ArrayNode planIds = entry.putArray("planIds");
+            turn.planIds().forEach(planIds::add);
         });
         ArrayNode requests = node.putArray("incompleteRequestIds");
         value.incompleteRequestIds().forEach(requests::add);
@@ -131,6 +155,27 @@ public final class SessionCheckpointStore {
         List<SessionProjection.SurfaceNode> surface = new ArrayList<>();
         for (JsonNode item : node.path("activeSurface")) surface.add(new SessionProjection.SurfaceNode(
                 item.path("sequence").asLong(), JSON.treeToValue(item.path("message"), LlmClient.Message.class)));
+        List<SessionProjection.ConversationNode> conversation = new ArrayList<>();
+        for (JsonNode item : node.path("topLevelConversation")) {
+            conversation.add(new SessionProjection.ConversationNode(
+                    item.path("sequence").asLong(),
+                    item.path("turnId").isMissingNode() || item.path("turnId").isNull() ? null : item.path("turnId").asText(),
+                    item.path("planId").isMissingNode() || item.path("planId").isNull() ? null : item.path("planId").asText(),
+                    item.path("mode").isMissingNode() || item.path("mode").isNull() ? null : item.path("mode").asText(),
+                    JSON.treeToValue(item.path("message"), LlmClient.Message.class),
+                    SessionProjection.ConversationKind.valueOf(item.path("kind").asText())));
+        }
+        Map<String, SessionProjection.OpenTurn> openTurns = new LinkedHashMap<>();
+        for (JsonNode item : node.path("openTurns")) {
+            List<String> planIds = new ArrayList<>();
+            item.path("planIds").forEach(planId -> planIds.add(planId.asText()));
+            SessionProjection.OpenTurn turn = new SessionProjection.OpenTurn(
+                    item.path("turnId").asText(),
+                    item.path("rootPlanId").asText(),
+                    item.path("activePlanId").asText(),
+                    planIds);
+            openTurns.put(turn.turnId(), turn);
+        }
         var requests = new LinkedHashSet<String>();
         node.path("incompleteRequestIds").forEach(item -> requests.add(item.asText()));
         Map<String, SessionProjection.PendingToolInvocation> tools = new LinkedHashMap<>();
@@ -152,9 +197,10 @@ public final class SessionCheckpointStore {
                             usage.path("includesTools").asBoolean(), usage.path("includesSystem").asBoolean(),
                             usage.path("trusted").asBoolean(), Instant.ofEpochMilli(usage.path("measuredAt").asLong())));
         }
-        return new SessionProjection(surface, node.path("lastAppliedSequence").asLong(),
-                node.path("historyVersion").asLong(), node.path("compactionGeneration").asLong(), fact,
-                requests, tools, node.path("cleanlyClosed").asBoolean(), warnings);
+        return new SessionProjection(surface, conversation, openTurns,
+                node.path("lastAppliedSequence").asLong(), node.path("historyVersion").asLong(),
+                node.path("compactionGeneration").asLong(), fact, requests, tools,
+                node.path("cleanlyClosed").asBoolean(), warnings);
     }
 
     private static String prefixHash(List<SessionEvent> events, long sequence) throws IOException {

@@ -178,6 +178,21 @@ class SessionReplayerTest {
     }
 
     @Test
+    void clearDropsSemanticConversationAndOpenPlanTurns() {
+        SessionProjection projection = replay(
+                planTurnEvent(0, SessionEvent.Types.TURN_START,
+                        "turn-clear", "plan-clear", false, null),
+                semanticMessage(1, SessionEvent.Types.USER_MESSAGE,
+                        LlmClient.Message.user("goal"), "plan", "user", "goal",
+                        "turn-clear", "plan-clear"),
+                event(2, SessionEvent.Types.SURFACE_CLEAR,
+                        SessionEvent.SurfaceOperation.clear(), JSON.createObjectNode()));
+
+        assertTrue(projection.topLevelConversation().isEmpty());
+        assertTrue(projection.openTurns().isEmpty());
+    }
+
+    @Test
     void completedCompactionReplacesSemanticRangeWithOneSummary() {
         SessionProjection projection = replay(
                 message(0, SessionEvent.Types.SYSTEM_MESSAGE,

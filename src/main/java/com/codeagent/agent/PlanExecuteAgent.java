@@ -576,8 +576,8 @@ public class PlanExecuteAgent {
             return abandoned
                     ? "✅ 已放弃当前 Session 的未完成 Plan。"
                     : "ℹ️ 当前 Session 没有未完成 Plan。";
-        } catch (SQLException e) {
-            log.warn("Failed to abandon active plan for session {}", sessionId, e);
+        } catch (SQLException | IOException e) {
+            log.warn("Failed to abandon active plan or close conversation turn for session {}", sessionId, e);
             return "❌ 放弃 Plan 失败: " + e.getMessage();
         }
     }

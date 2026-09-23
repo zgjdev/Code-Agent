@@ -853,7 +853,7 @@ public class PlanExecuteAgent {
         try {
             conversationReconciler.reconcile(
                     planStateStore, parentConversationContext, planWorkspace(), sessionId);
-        } catch (SQLException e) {
+        } catch (SQLException | IllegalStateException e) {
             throw new IOException("Plan 会话状态校对失败: " + e.getMessage(), e);
         }
     }

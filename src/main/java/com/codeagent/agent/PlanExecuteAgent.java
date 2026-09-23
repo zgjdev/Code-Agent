@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.codeagent.history.ConversationLedger;
+import com.codeagent.history.ParentConversationContext;
+import com.codeagent.history.SessionProjection;
 import com.codeagent.history.SessionEvent;
 import com.codeagent.history.SessionEventDraft;
 import com.codeagent.history.SessionStore;
@@ -54,17 +56,19 @@ import java.util.stream.Collectors;
 public class PlanExecuteAgent {
     private static final Logger log = LoggerFactory.getLogger(PlanExecuteAgent.class);
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
-    private record PlanRunOutcome(String result, boolean persistAssistantMessage) {
-        static PlanRunOutcome executed(String result) {
-            return new PlanRunOutcome(result, true);
+    private record PlanRunOutcome(String displayResult,
+                                  String conversationResult,
+                                  boolean persistAssistantMessage) {
+        static PlanRunOutcome terminal(String displayResult, String conversationResult) {
+            return new PlanRunOutcome(displayResult, conversationResult, true);
         }
 
-        static PlanRunOutcome canceled(String result) {
-            return new PlanRunOutcome(result, false);
+        static PlanRunOutcome rejected(String displayResult) {
+            return new PlanRunOutcome(displayResult, "", false);
         }
 
-        static PlanRunOutcome failed(String result) {
-            return new PlanRunOutcome(result, true);
+        static PlanRunOutcome canceledBeforeExecution(String displayResult) {
+            return new PlanRunOutcome(displayResult, "", false);
         }
     }
 
@@ -133,6 +137,7 @@ public class PlanExecuteAgent {
     private long historyVersion;
     private final PrintStream out;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
+    private ParentConversationContext parentConversationContext;
     private SessionStore.SessionHandle parentSession;
     private final ThreadLocal<SessionStore.SessionHandle> childSession = new ThreadLocal<>();
     private PlanStateStore planStateStore;
@@ -143,6 +148,12 @@ public class PlanExecuteAgent {
     private TurnToolPolicy turnToolPolicy = TurnToolPolicy.forExplicitTask("");
     private String submittedPolicyInput = "";
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private final PlannerConversationContextBuilder plannerConversationContextBuilder =
+            new PlannerConversationContextBuilder();
+    private final PlanConversationResultBuilder conversationResultBuilder =
+            new PlanConversationResultBuilder();
+    private final PlanConversationReconciler conversationReconciler =
+            new PlanConversationReconciler();
     private static final int MAX_RETRIES_PER_STEP = 2;
     private static final int MAX_REPLANS_PER_RUN = 1;
     private final PipelineOptions pipelineOptions;
@@ -247,6 +258,13 @@ public class PlanExecuteAgent {
         this.parentSession = parentSession;
     }
 
+    public void setParentConversationContext(ParentConversationContext parentConversationContext) {
+        this.parentConversationContext = parentConversationContext;
+        if (parentConversationContext != null && parentConversationContext.sessionHandle() != null) {
+            this.parentSession = parentConversationContext.sessionHandle();
+        }
+    }
+
     public void setPlanStateStore(PlanStateStore planStateStore) {
         this.planStateStore = planStateStore;
     }
@@ -298,15 +316,34 @@ public class PlanExecuteAgent {
         }
     }
 
-    private void savePlanSafely(ExecutionPlan plan) {
+    private boolean savePlanDurably(ExecutionPlan plan) throws IOException {
         String sessionId = currentSessionId();
-        if (planStateStore == null || plan == null || sessionId == null || sessionId.isBlank()) {
-            return;
+        if (plan == null || sessionId == null || sessionId.isBlank()) {
+            return false;
+        }
+        if (planStateStore == null) {
+            throw new IOException("Plan 持久化不可用，已拒绝执行以避免不可恢复状态");
         }
         try {
             planStateStore.savePlan(planWorkspace(), sessionId, submittedPolicyInput, plan);
+            return true;
         } catch (SQLException e) {
-            log.warn("Failed to save plan {} for session {}", plan.getId(), sessionId, e);
+            throw new IOException("保存 Plan 状态失败: " + e.getMessage(), e);
+        }
+    }
+
+    private void checkpointPlanDurably(ExecutionPlan plan) throws IOException {
+        String sessionId = currentSessionId();
+        if (plan == null || sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        if (planStateStore == null) {
+            throw new IOException("Plan 持久化不可用，无法提交终态");
+        }
+        try {
+            planStateStore.checkpointPlan(plan);
+        } catch (SQLException e) {
+            throw new IOException("提交 Plan 终态失败: " + e.getMessage(), e);
         }
     }
 
@@ -410,6 +447,7 @@ public class PlanExecuteAgent {
 
     /** Use submittedUserInput for policy decisions and userInput for expanded task context. */
     public String run(String userInput, String submittedUserInput) {
+        reconcilePlanConversationSafely();
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
         submittedPolicyInput = submittedUserInput == null ? "" : submittedUserInput;
         turnToolPolicy = TurnToolPolicy.fromUserInput(
@@ -426,17 +464,20 @@ public class PlanExecuteAgent {
                 return "⏹️ 已取消当前计划执行。";
             }
             PlanRunOutcome outcome = runWithPlan(userInput, streamState);
-            if (outcome.persistAssistantMessage() && outcome.result() != null && !outcome.result().isBlank()) {
+            if (outcome.persistAssistantMessage()
+                    && outcome.conversationResult() != null
+                    && !outcome.conversationResult().isBlank()) {
                 conversationLedger.appendMessage(
                         "plan",
                         "plan-agent",
                         "run_result",
-                        LlmClient.Message.assistant(outcome.result()));
+                        LlmClient.Message.assistant(outcome.conversationResult()));
             }
-            if (streamState.hasStreamedOutput() && (outcome.result() == null || outcome.result().isBlank())) {
+            if (streamState.hasStreamedOutput()
+                    && (outcome.displayResult() == null || outcome.displayResult().isBlank())) {
                 return "";
             }
-            return outcome.result();
+            return outcome.displayResult();
         } catch (Exception e) {
             log.error("Plan run failed", e);
             String errorMessage = "❌ 执行失败: " + e.getMessage();
@@ -453,17 +494,19 @@ public class PlanExecuteAgent {
      * 使用Plan-and-Execute模式执行
      */
     private PlanRunOutcome runWithPlan(String goal, StreamState streamState) throws IOException {
+        reconcilePlanConversation();
         Optional<PlanStateStore.ActivePlanInfo> activePlan = findActivePlanInfo();
         if (activePlan.isPresent()) {
             PlanStateStore.ActivePlanInfo existing = activePlan.get();
-            return PlanRunOutcome.failed(
+            return PlanRunOutcome.rejected(
                     "⚠️ 当前会话已有未完成计划 " + existing.planId()
                             + "。使用 /plan resume 继续，或 /plan abandon 放弃后再创建新计划。");
         }
 
         interruptedRecoveryTaskIds.clear();
-        ExecutionPlan plan = planner.createPlan(goal);
-        return reviewAndExecutePlan(plan, streamState, 0);
+        String priorConversation = currentPlannerConversationContext();
+        ExecutionPlan plan = planner.createPlan(new Planner.PlannerRequest(goal, priorConversation));
+        return reviewAndExecutePlan(plan, streamState, 0, priorConversation, null);
     }
 
     public Optional<ActivePlanInfo> activePlanInfo() {
@@ -476,6 +519,7 @@ public class PlanExecuteAgent {
     }
 
     public String resumeActivePlan() {
+        reconcilePlanConversationSafely();
         String sessionId = currentSessionId();
         if (planStateStore == null || sessionId == null || sessionId.isBlank()) {
             return "⚠️ 当前没有可绑定的持久化 Session，无法恢复 Plan。";
@@ -498,7 +542,17 @@ public class PlanExecuteAgent {
         out.println("♻️ 恢复计划 " + candidate.plan().getId()
                 + "，将跳过已完成节点并继续调度。\n");
         try {
-            return executePlan(candidate.plan(), new StreamState(), 0);
+            String turnId = currentOpenTurnId(candidate.plan().getId());
+            PlanRunOutcome outcome = executePlan(
+                    candidate.plan(), new StreamState(), 0, "", turnId);
+            if (outcome.persistAssistantMessage()
+                    && outcome.conversationResult() != null
+                    && !outcome.conversationResult().isBlank()) {
+                conversationLedger.appendMessage(
+                        "plan", "plan-agent", "resume_result",
+                        LlmClient.Message.assistant(outcome.conversationResult()));
+            }
+            return outcome.displayResult();
         } catch (Exception e) {
             log.error("Plan resume failed: {}", candidate.plan().getId(), e);
             return "❌ 恢复计划失败: " + e.getMessage();
@@ -506,13 +560,19 @@ public class PlanExecuteAgent {
     }
 
     public String abandonActivePlan() {
+        reconcilePlanConversationSafely();
         String sessionId = currentSessionId();
         if (planStateStore == null || sessionId == null || sessionId.isBlank()) {
             return "⚠️ 当前没有可绑定的持久化 Session，无法放弃 Plan。";
         }
         try {
+            Optional<PlanStateStore.StoredPlanInfo> active =
+                    planStateStore.findActiveRecord(planWorkspace(), sessionId);
             boolean abandoned = planStateStore.abandonActive(planWorkspace(), sessionId);
             interruptedRecoveryTaskIds.clear();
+            if (abandoned && active.isPresent()) {
+                closeAbandonedTurn(active.get().planId());
+            }
             return abandoned
                     ? "✅ 已放弃当前 Session 的未完成 Plan。"
                     : "ℹ️ 当前 Session 没有未完成 Plan。";
@@ -530,23 +590,26 @@ public class PlanExecuteAgent {
     }
 
     private PlanRunOutcome reviewAndExecutePlan(ExecutionPlan plan, StreamState streamState,
-                                                int replanDepth) throws IOException {
+                                                int replanDepth,
+                                                String priorConversationContext,
+                                                String turnId) throws IOException {
         while (true) {
             PlanReviewDecision decision = reviewHandler.review(plan.getGoal(), plan);
             if (decision == null || decision.action() == PlanReviewAction.EXECUTE) {
-                savePlanSafely(plan);
-                return PlanRunOutcome.executed(executePlan(plan, streamState, replanDepth));
+                return executeAcceptedPlan(plan, streamState, replanDepth,
+                        priorConversationContext, turnId);
             }
 
             if (decision.action() == PlanReviewAction.CANCEL) {
                 plan.setStatus(ExecutionPlan.PlanStatus.CANCELLED);
                 checkpointPlanSafely(plan);
-                return PlanRunOutcome.canceled("⏹️ 已取消本次计划执行。");
+                return PlanRunOutcome.canceledBeforeExecution("⏹️ 已取消本次计划执行。");
             }
 
             String feedback = decision.feedback() == null ? "" : decision.feedback().trim();
             if (feedback.isEmpty()) {
-                return PlanRunOutcome.executed(executePlan(plan, streamState, replanDepth));
+                return executeAcceptedPlan(plan, streamState, replanDepth,
+                        priorConversationContext, turnId);
             }
 
             out.println("📝 已收到补充要求，正在重新规划...\n");
@@ -559,11 +622,136 @@ public class PlanExecuteAgent {
                     submittedPolicyInput,
                     toolRegistry.isSharedBrowserSession(),
                     toolRegistry.hasAgentOwnedCurrentBrowserPage());
-            plan = planner.createPlan(revisedGoal);
+            plan = planner.createPlan(new Planner.PlannerRequest(
+                    revisedGoal, priorConversationContext));
         }
     }
 
-    private String executePlan(ExecutionPlan plan, StreamState streamState, int replanDepth)
+    private PlanRunOutcome executeAcceptedPlan(ExecutionPlan plan,
+                                                   StreamState streamState,
+                                                   int replanDepth,
+                                                   String priorConversationContext,
+                                                   String turnId) throws IOException {
+        boolean durable = savePlanDurably(plan);
+        String effectiveTurnId = turnId;
+        if (durable) {
+            effectiveTurnId = beginOrContinuePlanTurn(plan, turnId);
+        }
+        return executePlan(plan, streamState, replanDepth,
+                priorConversationContext, effectiveTurnId);
+    }
+
+    private String beginOrContinuePlanTurn(ExecutionPlan plan, String existingTurnId)
+            throws IOException {
+        if (parentConversationContext == null
+                || parentConversationContext.sessionHandle() == null) {
+            return existingTurnId;
+        }
+        String turnId = existingTurnId == null || existingTurnId.isBlank()
+                ? "plan-turn-" + UUID.randomUUID()
+                : existingTurnId;
+        boolean continuation = existingTurnId != null && !existingTurnId.isBlank();
+        PlanConversationReconciler.appendTurnStart(
+                parentConversationContext, turnId, plan.getId(), continuation);
+        if (!continuation) {
+            PlanConversationReconciler.appendTopLevelMessage(
+                    parentConversationContext,
+                    turnId,
+                    plan.getId(),
+                    "user",
+                    submittedPolicyInput == null || submittedPolicyInput.isBlank()
+                            ? plan.getGoal()
+                            : submittedPolicyInput);
+        }
+        parentConversationContext.synchronizeProviderFromProjection();
+        return turnId;
+    }
+
+    private void finishPlanTurnIfNeeded(String turnId,
+                                        ExecutionPlan plan,
+                                        String conversationResult) throws IOException {
+        if (turnId == null || turnId.isBlank()
+                || parentConversationContext == null
+                || parentConversationContext.sessionHandle() == null) {
+            return;
+        }
+        SessionProjection projection = parentConversationContext.projection();
+        boolean assistantExists = projection != null
+                && projection.topLevelConversation().stream().anyMatch(node ->
+                turnId.equals(node.turnId())
+                        && node.kind() == SessionProjection.ConversationKind.ASSISTANT);
+        if (!assistantExists) {
+            PlanConversationReconciler.appendTopLevelMessage(
+                    parentConversationContext, turnId, plan.getId(),
+                    "assistant", conversationResult);
+        }
+        PlanConversationReconciler.appendTurnEnd(
+                parentConversationContext, turnId, plan.getId(),
+                plan.getStatus().name().toLowerCase(Locale.ROOT));
+        parentConversationContext.synchronizeProviderFromProjection();
+    }
+
+    private void closeAbandonedTurn(String planId) throws IOException {
+        String turnId = currentOpenTurnId(planId);
+        if (turnId == null || parentConversationContext == null) {
+            return;
+        }
+        PlanConversationReconciler.appendTopLevelMessage(
+                parentConversationContext, turnId, planId,
+                "assistant", "✅ 已放弃当前 Session 的未完成 Plan。");
+        PlanConversationReconciler.appendTurnEnd(
+                parentConversationContext, turnId, planId, "abandoned");
+        parentConversationContext.synchronizeProviderFromProjection();
+    }
+
+    private String currentOpenTurnId(String planId) {
+        if (parentConversationContext == null || parentConversationContext.projection() == null) {
+            return null;
+        }
+        return parentConversationContext.projection().openPlanTurn(planId)
+                .map(SessionProjection.OpenTurn::turnId)
+                .orElse(null);
+    }
+
+    private String currentPlannerConversationContext() {
+        if (parentConversationContext == null) {
+            return "";
+        }
+        return plannerConversationContextBuilder.build(
+                parentConversationContext.conversationNodes());
+    }
+
+    private void reconcilePlanConversation() throws IOException {
+        String sessionId = currentSessionId();
+        if (planStateStore == null || parentConversationContext == null
+                || sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        try {
+            conversationReconciler.reconcile(
+                    planStateStore, parentConversationContext, planWorkspace(), sessionId);
+        } catch (SQLException e) {
+            throw new IOException("Plan 会话状态校对失败: " + e.getMessage(), e);
+        }
+    }
+
+    private void reconcilePlanConversationSafely() {
+        try {
+            reconcilePlanConversation();
+        } catch (IOException e) {
+            log.warn("Plan conversation reconciliation failed", e);
+        }
+    }
+
+    private static String nullToEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
+    private PlanRunOutcome executePlan(ExecutionPlan plan,
+                                       StreamState streamState,
+                                       int replanDepth,
+                                       String priorConversationContext,
+                                       String turnId)
             throws IOException {
         log.info("Executing plan: goal='{}', taskCount={}", plan.getGoal(), plan.getAllTasks().size());
         out.println("🚀 开始执行计划...\n");
@@ -577,8 +765,10 @@ public class PlanExecuteAgent {
         while (true) {
             if (CancellationContext.isCancelled()) {
                 plan.setStatus(ExecutionPlan.PlanStatus.CANCELLED);
-                checkpointPlanSafely(plan);
-                return "⏹️ 已取消当前计划执行。";
+                checkpointPlanDurably(plan);
+                String conversationResult = conversationResultBuilder.build(plan);
+                finishPlanTurnIfNeeded(turnId, plan, conversationResult);
+                return PlanRunOutcome.terminal("⏹️ 已取消当前计划执行。", conversationResult);
             }
             List<Task> executableTasks = getExecutableTasksInOrder(plan);
             if (executableTasks.isEmpty()) {
@@ -642,20 +832,31 @@ public class PlanExecuteAgent {
                     }
                     out.println("🔄 尝试重新规划...\n");
                     plan.markFailed();
-                    checkpointPlanSafely(plan);
+                    checkpointPlanDurably(plan);
                     interruptedRecoveryTaskIds.clear();
-                    ExecutionPlan replanned = planner.replan(plan, error.getMessage());
-                    return "⚠️ 原计划有任务失败，已按重规划结果继续执行。\n"
-                            + finalResult + "\n"
-                            + reviewAndExecutePlan(replanned, streamState, replanDepth + 1).result();
+                    ExecutionPlan replanned = planner.replan(
+                            plan, error.getMessage(), priorConversationContext);
+                    PlanRunOutcome replannedOutcome = reviewAndExecutePlan(
+                            replanned, streamState, replanDepth + 1,
+                            priorConversationContext, turnId);
+                    String prefix = "⚠️ 原计划有任务失败，已按重规划结果继续执行。\n"
+                            + finalResult + "\n";
+                    return new PlanRunOutcome(
+                            prefix + nullToEmpty(replannedOutcome.displayResult()),
+                            replannedOutcome.conversationResult(),
+                            replannedOutcome.persistAssistantMessage());
                 }
             }
         }
 
         if (!plan.isAllCompleted() && !plan.hasFailed()) {
             plan.markFailed();
-            checkpointPlanSafely(plan);
-            return "⚠️ 计划未能继续推进，存在未满足依赖的任务。";
+            checkpointPlanDurably(plan);
+            String conversationResult = conversationResultBuilder.build(plan);
+            finishPlanTurnIfNeeded(turnId, plan, conversationResult);
+            return PlanRunOutcome.terminal(
+                    "⚠️ 计划未能继续推进，存在未满足依赖的任务。",
+                    conversationResult);
         }
 
         String planSummary = finalResult.isEmpty()
@@ -664,19 +865,23 @@ public class PlanExecuteAgent {
 
         if (plan.hasFailed()) {
             plan.markFailed();
-            checkpointPlanSafely(plan);
-            if (planSummary.isBlank()) {
-                return "⚠️ 计划部分完成，有任务失败。";
-            }
-            return "⚠️ 计划部分完成，有任务失败。\n" + planSummary;
+            checkpointPlanDurably(plan);
+            String conversationResult = conversationResultBuilder.build(plan);
+            finishPlanTurnIfNeeded(turnId, plan, conversationResult);
+            String display = planSummary.isBlank()
+                    ? "⚠️ 计划部分完成，有任务失败。"
+                    : "⚠️ 计划部分完成，有任务失败。\n" + planSummary;
+            return PlanRunOutcome.terminal(display, conversationResult);
         }
 
         plan.markCompleted();
-        checkpointPlanSafely(plan);
-        if (planSummary.isBlank()) {
-            return "✅ 计划执行完成！";
-        }
-        return "✅ 计划执行完成！\n" + planSummary;
+        checkpointPlanDurably(plan);
+        String conversationResult = conversationResultBuilder.build(plan);
+        finishPlanTurnIfNeeded(turnId, plan, conversationResult);
+        String display = planSummary.isBlank()
+                ? "✅ 计划执行完成！"
+                : "✅ 计划执行完成！\n" + planSummary;
+        return PlanRunOutcome.terminal(display, conversationResult);
     }
 
     private List<Task> getExecutableTasksInOrder(ExecutionPlan plan) {

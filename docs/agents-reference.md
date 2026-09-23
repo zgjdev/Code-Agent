@@ -136,6 +136,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `PathGuard`：路径限定在项目根内（绝对路径外逃 / `..` 穿越 / 符号链接逃逸）
 - `CommandGuard`：fast-fail 黑名单（sudo/rm -rf/mkfs/dd/fork bomb/curl|sh 等）
 - `ResourceLimit`：write_file 5MB / execute_command 60s + 8KB 输出
+- `execute_command` shell：Windows 固定使用 `powershell.exe -NoProfile -NonInteractive -Command`，Linux/macOS 使用 `bash -c`
 - `AuditLog`：JSONL 字段 timestamp/tool/args/outcome/reason/approver/durationMs
 - 拦截顺序：HitlToolRegistry → ToolRegistry → 策略层。用户无法批准策略拒绝的请求
 

@@ -154,7 +154,24 @@ public class ImageReferenceParser {
     // 这里只关心拿到本地路径字符串，所以自己做一次宽容的 percent-decode：合法的 %XX 解码，
     // 其他字符（包括空格、中文、未编码字节）原样保留。
     private static String fileUriToLocalPath(String value) {
+        return fileUriToLocalPath(value, isWindows());
+    }
+
+    static String fileUriToLocalPath(String value, boolean windows) {
         String afterScheme = value.substring("file://".length());
+        if (windows) {
+            String decoded = percentDecodeUtf8(afterScheme);
+            if (decoded.matches("^/[A-Za-z]:[/\\\\].*")) {
+                return decoded.substring(1);
+            }
+            if (decoded.matches("^[A-Za-z]:[/\\\\].*")) {
+                return decoded;
+            }
+            if (!decoded.startsWith("/")) {
+                return "\\\\" + decoded.replace('/', '\\');
+            }
+            return decoded;
+        }
         String pathPart;
         if (afterScheme.startsWith("/")) {
             pathPart = afterScheme;
@@ -163,6 +180,10 @@ public class ImageReferenceParser {
             pathPart = slashIdx < 0 ? "/" + afterScheme : afterScheme.substring(slashIdx);
         }
         return percentDecodeUtf8(pathPart);
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
     }
 
     private static String percentDecodeUtf8(String s) {

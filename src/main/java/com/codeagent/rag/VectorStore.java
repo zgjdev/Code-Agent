@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
@@ -20,7 +21,7 @@ public class VectorStore implements AutoCloseable {
     private final String projectPath;
 
     public VectorStore(String projectPath) throws SQLException {
-        this.projectPath = projectPath;
+        this.projectPath = normalizeProjectKey(projectPath);
         String dbDir = System.getProperty("codeagent.rag.dir",
                 System.getProperty("user.home") + "/.codeagent/rag");
         java.io.File dir = new java.io.File(dbDir);
@@ -30,6 +31,18 @@ public class VectorStore implements AutoCloseable {
         String dbPath = dir.getAbsolutePath() + "/codebase.db";
         this.connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
         initTables();
+    }
+
+    static String normalizeProjectKey(String projectPath) {
+        Path normalized = Path.of(projectPath).toAbsolutePath().normalize();
+        if (Files.exists(normalized)) {
+            try {
+                return normalized.toRealPath().toString();
+            } catch (java.io.IOException ignored) {
+                // Fall back to the stable absolute path if the filesystem changes concurrently.
+            }
+        }
+        return normalized.toString();
     }
 
     private void initTables() throws SQLException {

@@ -65,6 +65,12 @@ class AgentSessionResumeTest {
             assertEquals(agent.getConversationHistory(), handle.projection().messages());
             assertEquals(List.of("system", "user", "assistant", "tool", "assistant"),
                     handle.projection().messages().stream().map(LlmClient.Message::role).toList());
+            assertEquals(List.of("user", "assistant"),
+                    handle.projection().conversationMessages().stream()
+                            .map(LlmClient.Message::role).toList());
+            assertEquals(List.of("inspect the project files and report findings", "done"),
+                    handle.projection().conversationMessages().stream()
+                            .map(LlmClient.Message::content).toList());
             assertTrue(handle.projection().pendingTools().isEmpty());
         }
     }

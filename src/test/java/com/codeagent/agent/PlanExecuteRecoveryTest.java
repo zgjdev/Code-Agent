@@ -1,5 +1,8 @@
 package com.codeagent.agent;
 
+import com.codeagent.history.ParentConversationContext;
+import com.codeagent.history.SessionEvent;
+import com.codeagent.history.SessionEventDraft;
 import com.codeagent.history.SessionStore;
 import com.codeagent.llm.GLMClient;
 import com.codeagent.llm.LlmClient;
@@ -8,6 +11,8 @@ import com.codeagent.plan.PlanStateStore;
 import com.codeagent.plan.Planner;
 import com.codeagent.plan.Task;
 import com.codeagent.tool.ToolRegistry;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -22,6 +27,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class PlanExecuteRecoveryTest {
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     @TempDir
     Path tempDir;
@@ -68,6 +74,8 @@ class PlanExecuteRecoveryTest {
             String prompt = joinedPrompt(client.snapshots.get(0));
             assertTrue(prompt.contains("task_2"), prompt);
             assertFalse(prompt.contains("当前任务：task_1"), prompt);
+            assertTrue(prompt.contains("old-result"),
+                    "恢复后的下游任务必须重新拿到已完成依赖的持久化 result: " + prompt);
             assertTrue(store.findActive(tempDir, session.sessionId()).isEmpty(),
                     "完成后的 Plan 不应继续作为 active Plan");
         }
@@ -175,6 +183,72 @@ class PlanExecuteRecoveryTest {
     }
 
     @Test
+    void acceptedPlanPersistsOneTopLevelUserAndAssistantTurn() throws Exception {
+        RecordingClient client = new RecordingClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history-conversation"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            ParentConversationContext context = parentContext(session);
+            PlanStateStore store = new PlanStateStore(tempDir.resolve("conversation-plans.db"));
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    client,
+                    registry,
+                    new SingleTaskPlanner(client),
+                    null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()),
+                    PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(store);
+            agent.setParentConversationContext(context);
+
+            String result = agent.run("完成当前分析", "完成当前分析");
+
+            assertTrue(result.contains("计划执行完成"), result);
+            assertEquals(List.of("user", "assistant"),
+                    session.projection().conversationMessages().stream()
+                            .map(LlmClient.Message::role).toList());
+            assertEquals("完成当前分析",
+                    session.projection().conversationMessages().get(0).content());
+            assertTrue(session.projection().conversationMessages().get(1).content()
+                    .contains("剩余任务完成"));
+            assertTrue(session.projection().openTurns().isEmpty());
+            assertTrue(store.findActive(tempDir, session.sessionId()).isEmpty());
+        }
+    }
+
+    @Test
+    void durableSessionRefusesToExecuteWhenPlanStoreIsUnavailable() throws Exception {
+        RecordingClient client = new RecordingClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history-no-store"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            ParentConversationContext context = parentContext(session);
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    client,
+                    registry,
+                    new SingleTaskPlanner(client),
+                    null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()),
+                    PipelineOptions.PLAN_PRESET);
+            agent.setParentConversationContext(context);
+
+            String result = agent.run("不能执行", "不能执行");
+
+            assertTrue(result.contains("Plan 持久化不可用"), result);
+            assertEquals(0, client.snapshots.size(), "durable save gate 失败后不得开始 Task LLM 调用");
+            assertTrue(session.projection().topLevelConversation().isEmpty(),
+                    "未成功持久化的 Plan 不得创建 top-level conversation turn");
+        }
+    }
+
+    @Test
     void durableRecoveryCommandsRequireParentSession() throws Exception {
         RecordingClient client = new RecordingClient();
         ToolRegistry registry = new ToolRegistry();
@@ -194,6 +268,21 @@ class PlanExecuteRecoveryTest {
         assertTrue(agent.abandonActivePlan().contains("持久化 Session"));
     }
 
+    private ParentConversationContext parentContext(SessionStore.SessionHandle session)
+            throws Exception {
+        ParentConversationContext context =
+                new ParentConversationContext(LlmClient.Message.system("system"));
+        context.setSessionHandle(session);
+        ObjectNode payload = JSON.createObjectNode();
+        payload.set("message", JSON.valueToTree(LlmClient.Message.system("system")));
+        context.append(new SessionEventDraft(
+                SessionEvent.Types.SYSTEM_MESSAGE,
+                "react", "agent", "test", false,
+                SessionEvent.SurfaceOperation.append(), payload));
+        context.synchronizeProviderFromProjection();
+        return context;
+    }
+
     private static ExecutionPlan singleTaskPlan(String id, String goal) {
         ExecutionPlan plan = new ExecutionPlan(id, goal);
         plan.addTask(new Task("task_1", "分析", Task.TaskType.ANALYSIS));
@@ -205,6 +294,17 @@ class PlanExecuteRecoveryTest {
         return messages.stream()
                 .map(message -> message.content() == null ? "" : message.content())
                 .reduce("", (left, right) -> left + "\n" + right);
+    }
+
+    private static final class SingleTaskPlanner extends Planner {
+        private SingleTaskPlanner(LlmClient client) {
+            super(client, new PrintStream(new ByteArrayOutputStream()));
+        }
+
+        @Override
+        public ExecutionPlan createPlan(String goal) {
+            return singleTaskPlan("plan-new", goal);
+        }
     }
 
     private static final class FailingIfCalledPlanner extends Planner {

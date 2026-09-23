@@ -1,6 +1,6 @@
 # Plan 模式会话上下文统一与恢复重构方案
 
-> 状态：已实现，独立恢复边界 review 修复中
+> 状态：已实现并验证（含独立恢复边界 review）
 > 适用范围：CLI/TUI `/plan` 主路径、ReAct 与 Plan 跨模式会话上下文、Plan 恢复
 > 不涉及：Task 级 exactly-once、Plan SQLite schema 迁移、长期记忆策略变更
 

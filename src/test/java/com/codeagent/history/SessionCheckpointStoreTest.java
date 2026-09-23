@@ -36,6 +36,32 @@ class SessionCheckpointStoreTest {
     }
 
     @Test
+    void checkpointRoundTripsTopLevelConversationAndOpenPlanTurn() throws Exception {
+        SessionManifest manifest = manifest("session-conversation-checkpoint");
+        List<SessionEvent> events = List.of(
+                planTurn(manifest.sessionId(), 0, SessionEvent.Types.TURN_START,
+                        "turn-1", "plan-1"),
+                semanticPlanMessage(manifest.sessionId(), 1,
+                        SessionEvent.Types.USER_MESSAGE, "user", "goal"),
+                semanticPlanMessage(manifest.sessionId(), 2,
+                        SessionEvent.Types.ASSISTANT_MESSAGE, "assistant", "done"),
+                planTurn(manifest.sessionId(), 3, SessionEvent.Types.TURN_END,
+                        "turn-1", "plan-1"));
+        SessionReplayer replayer = new SessionReplayer();
+        SessionProjection prefix = replayer.replay(manifest, events.subList(0, 2));
+        SessionCheckpointStore checkpoints = new SessionCheckpointStore(tempDir);
+
+        checkpoints.write(manifest.sessionId(), events.subList(0, 2), prefix);
+        SessionCheckpointStore.LoadResult loaded = checkpoints.loadLatest(manifest, events);
+
+        assertTrue(loaded.checkpoint().isPresent());
+        assertTrue(loaded.projection().openTurns().isEmpty());
+        assertEquals(List.of("goal", "done"),
+                loaded.projection().conversationMessages().stream()
+                        .map(LlmClient.Message::content).toList());
+    }
+
+    @Test
     void invalidPrefixHashFallsBackToFullReplay() throws Exception {
         SessionManifest manifest = manifest("session-corrupt-checkpoint");
         List<SessionEvent> original = List.of(message(manifest.sessionId(), 0, "one"));
@@ -92,6 +118,35 @@ class SessionCheckpointStoreTest {
             assertFalse(Files.exists(handle.sessionDirectory().resolve("checkpoints")
                     .resolve("checkpoint-49.json")));
         }
+    }
+
+    private SessionEvent semanticPlanMessage(String sessionId, long sequence,
+                                             String type, String role, String content) {
+        ObjectNode payload = JSON.createObjectNode();
+        LlmClient.Message message = "assistant".equals(role)
+                ? LlmClient.Message.assistant(content)
+                : LlmClient.Message.user(content);
+        payload.set("message", JSON.valueToTree(message));
+        payload.putObject("conversation")
+                .put("turnId", "turn-1")
+                .put("planId", "plan-1")
+                .put("mode", "plan")
+                .put("role", role)
+                .put("content", content);
+        return new SessionEvent(2, sessionId, sequence, sequence + 1, type,
+                "plan", "plan-agent", "test", false,
+                SessionEvent.SurfaceOperation.append(), payload);
+    }
+
+    private SessionEvent planTurn(String sessionId, long sequence, String type,
+                                  String turnId, String planId) {
+        ObjectNode payload = JSON.createObjectNode()
+                .put("turnId", turnId)
+                .put("planId", planId)
+                .put("mode", "plan");
+        return new SessionEvent(2, sessionId, sequence, sequence + 1, type,
+                "plan", "plan-agent", "test", false,
+                SessionEvent.SurfaceOperation.none(), payload);
     }
 
     private SessionEventDraft draft(String type, ObjectNode payload, SessionEvent.SurfaceOperation surface) {

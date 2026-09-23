@@ -6,7 +6,7 @@
 
 信息冲突时按以下顺序判断：代码实际行为 > AGENTS.md > CODEAGENT.md > README.md > ROADMAP.md > CLAUDE.md。ROADMAP.md 只表示演进方向，不代表已交付。
 
-CodeAgent 是面向商业使用的 Java 17+ Agent CLI，对标 Claude Code。当前主路径为 ReAct 与统一多 Agent 协作的 Plan-and-Execute（`PlanExecuteAgent`，由 `/plan` 进入，人工计划门与步骤自动评审串联生效），共享 ToolRegistry、Memory、Snapshot、Policy、Renderer 等基础设施。核心模块位于 src/main/java/com/codeagent/，测试位于 src/test/java/。
+CodeAgent 是面向商业使用的 Java 17+ Agent CLI，对标 Claude Code。默认 inline/plain 终端的普通顶层任务先由 Mode Router 在 ReAct 与统一多 Agent 协作的 Plan-and-Execute 之间选择；`/react` 与 `/plan` 提供单轮显式覆盖，Plan 路径的人工计划门与步骤自动评审串联生效。两条路径共享 ToolRegistry、Memory、Snapshot、Policy、Renderer 等基础设施。核心模块位于 src/main/java/com/codeagent/，测试位于 src/test/java/。
 
 ## 2. 开发流程（最高优先级）
 
@@ -141,7 +141,8 @@ sequenceDiagram
 
 ## 6. 必须遵守的运行时约束
 
-- ReAct 与 PlanExecuteAgent（`/plan` 入口，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
+- 默认 inline/plain 终端的普通顶层输入始终先经过无工具 Mode Router；Router 只读取原始 `submittedInput` 与 Parent Session 的 Top-level Conversation，严格返回 REACT/PLAN，非取消性失败回退 ReAct，取消/中断终止当前 Turn。`/react` 与 `/plan` 是 one-turn override；Lanterna TUI、Runtime API 和 WeChat 尚不接入自动路由。
+- ReAct 与 PlanExecuteAgent（`/plan` 显式入口或 Router 选择，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
 - PlanExecuteAgent 的 DAG 就绪任务先经 `ConflictAwareBatchSelector` 按任务资源声明组批；资源冲突或 `workspaceWrite` 不得进入同一批次。任务完成前必须通过确定性证据门禁和可用的 Reviewer；失败重试耗尽进入 `UNVERIFIED`，不解锁后继。
 - CLI/TUI 的 `/plan` 会把 DAG 与 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`，并通过当前持久化 Session 的 `session_id` 关联 active Plan；prompt 只表示任务内容，不作为恢复身份。同一 Session 同时最多一个 `CREATED/RUNNING` Plan，`/plan resume` 显式恢复，`/plan abandon` 显式放弃。新 Plan 必须先严格写入 SQLite 才能进入执行和 Parent Conversation；SQLite 与 Session Event Log 之间通过 planId/turnId + PlanConversationReconciler 收敛崩溃窗口。恢复时已完成节点不重跑，上次 `RUNNING/REVIEWING` 节点转为 `INTERRUPTED` 后从 Task 边界重新执行；Session 恢复只提示，不自动执行副作用。
 - ReAct 与 PlanExecuteAgent 共享同一个 ParentConversationContext，但只共享 Session 级顶层语义连续性；Planner 只读取 Top-level Conversation View，不读取 tool result、synthetic user、Skill/Memory 注入或 Task child transcript。Task Worker 仍使用独立 task-local messages；历史对话只用于语义理解，绝不能成为当前 Turn 的权限来源。

@@ -24,6 +24,24 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesReactSlashCommandWithAndWithoutPayload() {
+        CliCommandParser.ParsedCommand bare = CliCommandParser.parse("/react");
+        CliCommandParser.ParsedCommand withTask = CliCommandParser.parse("/react   修复当前测试  ");
+
+        assertEquals(CliCommandParser.CommandType.SWITCH_REACT, bare.type());
+        assertNull(bare.payload());
+        assertEquals(CliCommandParser.CommandType.SWITCH_REACT, withTask.type());
+        assertEquals("修复当前测试", withTask.payload());
+    }
+
+    @Test
+    void doesNotTreatSimilarReactCommandAsOverride() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/reactor task");
+
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
+    }
+
+    @Test
     void parsesExplicitPlanRecoveryCommands() {
         assertEquals(CliCommandParser.CommandType.PLAN_RESUME,
                 CliCommandParser.parse("/plan resume").type());

@@ -1,8 +1,12 @@
 package com.codeagent.cli;
 
 import com.codeagent.agent.Agent;
+import com.codeagent.agent.ExecutionMode;
+import com.codeagent.agent.ExecutionModeRouter;
 import com.codeagent.agent.PipelineOptions;
 import com.codeagent.agent.PlanExecuteAgent;
+import com.codeagent.agent.RoutingDecision;
+import com.codeagent.agent.RoutingSource;
 import com.codeagent.browser.BrowserAuditMetadata;
 import com.codeagent.browser.BrowserConnectivityCheck;
 import com.codeagent.browser.BrowserGuard;
@@ -16,6 +20,7 @@ import com.codeagent.hitl.SwitchableHitlHandler;
 import com.codeagent.hitl.RendererHitlHandler;
 import com.codeagent.hitl.TerminalHitlHandler;
 import com.codeagent.history.ConversationLedger;
+import com.codeagent.history.SessionProjection;
 import com.codeagent.history.SessionStore;
 import com.codeagent.history.SessionSummary;
 import com.codeagent.harness.BetterHarnessOptions;
@@ -38,6 +43,8 @@ import com.codeagent.plan.PlanStateStore;
 import com.codeagent.rag.CodeIndex;
 import com.codeagent.hitl.ApprovalPolicy;
 import com.codeagent.policy.AuditLog;
+import com.codeagent.prompt.ModeRouterPromptBuilder;
+import com.codeagent.prompt.PromptRepository;
 import com.codeagent.rag.CodeRetriever;
 import com.codeagent.rag.CodeRelation;
 import com.codeagent.rag.SearchResultFormatter;
@@ -340,6 +347,8 @@ public class Main {
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
+            ModeRouterPromptBuilder modeRouterPromptBuilder =
+                    new ModeRouterPromptBuilder(PromptRepository.createDefault());
             Path workspace = Path.of(".").toRealPath().normalize();
             SessionStore openedSessionStore = null;
             AtomicReference<SessionStore.SessionHandle> activeSession = new AtomicReference<>();
@@ -387,7 +396,7 @@ public class Main {
             } else {
                 printStartupScreen(ui, startupScreenInfo);
             }
-            boolean nextTaskUsePlanMode = false;
+            ExecutionMode nextTaskOverride = null;
 
             // === TUI / CLI 分支判断 ===
             // 旧 CODEAGENT_TUI=true 路径仍走 Lanterna 全屏 TUI（Day 5 后由 LanternaRenderer 接管）。
@@ -422,7 +431,7 @@ public class Main {
                 PromptInput promptInput;
                 try {
                     promptInput = readPromptInput(terminal, lineReader, renderer,
-                            nextTaskUsePlanMode, spaciousPrompt);
+                            nextTaskOverride != null, spaciousPrompt);
                 } catch (UserInterruptException e) {
                     continue;  // Ctrl+C 跳过
                 } catch (EndOfFileException e) {
@@ -433,9 +442,9 @@ public class Main {
                 }
 
                 if (promptInput.canceled()) {
-                    if (nextTaskUsePlanMode) {
-                        nextTaskUsePlanMode = false;
-                        ui.println("↩️ 已取消待执行的 Plan-and-Execute，回到默认 ReAct。\n");
+                    if (nextTaskOverride != null) {
+                        nextTaskOverride = null;
+                        ui.println("↩️ 已取消待执行的模式覆盖，恢复自动路由。\n");
                     }
                     continue;
                 }
@@ -666,7 +675,7 @@ public class Main {
                         continue;
                     }
                     case PLAN_RESUME -> {
-                        nextTaskUsePlanMode = false;
+                        nextTaskOverride = null;
                         LlmClient activeClient = llmClient;
                         PlanExecuteAgent planAgent = createPlanAgent(
                                 activeClient, reactAgent, terminal, lineReader, ui);
@@ -692,7 +701,7 @@ public class Main {
                         continue;
                     }
                     case PLAN_ABANDON -> {
-                        nextTaskUsePlanMode = false;
+                        nextTaskOverride = null;
                         PlanExecuteAgent planAgent = createPlanAgent(
                                 llmClient, reactAgent, terminal, lineReader, ui);
                         String response = planAgent.abandonActivePlan();
@@ -704,8 +713,16 @@ public class Main {
                     }
                     case SWITCH_PLAN -> {
                         if (command.payload() == null || command.payload().isEmpty()) {
-                            nextTaskUsePlanMode = true;
-                            ui.println("📋 下一条任务将使用 Plan-and-Execute 模式，输入任务前按 ESC 可取消，执行完成后自动回到默认 ReAct。\n");
+                            nextTaskOverride = ExecutionMode.PLAN;
+                            ui.println("📋 下一条任务将使用 Plan-and-Execute 模式，输入任务前按 ESC 可取消，该轮结束后恢复自动路由。\n");
+                            continue;
+                        }
+                        input = command.payload();
+                    }
+                    case SWITCH_REACT -> {
+                        if (command.payload() == null || command.payload().isEmpty()) {
+                            nextTaskOverride = ExecutionMode.REACT;
+                            ui.println("⚡ 下一条任务将使用 ReAct 模式，输入任务前按 ESC 可取消，该轮结束后恢复自动路由。\n");
                             continue;
                         }
                         input = command.payload();
@@ -1033,31 +1050,52 @@ public class Main {
                     printSubmittedInput(renderer, ui, submittedInput);
                 }
                 final String taskInput = input;
-                Callable<String> runTask;
-                String snapshotMode;
-                if (nextTaskUsePlanMode || command.type() == CliCommandParser.CommandType.SWITCH_PLAN) {
-                    snapshotMode = "plan";
-                    LlmClient activeClient = llmClient;
-                    runTask = () -> {
-                        PlanExecuteAgent planAgent = createPlanAgent(activeClient, reactAgent, terminal, lineReader, ui);
-                        planAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
-                        planAgent.setSkillRegistry(skillRegistry);
-                        planAgent.setSkillContextBuffer(skillContextBuffer);
-                        return planAgent.run(taskInput, submittedInput);
-                    };
-                } else {
-                    snapshotMode = "react";
-                    runTask = () -> reactAgent.run(taskInput, submittedInput);
-                }
+                ExecutionMode explicitOverride = switch (command.type()) {
+                    case SWITCH_PLAN -> ExecutionMode.PLAN;
+                    case SWITCH_REACT -> ExecutionMode.REACT;
+                    default -> nextTaskOverride;
+                };
+                LlmClient activeClient = llmClient;
+                ExecutionModeRouter modeRouter = new ExecutionModeRouter(
+                        activeClient, modeRouterPromptBuilder);
                 SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
-                renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, snapshotMode));
+                renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "routing"));
                 String response = runWithCancelSupport(terminal,
                         ui,
-                        () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call));
-                if (!"react".equals(snapshotMode)) {
-                    renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
-                }
-                nextTaskUsePlanMode = false;
+                        () -> {
+                            RoutingDecision decision = selectExecutionMode(
+                                    explicitOverride,
+                                    modeRouter,
+                                    submittedInput,
+                                    reactAgent.getParentConversationContext().conversationNodes());
+                            recordExecutionModeSelection(
+                                    reactAgent.getConversationLedger(), decision, activeClient);
+                            String selectedMode = decision.mode().name().toLowerCase(Locale.ROOT);
+                            renderer.updateStatus(statusInfo(
+                                    reactAgent, mcpServerManager, skillRegistry, selectedMode));
+                            if (decision.mode() == ExecutionMode.PLAN
+                                    && decision.source() == RoutingSource.AUTO_MODEL) {
+                                ui.println("🧭 任务已自动选择 Plan-and-Execute 模式");
+                            }
+                            Callable<String> actualAgentCall;
+                            if (decision.mode() == ExecutionMode.PLAN) {
+                                actualAgentCall = () -> {
+                                    PlanExecuteAgent planAgent = createPlanAgent(
+                                            activeClient, reactAgent, terminal, lineReader, ui);
+                                    planAgent.setExternalContextSupplier(
+                                            mcpServerManager::resourceIndexForPrompt);
+                                    planAgent.setSkillRegistry(skillRegistry);
+                                    planAgent.setSkillContextBuffer(skillContextBuffer);
+                                    return planAgent.run(taskInput, submittedInput);
+                                };
+                            } else {
+                                actualAgentCall = () -> reactAgent.run(taskInput, submittedInput);
+                            }
+                            return snapshotService.runTurn(
+                                    selectedMode, taskInput, actualAgentCall::call);
+                        });
+                renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                nextTaskOverride = null;
                 if (response != null && !response.isBlank()) {
                     ui.println(response);
                     ui.println();
@@ -1358,7 +1396,7 @@ public class Main {
     }
 
     static PlanExecuteAgent createPlanAgent(LlmClient llmClient, Agent reactAgent,
-                                            PlanExecuteAgent.PlanReviewHandler reviewHandler) {
+                                             PlanExecuteAgent.PlanReviewHandler reviewHandler) {
         PlanExecuteAgent planAgent = new PlanExecuteAgent(
                 llmClient,
                 reactAgent.getToolRegistry(),
@@ -1372,8 +1410,45 @@ public class Main {
         return planAgent;
     }
 
+    static RoutingDecision selectExecutionMode(
+            ExecutionMode explicitOverride,
+            ExecutionModeRouter router,
+            String submittedInput,
+            List<SessionProjection.ConversationNode> history) {
+        if (explicitOverride != null) {
+            return RoutingDecision.explicit(explicitOverride);
+        }
+        return router.route(submittedInput, history);
+    }
+
+    static void recordExecutionModeSelection(ConversationLedger ledger,
+                                             RoutingDecision decision,
+                                             LlmClient activeClient) {
+        if (ledger == null || decision == null) {
+            return;
+        }
+        LinkedHashMap<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("selectedMode", decision.mode().name().toLowerCase(Locale.ROOT));
+        if (decision.source() != RoutingSource.EXPLICIT && activeClient != null) {
+            metadata.put("provider", activeClient.getProviderName());
+            metadata.put("model", activeClient.getModelName());
+        }
+        decision.usage().ifPresent(usage -> {
+            metadata.put("inputTokens", usage.inputTokens());
+            metadata.put("outputTokens", usage.outputTokens());
+            metadata.put("cachedInputTokens", usage.cachedInputTokens());
+            metadata.put("usageTrusted", usage.trusted());
+        });
+        ledger.appendEvent(
+                "execution_mode_selected",
+                "router",
+                "mode-router",
+                decision.source().name().toLowerCase(Locale.ROOT),
+                metadata);
+    }
+
     private static PlanExecuteAgent createPlanAgent(LlmClient llmClient, Agent reactAgent,
-                                                    Terminal terminal, LineReader lineReader, PrintStream out) {
+                                                     Terminal terminal, LineReader lineReader, PrintStream out) {
         out.println("📋 使用多 Agent 协作 Plan-and-Execute 模式\n");
         PlanExecuteAgent planAgent = new PlanExecuteAgent(
                 llmClient,
@@ -1842,6 +1917,8 @@ public class Main {
                 new SlashCommandHint("/config provider agnes ", "/config provider agnes <选项>", "配置 Agnes provider"),
                 new SlashCommandHint("/plan", "/plan", "下一条任务使用多 Agent 协作 Plan-and-Execute 模式"),
                 new SlashCommandHint("/plan ", "/plan <任务内容>", "直接用多 Agent 协作计划模式执行这条任务"),
+                new SlashCommandHint("/react", "/react", "下一条任务强制使用 ReAct 模式"),
+                new SlashCommandHint("/react ", "/react <任务内容>", "直接用 ReAct 模式执行这条任务"),
                 new SlashCommandHint("/hitl", "/hitl", "查看 HITL 状态"),
                 new SlashCommandHint("/hitl on", "/hitl on", "启用危险操作人工审批"),
                 new SlashCommandHint("/hitl off", "/hitl off", "关闭 HITL 审批"),

@@ -940,6 +940,7 @@ docs/dev/15-auto-execution-mode-routing.md
 ```text
 ExecutionModeRouterTest
 ExecutionModeRoutingContextTest
+TopLevelConversationFormatterTest
 ModeRouterPromptBuilderTest
 MainExecutionModeRoutingTest
 ```
@@ -948,11 +949,10 @@ MainExecutionModeRoutingTest
 
 ```text
 CliCommandParserTest
+CodeAgentCompleterTest
 MainInputNormalizationTest
 MainPlanAgentFactoryTest
 PlannerTest
-PlannerConversationContextBuilderTest
-CodeAgentCompleterTest（若现有测试存在）
 ```
 
 已有恢复/上下文测试继续作为回归：

@@ -136,6 +136,8 @@ public final class SessionReplayer {
         }
 
         switch (event.type()) {
+            case SessionEvent.Types.TURN_START -> startTurn(state, event);
+            case SessionEvent.Types.TURN_END -> endTurn(state, event);
             case SessionEvent.Types.REQUEST_STARTED -> state.incompleteRequests.add(requiredText(payload, "requestId"));
             case SessionEvent.Types.REQUEST_FINISHED -> finishRequest(state, requiredText(payload, "requestId"));
             case SessionEvent.Types.REQUEST_FAILED -> failRequest(state, requiredText(payload, "requestId"));
@@ -150,11 +152,14 @@ public final class SessionReplayer {
                 applySurface(state, event);
             }
             case SessionEvent.Types.SESSION_END -> state.cleanlyClosed = true;
+            case SessionEvent.Types.USER_MESSAGE,
+                 SessionEvent.Types.ASSISTANT_MESSAGE -> applyMessageEvent(state, event);
             case SessionEvent.Types.SYSTEM_MESSAGE,
-                 SessionEvent.Types.USER_MESSAGE,
-                 SessionEvent.Types.ASSISTANT_MESSAGE,
                  SessionEvent.Types.IMAGE_PRUNED -> applySurface(state, event);
-            case SessionEvent.Types.SURFACE_CLEAR -> applySurface(state, event);
+            case SessionEvent.Types.SURFACE_CLEAR -> {
+                applySurface(state, event);
+                state.conversation.clear();
+            }
             default -> {
                 // Lifecycle and diagnostic events do not directly change the active surface.
             }
@@ -166,7 +171,7 @@ public final class SessionReplayer {
             throw new CorruptSessionException("request finished without start: " + requestId);
         }
         for (SessionEvent assistant : state.requestAssistants.getOrDefault(requestId, List.of())) {
-            applySurface(state, assistant);
+            applyMessageEvent(state, assistant);
         }
         state.requestAssistants.remove(requestId);
         SessionProjection.MeasuredUsageFact usage = state.requestUsages.remove(requestId);
@@ -217,7 +222,7 @@ public final class SessionReplayer {
         int insertionIndex = -1;
         for (SessionEvent stagedEvent : staged) {
             if ("replace".equals(stagedEvent.surface().op())) {
-                Long startSequence = stagedEvent.surface().startSequence();
+                applyCompactionConversation(state, stagedEvent);
                 applySurface(state, stagedEvent);
                 insertionIndex = indexOf(state.surface, stagedEvent.sequence()) + 1;
             } else if ("append".equals(stagedEvent.surface().op()) && insertionIndex >= 0) {
@@ -228,6 +233,111 @@ public final class SessionReplayer {
             }
         }
         state.compactionGeneration++;
+    }
+
+    private static void applyMessageEvent(MutableProjection state, SessionEvent event) {
+        applySurface(state, event);
+        applyConversation(state, event);
+    }
+
+    private static void applyConversation(MutableProjection state, SessionEvent event) {
+        JsonNode conversation = event.payload() == null ? null : event.payload().get("conversation");
+        if (conversation == null || conversation.isNull() || !conversation.isObject()) {
+            return;
+        }
+        String role = requiredText(conversation, "role");
+        String content = requiredText(conversation, "content");
+        String mode = text(conversation, "mode");
+        String turnId = text(conversation, "turnId");
+        String planId = text(conversation, "planId");
+        SessionProjection.ConversationKind kind;
+        LlmClient.Message message;
+        if ("user".equals(role)) {
+            kind = SessionProjection.ConversationKind.USER;
+            message = LlmClient.Message.user(content);
+        } else if ("assistant".equals(role)) {
+            kind = SessionProjection.ConversationKind.ASSISTANT;
+            message = LlmClient.Message.assistant(content);
+        } else {
+            throw new CorruptSessionException("unsupported conversation role: " + role);
+        }
+        if ("plan".equals(mode)) {
+            require(turnId, "plan conversation event requires turnId");
+            require(planId, "plan conversation event requires planId");
+            SessionProjection.OpenTurn turn = state.openTurns.get(turnId);
+            if (turn == null || !turn.planIds().contains(planId)) {
+                throw new CorruptSessionException("plan conversation event has no matching open turn: " + turnId);
+            }
+        }
+        state.conversation.add(new SessionProjection.ConversationNode(
+                event.sequence(), turnId, planId, mode, message, kind));
+    }
+
+    private static void startTurn(MutableProjection state, SessionEvent event) {
+        JsonNode payload = event.payload();
+        String mode = text(payload, "mode");
+        if (!"plan".equals(mode)) {
+            return;
+        }
+        String turnId = requiredText(payload, "turnId");
+        String planId = requiredText(payload, "planId");
+        boolean continuation = payload != null && payload.path("continuation").asBoolean(false);
+        SessionProjection.OpenTurn existing = state.openTurns.get(turnId);
+        if (!continuation) {
+            if (existing != null) {
+                throw new CorruptSessionException("duplicate plan turn start: " + turnId);
+            }
+            state.openTurns.put(turnId, new SessionProjection.OpenTurn(
+                    turnId, planId, planId, List.of(planId)));
+            return;
+        }
+        if (existing == null) {
+            throw new CorruptSessionException("plan continuation has no open turn: " + turnId);
+        }
+        List<String> planIds = new ArrayList<>(existing.planIds());
+        if (!planIds.contains(planId)) {
+            planIds.add(planId);
+        }
+        state.openTurns.put(turnId, new SessionProjection.OpenTurn(
+                turnId, existing.rootPlanId(), planId, planIds));
+    }
+
+    private static void endTurn(MutableProjection state, SessionEvent event) {
+        JsonNode payload = event.payload();
+        String mode = text(payload, "mode");
+        if (!"plan".equals(mode)) {
+            return;
+        }
+        String turnId = requiredText(payload, "turnId");
+        SessionProjection.OpenTurn removed = state.openTurns.remove(turnId);
+        if (removed == null) {
+            throw new CorruptSessionException("plan turn end has no open turn: " + turnId);
+        }
+    }
+
+    private static void applyCompactionConversation(MutableProjection state, SessionEvent replacement) {
+        Long startSequence = replacement.surface().startSequence();
+        Long endSequence = replacement.surface().endSequence();
+        if (startSequence == null || endSequence == null || startSequence > endSequence) {
+            throw new CorruptSessionException("invalid conversation replacement range");
+        }
+        int insertionIndex = -1;
+        for (int index = 0; index < state.conversation.size(); index++) {
+            long sequence = state.conversation.get(index).sequence();
+            if (sequence >= startSequence && sequence <= endSequence) {
+                insertionIndex = index;
+                break;
+            }
+        }
+        if (insertionIndex < 0) {
+            return;
+        }
+        state.conversation.removeIf(node ->
+                node.sequence() >= startSequence && node.sequence() <= endSequence);
+        LlmClient.Message summary = messageNode(replacement).message();
+        state.conversation.add(insertionIndex, new SessionProjection.ConversationNode(
+                replacement.sequence(), null, null, "summary", summary,
+                SessionProjection.ConversationKind.SUMMARY));
     }
 
     private static void applySurface(MutableProjection state, SessionEvent event) {
@@ -312,6 +422,8 @@ public final class SessionReplayer {
 
     private static final class MutableProjection {
         private final List<SessionProjection.SurfaceNode> surface = new ArrayList<>();
+        private final List<SessionProjection.ConversationNode> conversation = new ArrayList<>();
+        private final Map<String, SessionProjection.OpenTurn> openTurns = new LinkedHashMap<>();
         private final Set<String> incompleteRequests = new LinkedHashSet<>();
         private final Map<String, SessionProjection.PendingToolInvocation> pendingTools = new LinkedHashMap<>();
         private final Map<String, List<SessionEvent>> compactions = new LinkedHashMap<>();
@@ -330,6 +442,8 @@ public final class SessionReplayer {
 
         private MutableProjection(SessionProjection checkpoint) {
             surface.addAll(checkpoint.activeSurface());
+            conversation.addAll(checkpoint.topLevelConversation());
+            openTurns.putAll(checkpoint.openTurns());
             incompleteRequests.addAll(checkpoint.incompleteRequestIds());
             pendingTools.putAll(checkpoint.pendingTools());
             warnings.addAll(checkpoint.warnings());
@@ -341,9 +455,9 @@ public final class SessionReplayer {
         }
 
         private SessionProjection freeze() {
-            return new SessionProjection(surface, lastAppliedSequence, historyVersion,
-                    compactionGeneration, lastCompletedUsage, incompleteRequests, pendingTools,
-                    cleanlyClosed, warnings);
+            return new SessionProjection(surface, conversation, openTurns,
+                    lastAppliedSequence, historyVersion, compactionGeneration, lastCompletedUsage,
+                    incompleteRequests, pendingTools, cleanlyClosed, warnings);
         }
     }
 

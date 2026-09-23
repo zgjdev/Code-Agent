@@ -159,6 +159,7 @@ public final class SessionReplayer {
             case SessionEvent.Types.SURFACE_CLEAR -> {
                 applySurface(state, event);
                 state.conversation.clear();
+                state.openTurns.clear();
             }
             default -> {
                 // Lifecycle and diagnostic events do not directly change the active surface.

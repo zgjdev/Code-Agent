@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -26,4 +28,4 @@ jobs:
       - name: Clean package
         run: mvn -q clean package
       - name: Diff check
-        run: git diff --check HEAD^
+        run: git diff --check origin/main...HEAD

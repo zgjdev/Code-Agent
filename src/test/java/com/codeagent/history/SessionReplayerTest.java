@@ -131,6 +131,81 @@ class SessionReplayerTest {
     }
 
     @Test
+    void keepsProviderSurfaceSeparateFromTopLevelConversation() {
+        SessionProjection projection = replay(
+                semanticMessage(0, SessionEvent.Types.USER_MESSAGE,
+                        LlmClient.Message.user("skill-prefix\nhello\nlong-term-memory"),
+                        "react", "user", "hello", null, null),
+                message(1, SessionEvent.Types.USER_MESSAGE,
+                        LlmClient.Message.user("synthetic image context"),
+                        SessionEvent.SurfaceOperation.append()),
+                semanticMessage(2, SessionEvent.Types.ASSISTANT_MESSAGE,
+                        LlmClient.Message.assistant("done"),
+                        "react", "assistant", "done", null, null));
+
+        assertEquals(List.of(
+                        "skill-prefix\nhello\nlong-term-memory",
+                        "synthetic image context",
+                        "done"),
+                projection.messages().stream().map(LlmClient.Message::content).toList());
+        assertEquals(List.of("hello", "done"),
+                projection.conversationMessages().stream()
+                        .map(LlmClient.Message::content).toList());
+        assertEquals(List.of(
+                        SessionProjection.ConversationKind.USER,
+                        SessionProjection.ConversationKind.ASSISTANT),
+                projection.topLevelConversation().stream()
+                        .map(SessionProjection.ConversationNode::kind).toList());
+    }
+
+    @Test
+    void tracksOneOpenPlanTurnAcrossContinuationPlanIds() {
+        SessionProjection projection = replay(
+                planTurnEvent(0, SessionEvent.Types.TURN_START,
+                        "turn-1", "plan-1", false, null),
+                semanticMessage(1, SessionEvent.Types.USER_MESSAGE,
+                        LlmClient.Message.user("goal"), "plan", "user", "goal",
+                        "turn-1", "plan-1"),
+                planTurnEvent(2, SessionEvent.Types.TURN_START,
+                        "turn-1", "plan-2", true, null));
+
+        SessionProjection.OpenTurn turn = projection.openTurns().get("turn-1");
+        assertEquals("plan-1", turn.rootPlanId());
+        assertEquals("plan-2", turn.activePlanId());
+        assertEquals(List.of("plan-1", "plan-2"), turn.planIds());
+        assertEquals(List.of("goal"), projection.conversationMessages().stream()
+                .map(LlmClient.Message::content).toList());
+    }
+
+    @Test
+    void completedCompactionReplacesSemanticRangeWithOneSummary() {
+        SessionProjection projection = replay(
+                message(0, SessionEvent.Types.SYSTEM_MESSAGE,
+                        LlmClient.Message.system("system"), SessionEvent.SurfaceOperation.append()),
+                semanticMessage(1, SessionEvent.Types.USER_MESSAGE,
+                        LlmClient.Message.user("old-user"), "react", "user",
+                        "raw user", null, null),
+                semanticMessage(2, SessionEvent.Types.ASSISTANT_MESSAGE,
+                        LlmClient.Message.assistant("old-answer"), "react", "assistant",
+                        "raw answer", null, null),
+                semanticMessage(3, SessionEvent.Types.USER_MESSAGE,
+                        LlmClient.Message.user("recent-user"), "react", "user",
+                        "recent-user", null, null),
+                compactionEvent(4, SessionEvent.Types.COMPACTION_START, "compact-2", null),
+                compactionMessage(5, "compact-2", LlmClient.Message.user("summary"),
+                        SessionEvent.SurfaceOperation.replace(1, 2)),
+                compactionMessageWithType(6, "compact-2", SessionEvent.Types.ASSISTANT_MESSAGE,
+                        LlmClient.Message.assistant("ack"), SessionEvent.SurfaceOperation.append()),
+                compactionEvent(7, SessionEvent.Types.COMPACTION_END, "compact-2", "completed"));
+
+        assertEquals(List.of("summary", "recent-user"),
+                projection.conversationMessages().stream()
+                        .map(LlmClient.Message::content).toList());
+        assertEquals(SessionProjection.ConversationKind.SUMMARY,
+                projection.topLevelConversation().get(0).kind());
+    }
+
+    @Test
     void skipsUnknownIgnorableEventButRejectsUnknownRequiredEvent() {
         SessionProjection projection = replay(new SessionEvent(
                 SessionEvent.CURRENT_SCHEMA_VERSION, SESSION_ID, 0, 1,
@@ -169,6 +244,45 @@ class SessionReplayerTest {
     private SessionEvent message(long sequence, String type, LlmClient.Message message,
                                  SessionEvent.SurfaceOperation operation) {
         ObjectNode payload = JSON.createObjectNode();
+        payload.set("message", JSON.valueToTree(message));
+        return event(sequence, type, operation, payload);
+    }
+
+    private SessionEvent semanticMessage(long sequence, String type,
+                                         LlmClient.Message providerMessage,
+                                         String mode, String role, String semanticContent,
+                                         String turnId, String planId) {
+        ObjectNode payload = JSON.createObjectNode();
+        payload.set("message", JSON.valueToTree(providerMessage));
+        ObjectNode conversation = payload.putObject("conversation")
+                .put("mode", mode)
+                .put("role", role)
+                .put("content", semanticContent);
+        if (turnId != null) conversation.put("turnId", turnId);
+        if (planId != null) conversation.put("planId", planId);
+        return new SessionEvent(SessionEvent.CURRENT_SCHEMA_VERSION, SESSION_ID,
+                sequence, sequence + 1, type, mode, "agent", "test", false,
+                SessionEvent.SurfaceOperation.append(), payload);
+    }
+
+    private SessionEvent planTurnEvent(long sequence, String type,
+                                       String turnId, String planId,
+                                       boolean continuation, String status) {
+        ObjectNode payload = JSON.createObjectNode()
+                .put("mode", "plan")
+                .put("turnId", turnId)
+                .put("planId", planId);
+        if (continuation) payload.put("continuation", true);
+        if (status != null) payload.put("status", status);
+        return new SessionEvent(SessionEvent.CURRENT_SCHEMA_VERSION, SESSION_ID,
+                sequence, sequence + 1, type, "plan", "plan-agent", "test", false,
+                SessionEvent.SurfaceOperation.none(), payload);
+    }
+
+    private SessionEvent compactionMessageWithType(long sequence, String compactionId,
+                                                   String type, LlmClient.Message message,
+                                                   SessionEvent.SurfaceOperation operation) {
+        ObjectNode payload = JSON.createObjectNode().put("compactionId", compactionId);
         payload.set("message", JSON.valueToTree(message));
         return event(sequence, type, operation, payload);
     }

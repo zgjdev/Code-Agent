@@ -77,6 +77,27 @@ class PlanStateStoreTest {
     }
 
     @Test
+    void findByIdRestoresTerminalTaskResultsWithoutMakingPlanActive() throws Exception {
+        PlanStateStore store = new PlanStateStore(tempDir.resolve("plans.db"));
+        ExecutionPlan plan = singleTaskPlan("plan-terminal", "完成后用于 reconcile");
+        store.savePlan(tempDir, "session-a", "原始用户授权边界", plan);
+        plan.markStarted();
+        store.checkpointPlan(plan);
+        Task task = plan.getTask("task_1");
+        task.markCompleted("persisted-result");
+        store.checkpointTask(plan.getId(), task);
+        plan.markCompleted();
+        store.checkpointPlan(plan);
+
+        PlanStateStore.StoredPlan stored = store.findById(plan.getId()).orElseThrow();
+
+        assertEquals(ExecutionPlan.PlanStatus.COMPLETED, stored.plan().getStatus());
+        assertEquals("persisted-result", stored.plan().getTask("task_1").getResult());
+        assertEquals("原始用户授权边界", stored.info().policyInput());
+        assertTrue(store.findActive(tempDir, "session-a").isEmpty());
+    }
+
+    @Test
     void sameWorkspaceAndSameGoalRemainIndependentAcrossSessions() throws Exception {
         PlanStateStore store = new PlanStateStore(tempDir.resolve("plans.db"));
 

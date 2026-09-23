@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.codeagent.history.ConversationLedger;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.llm.LlmTraceLogger;
+import com.codeagent.memory.TokenBudget;
 import com.codeagent.prompt.PromptAssembler;
 import com.codeagent.prompt.PromptContext;
 import com.codeagent.prompt.PromptMode;
@@ -53,27 +54,41 @@ public class Planner {
                 : conversationLedger;
     }
 
+    public record PlannerRequest(String goal, String priorConversationContext) {
+        public PlannerRequest {
+            goal = goal == null ? "" : goal;
+            priorConversationContext = priorConversationContext == null ? "" : priorConversationContext.trim();
+        }
+    }
+
     /**
-     * 为复杂任务创建执行计划
+     * 为复杂任务创建执行计划。保留旧虚方法作为扩展点。
      */
     public ExecutionPlan createPlan(String goal) throws IOException {
+        return createPlanInternal(new PlannerRequest(goal, ""));
+    }
+
+    public ExecutionPlan createPlan(PlannerRequest request) throws IOException {
+        if (request.priorConversationContext().isBlank()) {
+            // Preserve polymorphic behavior for existing Planner subclasses.
+            return createPlan(request.goal());
+        }
+        return createPlanInternal(request);
+    }
+
+    private ExecutionPlan createPlanInternal(PlannerRequest request) throws IOException {
+        String goal = request.goal();
+        String priorConversationContext = request.priorConversationContext();
         out.println("📋 正在规划任务: " + goal + "\n");
 
-        if (isSimpleGoal(goal)) {
+        if (priorConversationContext.isBlank() && isSimpleGoal(goal)) {
             return createMinimalPlan(goal);
         }
 
-        // 构建规划请求
-        List<LlmClient.Message> messages = Arrays.asList(
-                LlmClient.Message.system(promptAssembler.assemble(PromptMode.PLANNER, PromptContext.builder()
-                        .projectMemoryContext(buildProjectMemoryContext())
-                        .build())),
-                LlmClient.Message.user("请为以下任务制定执行计划：\n" + goal)
-        );
+        List<LlmClient.Message> messages = buildPlanningMessages(request);
         conversationLedger.appendMessage("plan", "planner", "system_prompt", messages.get(0));
         conversationLedger.appendMessage("plan", "planner", "planning_request", messages.get(1));
 
-        // 调用LLM生成计划
         PlanningStreamRenderer streamRenderer = new PlanningStreamRenderer(out);
         LlmClient.ChatResponse response = llmClient.chat(messages, null, streamRenderer);
         conversationLedger.appendMessage(
@@ -83,10 +98,27 @@ public class Planner {
                 LlmClient.Message.assistant(response.reasoningContent(), response.content()));
         LlmTraceLogger.logReasoning(log, "planner", llmClient, response.reasoningContent());
         streamRenderer.finish();
-        String planJson = response.content();
+        return parsePlan(goal, response.content());
+    }
 
-        // 解析JSON计划
-        return parsePlan(goal, planJson);
+    public int estimateRequestTokens(PlannerRequest request) {
+        return TokenBudget.estimateMessagesTokens(buildPlanningMessages(request));
+    }
+
+    private List<LlmClient.Message> buildPlanningMessages(PlannerRequest request) {
+        StringBuilder planningRequest = new StringBuilder();
+        if (!request.priorConversationContext().isBlank()) {
+            planningRequest.append(request.priorConversationContext()).append("\n\n");
+        }
+        planningRequest.append("[当前任务]\n")
+                .append(request.goal())
+                .append("\n\n请为当前任务制定执行计划。");
+        return Arrays.asList(
+                LlmClient.Message.system(promptAssembler.assemble(PromptMode.PLANNER, PromptContext.builder()
+                        .projectMemoryContext(buildProjectMemoryContext())
+                        .build())),
+                LlmClient.Message.user(planningRequest.toString())
+        );
     }
 
     private String buildProjectMemoryContext() {
@@ -221,11 +253,27 @@ public class Planner {
     }
 
     /**
-     * 根据执行结果重新规划
+     * 根据执行结果重新规划。保留旧虚方法作为扩展点。
      */
     public ExecutionPlan replan(ExecutionPlan failedPlan, String failureReason) throws IOException {
+        String goal = buildReplanGoal(failedPlan, failureReason);
         out.println("🔄 重新规划，原因: " + failureReason + "\n");
+        return createPlan(goal);
+    }
 
+    public ExecutionPlan replan(ExecutionPlan failedPlan, String failureReason,
+                                String priorConversationContext) throws IOException {
+        if (priorConversationContext == null || priorConversationContext.isBlank()) {
+            // Preserve polymorphic behavior for existing Planner subclasses.
+            return replan(failedPlan, failureReason);
+        }
+        out.println("🔄 重新规划，原因: " + failureReason + "\n");
+        return createPlan(new PlannerRequest(
+                buildReplanGoal(failedPlan, failureReason),
+                priorConversationContext));
+    }
+
+    private String buildReplanGoal(ExecutionPlan failedPlan, String failureReason) {
         StringBuilder context = new StringBuilder();
         context.append("原任务: ").append(failedPlan.getGoal()).append("\n");
         context.append("失败原因: ").append(failureReason).append("\n");
@@ -238,10 +286,8 @@ public class Planner {
                         .append("\n");
             }
         }
-
         context.append("\n请制定新的执行计划，避开之前的问题。");
-
-        return createPlan(context.toString());
+        return context.toString();
     }
 
     private boolean isSimpleGoal(String goal) {

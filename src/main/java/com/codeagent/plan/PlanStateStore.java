@@ -155,7 +155,9 @@ public final class PlanStateStore {
             ps.setString(2, plan.getSummary());
             ps.setString(3, Instant.now().toString());
             ps.setString(4, plan.getId());
-            ps.executeUpdate();
+            if (ps.executeUpdate() != 1) {
+                throw new SQLException("Plan 不存在，无法 checkpoint: " + plan.getId());
+            }
         }
     }
 
@@ -219,6 +221,78 @@ public final class PlanStateStore {
                         rs.getInt("total_tasks")));
             }
         }
+    }
+
+    /** Read-only active Plan metadata used by cross-store conversation reconciliation. */
+    public synchronized Optional<StoredPlanInfo> findActiveRecord(Path workspace, String sessionId)
+            throws SQLException {
+        String normalizedSessionId = normalizeSessionId(sessionId);
+        if (normalizedSessionId == null) {
+            return Optional.empty();
+        }
+        try (Connection connection = openConnection();
+             PreparedStatement ps = connection.prepareStatement("""
+                     SELECT id, workspace, session_id, policy_input, goal, status, summary
+                     FROM plan_runs
+                     WHERE workspace = ?
+                       AND session_id = ?
+                       AND status IN (?, ?)
+                     ORDER BY updated_at DESC, created_at DESC
+                     LIMIT 1
+                     """)) {
+            ps.setString(1, normalizeWorkspace(workspace));
+            ps.setString(2, normalizedSessionId);
+            ps.setString(3, ExecutionPlan.PlanStatus.CREATED.name());
+            ps.setString(4, ExecutionPlan.PlanStatus.RUNNING.name());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return Optional.empty();
+                }
+                return Optional.of(readStoredPlanInfo(rs));
+            }
+        }
+    }
+
+    /** Loads one persisted Plan by id without changing persisted recovery state. */
+    public synchronized Optional<StoredPlan> findById(String planId) throws SQLException {
+        if (planId == null || planId.isBlank()) {
+            return Optional.empty();
+        }
+        try (Connection connection = openConnection();
+             PreparedStatement ps = connection.prepareStatement("""
+                     SELECT id, workspace, session_id, policy_input, goal, status, summary
+                     FROM plan_runs
+                     WHERE id = ?
+                     LIMIT 1
+                     """)) {
+            ps.setString(1, planId.trim());
+            StoredPlanInfo info;
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return Optional.empty();
+                }
+                info = readStoredPlanInfo(rs);
+            }
+            ExecutionPlan plan = new ExecutionPlan(info.planId(), info.goal());
+            plan.setSummary(info.summary());
+            plan.setStatus(info.status());
+            restoreTasks(connection, plan);
+            if (!plan.computeExecutionOrder()) {
+                throw new SQLException("持久化 Plan 存在循环依赖: " + planId);
+            }
+            return Optional.of(new StoredPlan(plan, info));
+        }
+    }
+
+    private static StoredPlanInfo readStoredPlanInfo(ResultSet rs) throws SQLException {
+        return new StoredPlanInfo(
+                rs.getString("id"),
+                rs.getString("workspace"),
+                rs.getString("session_id"),
+                rs.getString("policy_input"),
+                rs.getString("goal"),
+                ExecutionPlan.PlanStatus.valueOf(rs.getString("status")),
+                rs.getString("summary"));
     }
 
     /**
@@ -549,6 +623,35 @@ public final class PlanStateStore {
                                  ExecutionPlan.PlanStatus status,
                                  int completedTasks,
                                  int totalTasks) {
+    }
+
+    public record StoredPlanInfo(String planId,
+                                 String workspace,
+                                 String sessionId,
+                                 String policyInput,
+                                 String goal,
+                                 ExecutionPlan.PlanStatus status,
+                                 String summary) {
+        public StoredPlanInfo {
+            policyInput = policyInput == null ? "" : policyInput;
+            summary = summary == null ? "" : summary;
+        }
+
+        public boolean active() {
+            return status == ExecutionPlan.PlanStatus.CREATED
+                    || status == ExecutionPlan.PlanStatus.RUNNING;
+        }
+
+        public boolean terminal() {
+            return !active();
+        }
+    }
+
+    public record StoredPlan(ExecutionPlan plan, StoredPlanInfo info) {
+        public StoredPlan {
+            Objects.requireNonNull(plan, "plan");
+            Objects.requireNonNull(info, "info");
+        }
     }
 
     public record ResumeCandidate(ExecutionPlan plan,

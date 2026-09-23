@@ -47,6 +47,8 @@ class MainPlanAgentFactoryTest {
             assertSame(ledger, readField(planAgent, "conversationLedger"));
             assertSame(ledger, readField(readField(planAgent, "planner"), "conversationLedger"));
             assertSame(session, readField(planAgent, "parentSession"));
+            assertSame(reactAgent.getParentConversationContext(),
+                    readField(planAgent, "parentConversationContext"));
         }
     }
 

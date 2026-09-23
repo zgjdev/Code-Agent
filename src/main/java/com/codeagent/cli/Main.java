@@ -1368,7 +1368,7 @@ public class Main {
                 PipelineOptions.FULL_PRESET
         );
         planAgent.setConversationLedger(reactAgent.getConversationLedger());
-        planAgent.setParentSession(reactAgent.getSessionHandle());
+        planAgent.setParentConversationContext(reactAgent.getParentConversationContext());
         return planAgent;
     }
 
@@ -1384,7 +1384,7 @@ public class Main {
                 PipelineOptions.FULL_PRESET
         );
         planAgent.setConversationLedger(reactAgent.getConversationLedger());
-        planAgent.setParentSession(reactAgent.getSessionHandle());
+        planAgent.setParentConversationContext(reactAgent.getParentConversationContext());
         planAgent.enableDefaultPlanStateStore();
         return planAgent;
     }

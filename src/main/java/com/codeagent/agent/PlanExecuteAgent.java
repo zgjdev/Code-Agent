@@ -914,10 +914,18 @@ public class PlanExecuteAgent {
                             priorConversationContext, turnId);
                     String prefix = "⚠️ 原计划有任务失败，已按重规划结果继续执行。\n"
                             + finalResult + "\n";
+                    if (!replannedOutcome.persistAssistantMessage()) {
+                        String conversationResult = conversationResultBuilder.build(plan)
+                                + "\n⏹️ 后续重规划已取消。";
+                        finishPlanTurnIfNeeded(turnId, plan, conversationResult);
+                        return PlanRunOutcome.terminal(
+                                prefix + nullToEmpty(replannedOutcome.displayResult()),
+                                conversationResult);
+                    }
                     return new PlanRunOutcome(
                             prefix + nullToEmpty(replannedOutcome.displayResult()),
                             replannedOutcome.conversationResult(),
-                            replannedOutcome.persistAssistantMessage());
+                            true);
                 }
             }
         }

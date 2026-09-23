@@ -155,7 +155,9 @@ public final class PlanStateStore {
             ps.setString(2, plan.getSummary());
             ps.setString(3, Instant.now().toString());
             ps.setString(4, plan.getId());
-            ps.executeUpdate();
+            if (ps.executeUpdate() != 1) {
+                throw new SQLException("Plan 不存在，无法 checkpoint: " + plan.getId());
+            }
         }
     }
 

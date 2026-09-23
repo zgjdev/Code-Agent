@@ -95,7 +95,7 @@ public class Agent {
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
         this.toolRegistry.setScopedMemorySaver(memoryManager::storeFact);
         this.parentConversationContext = new ParentConversationContext(
-                LlmClient.Message.system(buildSystemPrompt()));
+                LlmClient.Message.system(buildSystemPrompt()), llmClient);
         this.conversationHistory = parentConversationContext.providerMessages();
     }
 
@@ -170,6 +170,7 @@ public class Agent {
         this.contextTokenTracker.invalidate(InvalidationReason.PROVIDER_CHANGED);
         this.memoryManager.setLlmClient(llmClient);
         this.autoCompactionManager.setLlmClient(llmClient);
+        this.parentConversationContext.setLlmClient(llmClient);
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
     }
@@ -1307,72 +1308,15 @@ public class Agent {
         if (candidate.equals(conversationHistory)) {
             return;
         }
-        if (parentConversationContext.sessionHandle() == null) {
-            conversationHistory.clear();
-            conversationHistory.addAll(candidate);
-            historyVersion++;
+        try {
+            parentConversationContext.commitPreparedCompaction(
+                    candidate, "react", "agent", source);
+            historyVersion = parentConversationContext.historyVersion();
+            observedCompactionGeneration = parentConversationContext.compactionGeneration();
             contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
-            return;
+        } catch (IOException | IllegalStateException e) {
+            throw new SessionPersistenceException("unable to commit parent compaction", e);
         }
-
-        int commonSuffix = commonSuffixLength(conversationHistory, candidate);
-        int removedEndIndex = conversationHistory.size() - commonSuffix - 1;
-        if (conversationHistory.size() < 2 || candidate.size() < commonSuffix + 3
-                || removedEndIndex < 1) {
-            throw new SessionPersistenceException("unsupported compaction shape", null);
-        }
-        List<SessionProjection.SurfaceNode> nodes = parentConversationContext.sessionHandle().projection().activeSurface();
-        long startSequence = nodes.get(1).sequence();
-        long endSequence = nodes.get(removedEndIndex).sequence();
-        String compactionId = UUID.randomUUID().toString();
-
-        ObjectNode start = JSON.createObjectNode()
-                .put("compactionId", compactionId)
-                .put("source", source)
-                .put("beforeTokens", beforeTokens);
-        persistEvent(SessionEvent.Types.COMPACTION_START,
-                SessionEvent.SurfaceOperation.none(), start);
-
-        ObjectNode summary = JSON.createObjectNode()
-                .put("compactionId", compactionId)
-                .put("afterTokens", com.codeagent.memory.TokenBudget.estimateMessagesTokens(candidate));
-        persistEvent(SessionEvent.Types.COMPACTION_SUMMARY,
-                SessionEvent.SurfaceOperation.none(), summary);
-
-        persistCompactionMessage(candidate.get(1), SessionEvent.Types.USER_MESSAGE,
-                SessionEvent.SurfaceOperation.replace(startSequence, endSequence), compactionId);
-        persistCompactionMessage(candidate.get(2), SessionEvent.Types.ASSISTANT_MESSAGE,
-                SessionEvent.SurfaceOperation.append(), compactionId);
-        ObjectNode end = JSON.createObjectNode()
-                .put("compactionId", compactionId)
-                .put("status", "completed");
-        persistEvent(SessionEvent.Types.COMPACTION_END,
-                SessionEvent.SurfaceOperation.none(), end);
-
-        conversationHistory.clear();
-        conversationHistory.addAll(parentConversationContext.sessionHandle().projection().messages());
-        historyVersion = parentConversationContext.sessionHandle().projection().historyVersion();
-        observedCompactionGeneration = parentConversationContext.sessionHandle().projection().compactionGeneration();
-        contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
-    }
-
-    private void persistCompactionMessage(LlmClient.Message message, String type,
-                                          SessionEvent.SurfaceOperation operation,
-                                          String compactionId) {
-        ObjectNode payload = JSON.createObjectNode().put("compactionId", compactionId);
-        payload.set("message", JSON.valueToTree(message));
-        persistEvent(type, operation, payload);
-    }
-
-    private static int commonSuffixLength(List<LlmClient.Message> before,
-                                          List<LlmClient.Message> after) {
-        int count = 0;
-        while (count < before.size() && count < after.size()
-                && before.get(before.size() - 1 - count)
-                .equals(after.get(after.size() - 1 - count))) {
-            count++;
-        }
-        return count;
     }
 
     private String formatUserFacingResponse(String reasoningContent, String answer) {

@@ -60,6 +60,35 @@ class PlannerTest {
     }
 
     @Test
+    void priorConversationForcesPlannerAndCurrentGoalAppearsOnce() throws Exception {
+        StubGLMClient client = new StubGLMClient("""
+                {
+                  "summary": "上下文任务",
+                  "tasks": [
+                    {
+                      "id": "t1",
+                      "description": "列出之前讨论的目录",
+                      "type": "COMMAND",
+                      "dependencies": []
+                    }
+                  ]
+                }
+                """);
+        Planner planner = new Planner(client);
+        String goal = "列出当前目录的文件";
+
+        ExecutionPlan plan = planner.createPlan(new Planner.PlannerRequest(
+                goal,
+                "[历史会话上下文]\n[User] 刚才我们在看 src/main"));
+
+        assertEquals("上下文任务", plan.getSummary());
+        assertEquals(1, client.calls);
+        assertTrue(client.lastUserPrompt.contains("[历史会话上下文]"));
+        assertTrue(client.lastUserPrompt.contains("刚才我们在看 src/main"));
+        assertEquals(1, occurrences(client.lastUserPrompt, goal));
+    }
+
+    @Test
     void parsesPlanWrappedInMarkdownFence() throws Exception {
         StubGLMClient client = new StubGLMClient("""
                 ```json
@@ -214,6 +243,18 @@ class PlannerTest {
                 .createPlan("analyze and update files outside the project"));
     }
 
+    private static int occurrences(String text, String value) {
+        int count = 0;
+        int offset = 0;
+        while (text != null && value != null && !value.isEmpty()) {
+            int index = text.indexOf(value, offset);
+            if (index < 0) break;
+            count++;
+            offset = index + value.length();
+        }
+        return count;
+    }
+
     private static final class FailingGLMClient extends GLMClient {
         private FailingGLMClient() {
             super("test-key");
@@ -228,6 +269,8 @@ class PlannerTest {
     private static final class StubGLMClient extends GLMClient {
         private final String content;
         private String lastSystemPrompt = "";
+        private String lastUserPrompt = "";
+        private int calls;
 
         private StubGLMClient(String content) {
             super("test-key");
@@ -236,7 +279,9 @@ class PlannerTest {
 
         @Override
         public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) {
+            calls++;
             this.lastSystemPrompt = messages.get(0).content();
+            this.lastUserPrompt = messages.get(messages.size() - 1).content();
             return new ChatResponse("assistant", content, null, 100, 20);
         }
     }

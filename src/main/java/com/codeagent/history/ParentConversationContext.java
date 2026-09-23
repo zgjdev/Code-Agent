@@ -152,6 +152,13 @@ public final class ParentConversationContext {
         return new ParentCompactionResult(true, result.strategy(), beforeTokens, afterTokens);
     }
 
+    public synchronized void commitPreparedCompaction(List<LlmClient.Message> candidate,
+                                                       String mode,
+                                                       String actor,
+                                                       String source) throws IOException {
+        commitCompaction(candidate, mode, actor, source);
+    }
+
     private void commitCompaction(List<LlmClient.Message> candidate,
                                   String mode,
                                   String actor,

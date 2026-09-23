@@ -818,136 +818,46 @@ CODEAGENT_AUTO_ROUTING=off
 
 ### 4.1 实现任务
 
-建议按以下依赖顺序实现。
+严格按依赖方向实现，并先补对应测试。
 
-#### Task 1：定义模式模型
+#### Task 1：定义模式模型与 auto-routing 开关
+
+新增 `ExecutionMode`、`RoutingSource`、`RoutingDecision` 和配置解析 helper。覆盖 property > env > default、on/off、非法值 warning、Optional usage 语义。
+
+#### Task 2：抽取 Top-level formatter，并锁定 Router 窗口
+
+从 `PlannerConversationContextBuilder` 抽取 `TopLevelConversationFormatter`，保证 Planner 重构前后输出完全一致；Router 独立实现第 2.4 节确定性窗口算法。
+
+#### Task 3：实现轻量 Router Prompt
 
 新增：
 
 ```text
-ExecutionMode
-RoutingSource
-RoutingDecision
+src/main/java/com/codeagent/prompt/ModeRouterPromptBuilder.java
+src/main/resources/prompts/modes/router.md
 ```
 
-不接 CLI，不调用 LLM。
+测试必须证明 Router prompt 不包含完整 Agent 的 Tool Policy、Approval、Handoff 或 Skill/Memory 动态正文。
 
-先完成对应单元测试。
+#### Task 4：实现 ExecutionModeRouter
 
-#### Task 2：抽取顶层语义格式化能力
+实现严格 JSON parser、AUTO_MODEL/AUTO_FALLBACK、normalized usage capture 和取消传播。fake LLM 测试必须断言 tools == null。
 
-从：
+#### Task 5：增加默认 CLI one-turn override
 
-```text
-PlannerConversationContextBuilder
-```
+修改 `CliCommandParser`、`CodeAgentCompleter`、`Main`，增加 `/react` 与 `/react <task>`，并把 `nextTaskUsePlanMode` 替换为 `ExecutionMode nextTaskOverride`。
 
-抽取通用：
+#### Task 6：接入 Main 调度/取消/Snapshot 边界
 
-```text
-TopLevelConversationFormatter
-```
-
-保证 Planner 输出在重构前后完全一致。
-
-Router 增加独立近期窗口选择逻辑：
-
-```text
-latest SUMMARY + latest 3 USER turns
-```
-
-不得改变 Planner 当前 history 语义。
-
-#### Task 3：实现 ExecutionModeRouter
-
-实现：
-
-```text
-PromptMode.ROUTER
-router.md
-ExecutionModeRouter
-strict response parser
-REACT fallback
-usage capture
-```
-
-Router 不注册工具。
-
-#### Task 4：增加 CLI override
-
-修改：
-
-```text
-CliCommandParser
-CodeAgentCompleter
-Main
-```
-
-增加：
-
-```text
-/react
-/react <task>
-```
-
-把：
-
-```java
-nextTaskUsePlanMode
-```
-
-替换为明确的 one-turn override。
-
-#### Task 5：接入 Main 普通任务路径
-
-普通输入：
-
-```text
-AUTO
-```
-
-显式命令：
-
-```text
-/plan  -> PLAN
-/react -> REACT
-```
-
-模式确定后再调用对应：
-
-```text
-SnapshotService.runTurn("react", ...)
-SnapshotService.runTurn("plan", ...)
-```
-
-Router 与实际执行必须处于同一个 cancellation run 内。
-
-#### Task 6：增加兼容开关
-
-支持：
-
-```text
--Dcodeagent.execution.mode=auto|react
-CODEAGENT_EXECUTION_MODE=auto|react
-```
-
-优先级遵循项目现有 system property / environment 约定。
+把 route -> final mode -> SnapshotService.runTurn -> actual Agent 放进同一个 `runWithCancelSupport` 域。保证 Router 取消不启动 Agent、不创建 execution snapshot；Plan 失败不 fallback；每 Turn 使用当前 active LlmClient。
 
 #### Task 7：增加可观测性
 
-至少记录：
-
-```text
-routing source
-selected mode
-router provider usage
-```
-
-不得写 Parent Session semantic conversation。
+通过 `ConversationLedger.appendEvent(...)` 记录 source、selected mode、provider/model 和可用的 normalized usage，不记录 Router 正文。
 
 #### Task 8：同步文档
 
-实现完成后检查并同步：
+实现后同步：
 
 ```text
 AGENTS.md
@@ -956,52 +866,72 @@ docs/agents-reference.md
 docs/dev/15-auto-execution-mode-routing.md
 ```
 
-`AGENTS.md` 中当前：
-
-```text
-MODE -> REACT / PLAN
-```
-
-架构图可继续保留，但正文需要改成：
-
-```text
-普通顶层任务默认由 Mode Router 决定；
-/plan 与 /react 为 one-turn override。
-```
+文档必须明确：默认终端普通任务可自动路由；`/plan` 与 `/react` 是 one-turn override；`/plan resume`/`abandon` 继续显式控制恢复；Lanterna TUI 尚未接入自动路由。
 
 ### 4.2 测试矩阵
 
 | 场景 | 预期 |
 |---|---|
-| Router 返回 `react` | 调用 ReAct，不创建 Plan |
-| Router 返回 `plan` | 调用 PlanExecuteAgent |
-| Router 输出非法 JSON | 回退 ReAct |
-| Router 抛 IOException | 回退 ReAct |
-| Router 返回未知 mode | 回退 ReAct |
+| Router content = `{"mode":"react"}` | AUTO_MODEL / ReAct |
+| Router content = `{"mode":"plan"}` | AUTO_MODEL / Plan |
+| Router content = `react` | 非法，AUTO_FALLBACK / ReAct |
+| Router content = `"plan"` | 非法，AUTO_FALLBACK / ReAct |
+| Router content 有额外字段 | 非法，AUTO_FALLBACK / ReAct |
+| Router content 有 code fence | 非法，AUTO_FALLBACK / ReAct |
+| Router content 未知 mode | 非法，AUTO_FALLBACK / ReAct |
+| Provider 非取消性 IOException | AUTO_FALLBACK / ReAct |
+| Provider 异常且 CancellationContext 已取消 | 当前 Turn 取消，不 fallback |
+| Router 返回后 CancellationContext 已取消 | 当前 Turn 取消，不执行 Agent |
+| Router tools 参数 | 必须为 null |
 | `/plan task` | 不调用 Router，直接 Plan |
 | `/react task` | 不调用 Router，直接 ReAct |
-| `/plan` 后下一条任务 | 只该 Turn 强制 Plan |
-| `/react` 后下一条任务 | 只该 Turn 强制 ReAct |
-| override Turn 结束 | 下一轮恢复 AUTO |
-| `/plan resume` | 不调用 Router |
-| `/plan abandon` | 不调用 Router |
-| `CODEAGENT_EXECUTION_MODE=react` | 普通任务不调用 Router |
-| Router history | 只包含 USER / ASSISTANT / SUMMARY |
-| ReAct tool result | 不进入 Router |
-| Plan Task transcript | 不进入 Router |
-| Skill / Memory 注入 | 不进入 Router |
-| `@path` 展开正文 | 不进入 Router |
-| MCP resource 展开正文 | 不进入 Router |
-| 当前 submittedInput | Router 中只出现一次 |
-| Router 选择 Plan 且存在 active Plan | 不自动恢复，返回现有 resume/abandon 提示 |
-| Router 选择 Plan 但 PlanStateStore 不可用 | fail closed，不 fallback ReAct |
-| Router 选择 Plan 后用户取消人工计划 | 不执行 Task，不 fallback ReAct |
-| Router 请求期间 ESC | 能取消当前 Turn |
-| Router 自动选择 Plan | 用户可见模式提示 |
-| Router usage | 有独立可观测记录 |
+| 裸 `/plan` 后下一条任务 | 只该 Turn 强制 Plan |
+| 裸 `/react` 后下一条任务 | 只该 Turn 强制 ReAct |
+| override Turn 成功结束 | override 清空 |
+| override Turn 取消 | override 清空 |
+| `/plan resume` / `/plan abandon` | 不调用 Router |
+| auto routing = off | 普通任务不调用 Router，直接 ReAct |
+| 最新 SUMMARY 前的历史 | 不进入 Router |
+| 超过 3 个 USER Turn | SUMMARY + 最近 3 个 USER Turn 切片 |
+| 少于等于 3 个 USER Turn | 保留语义下界后的全部 |
+| 未闭合顶层 Turn | 按实际节点顺序保留 |
+| Skill/Memory/tool result/Task transcript | 不进入 Router |
+| `@path` / MCP 展开正文 | 不进入 Router |
+| Router 当前输入 | 使用 submittedInput，不使用 taskInput |
+| `/model` 切换后的下一轮 | Router 使用新 client |
+| Router 选择 Plan 且存在 active Plan | 返回现有 resume/abandon 提示 |
+| Router 选择 ReAct 且存在 active Plan | 执行独立 ReAct Turn |
+| Router 选择 Plan 但 durable gate 失败 | Plan fail closed，不 fallback |
+| Router 选择 Plan 后用户取消 Plan review | 不执行 Task，不 fallback |
+| Router 阶段取消 | 不创建 execution snapshot |
+| AUTO_MODEL 选择 Plan | 显示一次自动 Plan 提示 |
+| AUTO_MODEL 选择 ReAct | 不额外打印模式提示 |
+| Router usage | ledger 可见，不进入 Parent Session |
 | Parent Session | 不出现 Router prompt/response |
-| 后续 ReAct | 仍可读取此前 Plan 顶层结果 |
-| 后续 Plan | 仍可读取此前 ReAct 顶层结果 |
+| Lanterna TUI | 行为保持现状，不受本次改造影响 |
+
+此外增加一组**非 CI 的真实 Provider smoke**验证 Prompt 分类质量。确定性单测只能证明 wiring，不能证明模型路由本身合理。
+
+至少覆盖：
+
+```text
+应倾向 ReAct：
+- 解释一个方法
+- 定位 NPE
+- 单文件局部修改
+- 补一个边界测试
+
+应倾向 Plan：
+- JWT + Redis + DB + tests 的跨模块重构
+- Session 持久化/恢复/压缩/跨模式上下文统一重构
+- 多阶段 client 迁移并做回归验证
+
+边界：
+- “帮我重构这个很短的方法”不能只因重构关键词选择 Plan
+- 历史已说明多个模块需要协调，当前说“剩下的也一起改掉”应能利用历史倾向 Plan
+```
+
+真实 Provider smoke 只记录行为证据，不作为 CI 硬断言。
 
 ### 4.3 建议新增/修改测试
 
@@ -1010,6 +940,7 @@ MODE -> REACT / PLAN
 ```text
 ExecutionModeRouterTest
 ExecutionModeRoutingContextTest
+ModeRouterPromptBuilderTest
 MainExecutionModeRoutingTest
 ```
 
@@ -1021,20 +952,22 @@ MainInputNormalizationTest
 MainPlanAgentFactoryTest
 PlannerTest
 PlannerConversationContextBuilderTest
+CodeAgentCompleterTest（若现有测试存在）
 ```
 
-已有 Plan 恢复测试继续作为回归：
+已有恢复/上下文测试继续作为回归：
 
 ```text
 PlanExecuteRecoveryTest
 PlanConversationReconcilerTest
 SessionReplayerTest
+ParentConversationContextTest（若现有测试存在）
 ```
 
-实现过程中针对性命令：
+针对性测试示例：
 
 ```bash
-mvn test -Dtest=ExecutionModeRouterTest,ExecutionModeRoutingContextTest
+mvn test -Dtest=ExecutionModeRouterTest,ExecutionModeRoutingContextTest,ModeRouterPromptBuilderTest
 
 mvn test -Dtest=CliCommandParserTest,MainExecutionModeRoutingTest,MainInputNormalizationTest
 
@@ -1052,30 +985,20 @@ git diff --check
 
 ## 5. 主要风险与设计取舍
 
-### 5.1 每轮多一次 LLM 请求
+### 5.1 每个 AUTO Turn 多一次 LLM 请求
 
-AUTO 模式会给普通 Turn 增加一次 Router 请求。
+AUTO 会增加延迟、Token、Provider 成本和一个额外网络失败点。
 
-代价包括：
+因此本方案明确：
 
-```text
-延迟
-Token
-Provider 成本
-额外失败点
-```
+- Router 使用轻量专用 prompt，不走完整 Agent PromptAssembler。
+- Router 只携带最近顶层语义窗口。
+- Router 不携带 tools。
+- 非取消性故障回退 ReAct。
+- usage 必须可观测。
+- 第一版不新增第二套 Router Provider/Model 配置。
 
-因此 Router Prompt 和历史窗口必须保持很小，且不暴露工具。
-
-第一版暂不增加独立廉价 Router 模型，以避免引入新的 provider/model 配置面。
-
-后续真实使用数据证明 Router 成本明显后，再单独设计：
-
-```text
-routing model
-```
-
-不能在本次实现中顺带扩张范围。
+后续只有真实数据证明成本值得优化时，再单独设计 routing model。
 
 ### 5.2 模式误判
 
@@ -1107,7 +1030,7 @@ routing model
 
 作为用户确定性覆盖入口。
 
-### 5.3 自动 Plan 与人工计划门
+### 5.3 自动 Plan 与默认终端人工计划门
 
 AUTO 只自动决定：
 
@@ -1121,7 +1044,7 @@ AUTO 只自动决定：
 用户已经批准这个 Plan
 ```
 
-所以当前 Plan review 必须保留。
+所以默认终端当前 Plan review 必须保留。
 
 流程仍是：
 
@@ -1166,47 +1089,49 @@ TurnToolPolicy:
 
 ### 5.5 不自动恢复 active Plan
 
-这是必须保持的恢复边界。
+这是必须保持的恢复边界。普通文本 `继续` 即使语义上可能指旧 Plan，也只能作为普通新 Turn 处理；恢复 Plan 必须继续使用 `/plan resume`。
 
-普通文本：
+### 5.6 Lanterna TUI 为什么本次不接入
 
-```text
-继续
-```
+Lanterna TUI 当前普通输入在 `TuiSessionController` 内固定走 ReAct，`/plan` 命令形态、Plan review 和 ParentConversationContext 接线又与默认 CLI 不完全一致。
 
-即使语义上可能指旧 Plan，也只能作为普通新 Turn 处理。
-
-恢复 Plan 必须继续：
-
-```text
-/plan resume
-```
-
-因为 resume 可能重新执行中断 Task 并产生副作用。
+如果本次同时接入，会把范围扩大为 TUI 命令统一、Plan review 语义统一、Parent Session 接线修复、Router 接入和 TUI 测试扩展。该工作应单独设计，而不是隐式混入本次自动路由实现。
 
 ## 6. 验收清单
 
-- [ ] 普通 CLI/TUI 任务默认进入 AUTO 模式。
-- [ ] AUTO Router 只读取当前 `submittedInput` 和 Top-level Conversation。
+- [ ] 本次改造范围仅为默认 `Main` inline/plain 终端主路径。
+- [ ] Lanterna `TuiSessionController`、Runtime API、WeChat 行为保持不变。
+- [ ] 普通默认终端任务在 auto-routing=on 时进入 AUTO Router。
+- [ ] `ExecutionMode` 只有 REACT / PLAN，不把 AUTO 当第三种执行模式。
+- [ ] auto-routing=off 时普通任务恢复旧的直接 ReAct 行为。
+- [ ] AUTO Router 只读取 `submittedInput` 和 Top-level Conversation。
 - [ ] Router 不读取 Provider Surface、Tool Result、Task transcript、Skill/Memory 注入。
+- [ ] Router 使用确定性的 SUMMARY + 最近最多 3 个 USER Turn 窗口算法。
+- [ ] Router 使用专用轻量 prompt，不复用完整 Agent PromptAssembler。
 - [ ] Router 不注册任何工具。
-- [ ] Router 不写 Parent Session 的 USER / ASSISTANT。
+- [ ] Router 响应严格要求单字段 JSON object。
+- [ ] 非取消性 Provider/解析故障确定性回退 ReAct。
+- [ ] 用户取消或线程中断绝不 fallback ReAct。
+- [ ] Router 阶段取消后不启动实际 Agent、不创建 execution snapshot。
+- [ ] Router 不写 Parent Session USER / ASSISTANT。
 - [ ] Router 不改变 Session / Plan 持久化 schema。
-- [ ] Router 成功返回 `REACT` 时走现有 ReAct 路径。
-- [ ] Router 成功返回 `PLAN` 时走完整现有 Plan 路径。
-- [ ] Router 失败时确定性回退 ReAct。
-- [ ] 已选择 Plan 后的持久化失败不得回退 ReAct。
+- [ ] Router 每 Turn 使用当前活动 LlmClient；`/model` 后不会继续使用旧 client。
+- [ ] Router 成功返回 REACT 时走现有 ReAct 路径。
+- [ ] Router 成功返回 PLAN 时走完整现有默认终端 Plan 路径。
+- [ ] 已选择 Plan 后的持久化/执行失败不得回退 ReAct。
 - [ ] `/plan` 保留为 one-turn Plan override。
-- [ ] `/react` 可 one-turn 强制 ReAct。
-- [ ] `/plan resume` 与 `/plan abandon` 语义不变。
+- [ ] `/react` 提供对称 one-turn ReAct override。
+- [ ] override 成功或取消后均清空。
+- [ ] `/plan resume` 与 `/plan abandon` 不经过 Router。
 - [ ] active Plan 不会被 AUTO 自动恢复、覆盖或放弃。
 - [ ] 模式在一个顶层 Turn 内固定，不发生运行中迁移。
-- [ ] Router 调用支持当前 Turn 的 ESC / cancellation。
-- [ ] AUTO 选择 Plan 时终端明确显示实际模式。
+- [ ] actual execution 仍完整位于原有 `SnapshotService.runTurn` 边界。
+- [ ] AUTO_MODEL 选择 Plan 时终端明确显示一次实际模式。
+- [ ] AUTO_MODEL 选择 ReAct 时不增加用户可见噪声。
 - [ ] Router usage 可观测，不被错误计入 Parent Session 上下文。
+- [ ] 模型行为 smoke 覆盖简单任务、复杂任务、历史依赖任务和“重构”关键词边界。
 - [ ] ReAct / Plan 原有 Parent Conversation 连续性测试全部通过。
 - [ ] Plan Task isolation 和权限边界没有变化。
-- [ ] `CliCommandParserTest` 覆盖 `/react`。
 - [ ] `README.md`、`AGENTS.md`、`docs/agents-reference.md` 已同步。
 - [ ] `mvn test -Pquick` 通过。
 - [ ] `mvn test -DskipTests=false` 通过。
@@ -1215,29 +1140,34 @@ TurnToolPolicy:
 
 ## 7. 实现后的目标架构
 
-最终用户不需要预先理解 ReAct 与 Plan 的内部区别。
-
-默认体验：
+默认终端用户不再需要预先理解 ReAct 与 Plan 的内部区别：
 
 ```text
 用户提出任务
      |
      v
-自动判断执行策略
+显式 override?
      |
-     +-- 普通任务 ------> ReAct
+     +-- /react ------> ReAct
      |
-     +-- 复杂任务 ------> Plan-and-Execute
+     +-- /plan -------> Plan
+     |
+     +-- 无
+          |
+          v
+   Auto Routing enabled?
+          |
+          +-- no ------> ReAct
+          |
+          +-- yes
+                |
+                v
+           Mode Router
+             /    \
+          ReAct   Plan
 ```
 
-同时仍保留确定性控制：
-
-```text
-/plan  -> 用户明确要求 Plan
-/react -> 用户明确要求 ReAct
-```
-
-底层保持：
+底层上下文关系：
 
 ```text
                  Parent Session
@@ -1260,13 +1190,15 @@ TurnToolPolicy:
         Parent Session
 ```
 
-本次改造的核心边界不是“让模型随时决定自己怎么跑”，而是：
+本次改造的核心边界是：
 
 ```text
-在每个顶层 Turn 开始前，
-基于统一的 Session 语义上下文，
-选择一次最合适的执行策略；
-之后仍由现有 ReAct 或 Plan 状态机完整负责这一轮。
+在默认终端每个顶层 Turn 开始前，
+基于统一的 Session 顶层语义，
+只选择一次 REACT 或 PLAN；
+
+Router 无工具、无权限授予、无 Parent Session 写入；
+选择完成后仍由现有 ReAct 或 Plan 状态机完整负责该 Turn。
 ```
 
-这样能够利用已经完成的跨模式会话统一，又不会把执行状态、权限和恢复机制重新耦合在一起。
+这利用了已经完成的跨模式会话统一，同时避免重新耦合执行状态、权限、快照和恢复机制。

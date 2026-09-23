@@ -62,13 +62,21 @@ public class Planner {
     }
 
     /**
-     * 为复杂任务创建执行计划。
+     * 为复杂任务创建执行计划。保留旧虚方法作为扩展点。
      */
     public ExecutionPlan createPlan(String goal) throws IOException {
-        return createPlan(new PlannerRequest(goal, ""));
+        return createPlanInternal(new PlannerRequest(goal, ""));
     }
 
     public ExecutionPlan createPlan(PlannerRequest request) throws IOException {
+        if (request.priorConversationContext().isBlank()) {
+            // Preserve polymorphic behavior for existing Planner subclasses.
+            return createPlan(request.goal());
+        }
+        return createPlanInternal(request);
+    }
+
+    private ExecutionPlan createPlanInternal(PlannerRequest request) throws IOException {
         String goal = request.goal();
         String priorConversationContext = request.priorConversationContext();
         out.println("📋 正在规划任务: " + goal + "\n");
@@ -81,7 +89,6 @@ public class Planner {
         conversationLedger.appendMessage("plan", "planner", "system_prompt", messages.get(0));
         conversationLedger.appendMessage("plan", "planner", "planning_request", messages.get(1));
 
-        // 调用LLM生成计划
         PlanningStreamRenderer streamRenderer = new PlanningStreamRenderer(out);
         LlmClient.ChatResponse response = llmClient.chat(messages, null, streamRenderer);
         conversationLedger.appendMessage(
@@ -91,10 +98,7 @@ public class Planner {
                 LlmClient.Message.assistant(response.reasoningContent(), response.content()));
         LlmTraceLogger.logReasoning(log, "planner", llmClient, response.reasoningContent());
         streamRenderer.finish();
-        String planJson = response.content();
-
-        // 解析JSON计划
-        return parsePlan(goal, planJson);
+        return parsePlan(goal, response.content());
     }
 
     public int estimateRequestTokens(PlannerRequest request) {
@@ -249,16 +253,27 @@ public class Planner {
     }
 
     /**
-     * 根据执行结果重新规划
+     * 根据执行结果重新规划。保留旧虚方法作为扩展点。
      */
     public ExecutionPlan replan(ExecutionPlan failedPlan, String failureReason) throws IOException {
-        return replan(failedPlan, failureReason, "");
+        String goal = buildReplanGoal(failedPlan, failureReason);
+        out.println("🔄 重新规划，原因: " + failureReason + "\n");
+        return createPlan(goal);
     }
 
     public ExecutionPlan replan(ExecutionPlan failedPlan, String failureReason,
                                 String priorConversationContext) throws IOException {
+        if (priorConversationContext == null || priorConversationContext.isBlank()) {
+            // Preserve polymorphic behavior for existing Planner subclasses.
+            return replan(failedPlan, failureReason);
+        }
         out.println("🔄 重新规划，原因: " + failureReason + "\n");
+        return createPlan(new PlannerRequest(
+                buildReplanGoal(failedPlan, failureReason),
+                priorConversationContext));
+    }
 
+    private String buildReplanGoal(ExecutionPlan failedPlan, String failureReason) {
         StringBuilder context = new StringBuilder();
         context.append("原任务: ").append(failedPlan.getGoal()).append("\n");
         context.append("失败原因: ").append(failureReason).append("\n");
@@ -271,10 +286,8 @@ public class Planner {
                         .append("\n");
             }
         }
-
         context.append("\n请制定新的执行计划，避开之前的问题。");
-
-        return createPlan(new PlannerRequest(context.toString(), priorConversationContext));
+        return context.toString();
     }
 
     private boolean isSimpleGoal(String goal) {

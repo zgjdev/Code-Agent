@@ -504,8 +504,9 @@ public class PlanExecuteAgent {
         }
 
         interruptedRecoveryTaskIds.clear();
-        String priorConversation = currentPlannerConversationContext();
-        ExecutionPlan plan = planner.createPlan(new Planner.PlannerRequest(goal, priorConversation));
+        Planner.PlannerRequest plannerRequest = preparePlannerRequest(goal);
+        String priorConversation = plannerRequest.priorConversationContext();
+        ExecutionPlan plan = planner.createPlan(plannerRequest);
         return reviewAndExecutePlan(plan, streamState, 0, priorConversation, null);
     }
 
@@ -711,6 +712,78 @@ public class PlanExecuteAgent {
         return parentConversationContext.projection().openPlanTurn(planId)
                 .map(SessionProjection.OpenTurn::turnId)
                 .orElse(null);
+    }
+
+    private Planner.PlannerRequest preparePlannerRequest(String goal) throws IOException {
+        String prior = currentPlannerConversationContext();
+        Planner.PlannerRequest request = new Planner.PlannerRequest(goal, prior);
+        int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
+        int estimated = planner.estimateRequestTokens(request);
+
+        if (estimated >= trigger && parentConversationContext != null) {
+            ParentConversationContext.ParentCompactionResult result =
+                    parentConversationContext.compactIfNeeded(
+                            trigger,
+                            estimated,
+                            "plan",
+                            "plan-agent",
+                            "planner-budget");
+            if (result.compacted()) {
+                conversationLedger.appendEvent(
+                        "compaction",
+                        "plan",
+                        "plan-agent",
+                        "planner-budget",
+                        Map.of(
+                                "beforeTokens", result.beforeTokens(),
+                                "afterTokens", result.afterTokens(),
+                                "strategy", result.strategy().name().toLowerCase(Locale.ROOT)));
+                prior = currentPlannerConversationContext();
+                request = new Planner.PlannerRequest(goal, prior);
+                estimated = planner.estimateRequestTokens(request);
+                out.println("📦 Plan 会话上下文接近窗口上限，已压缩 Parent Session 后继续。");
+            }
+        }
+
+        if (estimated >= trigger && parentConversationContext != null) {
+            prior = plannerConversationContextBuilder.build(
+                    recentPlannerConversationNodes(parentConversationContext.conversationNodes()));
+            request = new Planner.PlannerRequest(goal, prior);
+        }
+        return request;
+    }
+
+    private static List<SessionProjection.ConversationNode> recentPlannerConversationNodes(
+            List<SessionProjection.ConversationNode> nodes) {
+        if (nodes == null || nodes.isEmpty()) {
+            return List.of();
+        }
+        int lastSummary = -1;
+        for (int i = 0; i < nodes.size(); i++) {
+            if (nodes.get(i).kind() == SessionProjection.ConversationKind.SUMMARY) {
+                lastSummary = i;
+            }
+        }
+
+        int usersNeeded = 3;
+        int earliestRecentUser = nodes.size();
+        for (int i = nodes.size() - 1; i >= 0 && usersNeeded > 0; i--) {
+            if (nodes.get(i).kind() == SessionProjection.ConversationKind.USER) {
+                earliestRecentUser = i;
+                usersNeeded--;
+            }
+        }
+        if (earliestRecentUser == nodes.size()) {
+            earliestRecentUser = Math.max(0, nodes.size() - 1);
+        }
+
+        List<SessionProjection.ConversationNode> selected = new ArrayList<>();
+        if (lastSummary >= 0 && lastSummary < earliestRecentUser) {
+            selected.add(nodes.get(lastSummary));
+        }
+        int start = Math.max(lastSummary + 1, earliestRecentUser);
+        selected.addAll(nodes.subList(start, nodes.size()));
+        return List.copyOf(selected);
     }
 
     private String currentPlannerConversationContext() {

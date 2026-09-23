@@ -64,7 +64,7 @@ class PlanExecuteRecoveryTest {
                     new PrintStream(new ByteArrayOutputStream()),
                     PipelineOptions.PLAN_PRESET);
             agent.setPlanStateStore(store);
-            agent.setParentSession(session);
+            agent.setParentConversationContext(parentContext(session));
 
             String result = agent.resumeActivePlan();
 
@@ -110,7 +110,7 @@ class PlanExecuteRecoveryTest {
                     new PrintStream(new ByteArrayOutputStream()),
                     PipelineOptions.PLAN_PRESET);
             agent.setPlanStateStore(store);
-            agent.setParentSession(session);
+            agent.setParentConversationContext(parentContext(session));
 
             agent.resumeActivePlan();
 
@@ -260,6 +260,111 @@ class PlanExecuteRecoveryTest {
     }
 
     @Test
+    void configuredPlanStoreWithoutParentSessionRefusesExecution() throws Exception {
+        RecordingClient client = new RecordingClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        PlanExecuteAgent agent = new PlanExecuteAgent(
+                client,
+                registry,
+                new SingleTaskPlanner(client),
+                null,
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()),
+                PipelineOptions.PLAN_PRESET);
+        agent.setPlanStateStore(new PlanStateStore(tempDir.resolve("no-session-plans.db")));
+
+        String result = agent.run("不得在无 Session 时执行", "不得在无 Session 时执行");
+
+        assertTrue(result.contains("持久化 Session"), result);
+        assertEquals(0, client.snapshots.size(),
+                "PlanStateStore 已启用时，缺 Parent Session 必须在任何 Task 调用前失败");
+    }
+
+    @Test
+    void resumeStopsWhenParentConversationReconciliationFails() throws Exception {
+        RecordingClient client = new RecordingClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history-reconcile-failure"))) {
+            SessionStore.SessionHandle stale =
+                    sessions.create(new SessionStore.SessionCreateRequest(
+                            tempDir, "glm", "test", null, "react", "agent"));
+            String sessionId = stale.sessionId();
+            ParentConversationContext staleContext = parentContext(stale);
+            stale.close();
+
+            try (SessionStore.SessionHandle resumed = sessions.resumeWritable(sessionId, tempDir)) {
+                PlanStateStore store = new PlanStateStore(tempDir.resolve("reconcile-failure.db"));
+                ExecutionPlan persisted = singleTaskPlan("plan-reconcile-failure", "恢复任务");
+                store.savePlan(tempDir, sessionId, "恢复任务", persisted);
+
+                PlanExecuteAgent agent = new PlanExecuteAgent(
+                        client,
+                        registry,
+                        new FailingIfCalledPlanner(client),
+                        null,
+                        (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                        new PrintStream(new ByteArrayOutputStream()),
+                        PipelineOptions.PLAN_PRESET);
+                agent.setPlanStateStore(store);
+                agent.setParentConversationContext(staleContext);
+                agent.setParentSession(resumed);
+
+                String result = agent.resumeActivePlan();
+
+                assertTrue(result.contains("恢复计划失败"), result);
+                assertEquals(0, client.snapshots.size(),
+                        "Parent conversation reconciliation 失败后不得继续 Task 执行");
+            }
+        }
+    }
+
+    @Test
+    void resumedExecutionReplanKeepsOriginalPriorConversation() throws Exception {
+        FailThenSucceedClient client = new FailThenSucceedClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history-resume-replan"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            ParentConversationContext context = parentContext(session);
+            appendReactSemantic(context, "user", "之前我们讨论的是认证模块缓存");
+            appendReactSemantic(context, "assistant", "上一轮已经完成缓存层重构");
+
+            PlanStateStore store = new PlanStateStore(tempDir.resolve("resume-replan.db"));
+            ExecutionPlan persisted = singleTaskPlan("plan-resume-replan", "继续当前优化");
+            store.savePlan(tempDir, session.sessionId(), "继续刚才那个缓存优化", persisted);
+
+            CapturingReplanPlanner planner = new CapturingReplanPlanner(client);
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    client,
+                    registry,
+                    planner,
+                    null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()),
+                    PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(store);
+            agent.setParentConversationContext(context);
+
+            String result = agent.resumeActivePlan();
+
+            assertTrue(result.contains("计划执行完成"), result);
+            assertNotNull(planner.priorConversationContext);
+            assertTrue(planner.priorConversationContext.contains("认证模块缓存"),
+                    planner.priorConversationContext);
+            assertTrue(planner.priorConversationContext.contains("缓存层重构"),
+                    planner.priorConversationContext);
+            assertFalse(planner.priorConversationContext.contains("继续刚才那个缓存优化"),
+                    "execution replan 使用的 prior snapshot 不应重复当前 Plan user turn");
+        }
+    }
+
+    @Test
     void durableRecoveryCommandsRequireParentSession() throws Exception {
         RecordingClient client = new RecordingClient();
         ToolRegistry registry = new ToolRegistry();
@@ -277,6 +382,27 @@ class PlanExecuteRecoveryTest {
 
         assertTrue(agent.resumeActivePlan().contains("持久化 Session"));
         assertTrue(agent.abandonActivePlan().contains("持久化 Session"));
+    }
+
+    private void appendReactSemantic(ParentConversationContext context,
+                                     String role,
+                                     String content) throws Exception {
+        LlmClient.Message message = "assistant".equals(role)
+                ? LlmClient.Message.assistant(content)
+                : LlmClient.Message.user(content);
+        ObjectNode payload = JSON.createObjectNode();
+        payload.set("message", JSON.valueToTree(message));
+        payload.putObject("conversation")
+                .put("mode", "react")
+                .put("role", role)
+                .put("content", content);
+        context.append(new SessionEventDraft(
+                "assistant".equals(role)
+                        ? SessionEvent.Types.ASSISTANT_MESSAGE
+                        : SessionEvent.Types.USER_MESSAGE,
+                "react", "agent", "test", false,
+                SessionEvent.SurfaceOperation.append(), payload));
+        context.synchronizeProviderFromProjection();
     }
 
     private ParentConversationContext parentContext(SessionStore.SessionHandle session)
@@ -318,6 +444,27 @@ class PlanExecuteRecoveryTest {
         }
     }
 
+    private static final class CapturingReplanPlanner extends Planner {
+        private String priorConversationContext;
+
+        private CapturingReplanPlanner(LlmClient client) {
+            super(client, new PrintStream(new ByteArrayOutputStream()));
+        }
+
+        @Override
+        public ExecutionPlan createPlan(String goal) {
+            throw new AssertionError("resume 路径不应重新 createPlan");
+        }
+
+        @Override
+        public ExecutionPlan replan(ExecutionPlan failedPlan,
+                                    String failureReason,
+                                    String priorConversationContext) {
+            this.priorConversationContext = priorConversationContext;
+            return singleTaskPlan("plan-replanned", "重新规划后的任务");
+        }
+    }
+
     private static final class FailingIfCalledPlanner extends Planner {
         private final AtomicInteger createCalls = new AtomicInteger();
 
@@ -329,6 +476,29 @@ class PlanExecuteRecoveryTest {
         public ExecutionPlan createPlan(String goal) {
             createCalls.incrementAndGet();
             throw new AssertionError("该路径不应调用 Planner");
+        }
+    }
+
+    private static final class FailThenSucceedClient extends GLMClient {
+        private int calls;
+
+        private FailThenSucceedClient() {
+            super("test-key");
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException {
+            return chat(messages, tools, StreamListener.NO_OP);
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener)
+                throws IOException {
+            calls++;
+            if (calls == 1) {
+                throw new IOException("force execution replan");
+            }
+            return new ChatResponse("assistant", "replanned-success", null, 10, 2);
         }
     }
 

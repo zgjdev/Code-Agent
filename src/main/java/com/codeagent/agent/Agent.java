@@ -399,9 +399,11 @@ public class Agent {
                 if (overflowRetries < 1) {
                     overflowRetries++;
                     try {
-                        AutoCompactionManager.Result recovery = autoCompactionManager.compactNow(conversationHistory);
+                        long beforeTokens = estimateCurrentContextTokens();
+                        List<LlmClient.Message> candidate = new ArrayList<>(conversationHistory);
+                        AutoCompactionManager.Result recovery = autoCompactionManager.compactNow(candidate);
                         if (recovery.compacted()) {
-                            historyVersion++;
+                            commitCompaction(candidate, "overflow-recovery", beforeTokens);
                             contextTokenTracker.invalidate(InvalidationReason.OVERFLOW_RECOVERY);
                             renderer().stream().println("⚠️ provider 报告上下文超限，已压缩后重试。");
                             continue;

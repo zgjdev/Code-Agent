@@ -67,6 +67,32 @@ class PlanConversationReconcilerTest {
     }
 
     @Test
+    void fillsMissingSemanticUserWhenCrashHappensAfterTurnStart() throws Exception {
+        Path workspace = Files.createDirectory(tempDir.resolve("workspace-partial-turn"));
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history-partial-turn"));
+             SessionStore.SessionHandle handle = sessions.create(new SessionStore.SessionCreateRequest(
+                     workspace, "test", "model", null, "react", "agent"))) {
+            ParentConversationContext context = context(handle);
+            PlanStateStore plans = new PlanStateStore(tempDir.resolve("partial-turn.db"));
+            ExecutionPlan plan = plan("plan-partial-turn", "goal");
+            plans.savePlan(workspace, handle.sessionId(), "durable user request", plan);
+
+            PlanConversationReconciler.appendTurnStart(
+                    context, "turn-partial", plan.getId(), false);
+
+            new PlanConversationReconciler().reconcile(
+                    plans, context, workspace, handle.sessionId());
+
+            assertEquals(1, handle.projection().openTurns().size());
+            assertEquals(1, handle.projection().topLevelConversation().stream()
+                    .filter(node -> node.kind() == SessionProjection.ConversationKind.USER)
+                    .count());
+            assertEquals("durable user request",
+                    handle.projection().conversationMessages().get(0).content());
+        }
+    }
+
+    @Test
     void rebindsOneOpenTurnToReplacementActivePlanWithoutAddingSecondUserMessage() throws Exception {
         Path workspace = Files.createDirectory(tempDir.resolve("workspace-replan"));
         try (SessionStore sessions = SessionStore.open(tempDir.resolve("history-replan"));

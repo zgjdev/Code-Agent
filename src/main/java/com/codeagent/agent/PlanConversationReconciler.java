@@ -58,20 +58,22 @@ public final class PlanConversationReconciler {
                 if (openTurns.size() == 1) {
                     SessionProjection.OpenTurn existing = openTurns.get(0);
                     appendTurnStart(context, existing.turnId(), active.planId(), true);
+                    matching = context.projection().openTurns().get(existing.turnId());
                 } else {
                     String turnId = "plan-turn-" + UUID.randomUUID();
                     appendTurnStart(context, turnId, active.planId(), false);
-                    appendTopLevelMessage(context, turnId, active.planId(), "user",
-                            semanticUser(active));
+                    matching = context.projection().openTurns().get(turnId);
                 }
-                context.synchronizeProviderFromProjection();
-                return;
+            } else if (!active.planId().equals(matching.activePlanId())) {
+                appendTurnStart(context, matching.turnId(), active.planId(), true);
+                matching = context.projection().openTurns().get(matching.turnId());
             }
 
-            if (!active.planId().equals(matching.activePlanId())) {
-                appendTurnStart(context, matching.turnId(), active.planId(), true);
-                context.synchronizeProviderFromProjection();
+            if (!hasTopLevelUser(context, matching.turnId())) {
+                appendTopLevelMessage(context, matching.turnId(), matching.rootPlanId(), "user",
+                        semanticUser(active));
             }
+            context.synchronizeProviderFromProjection();
             return;
         }
 
@@ -104,6 +106,12 @@ public final class PlanConversationReconciler {
         return active.policyInput() == null || active.policyInput().isBlank()
                 ? active.goal()
                 : active.policyInput();
+    }
+
+    private static boolean hasTopLevelUser(ParentConversationContext context, String turnId) {
+        return context.projection().topLevelConversation().stream()
+                .anyMatch(node -> turnId.equals(node.turnId())
+                        && node.kind() == SessionProjection.ConversationKind.USER);
     }
 
     private static void closeOrphaned(ParentConversationContext context,

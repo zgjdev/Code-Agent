@@ -317,10 +317,18 @@ public class PlanExecuteAgent {
     }
 
     private boolean savePlanDurably(ExecutionPlan plan) throws IOException {
-        String sessionId = currentSessionId();
-        if (plan == null || sessionId == null || sessionId.isBlank()) {
+        boolean durableMode = planStateStore != null
+                || parentSession != null
+                || (parentConversationContext != null
+                && parentConversationContext.sessionHandle() != null);
+        if (!durableMode) {
             return false;
         }
+        if (plan == null) {
+            throw new IOException("Plan 不可用，已拒绝执行");
+        }
+
+        String sessionId = requireDurableParentConversationContext();
         if (planStateStore == null) {
             throw new IOException("Plan 持久化不可用，已拒绝执行以避免不可恢复状态");
         }
@@ -330,6 +338,22 @@ public class PlanExecuteAgent {
         } catch (SQLException e) {
             throw new IOException("保存 Plan 状态失败: " + e.getMessage(), e);
         }
+    }
+
+    private String requireDurableParentConversationContext() throws IOException {
+        String sessionId = currentSessionId();
+        if (sessionId == null || sessionId.isBlank()) {
+            throw new IOException("当前没有可绑定的持久化 Session，已拒绝执行 Plan");
+        }
+        if (parentConversationContext == null
+                || parentConversationContext.sessionHandle() == null) {
+            throw new IOException("Parent Conversation Context 不可用，已拒绝执行 Plan");
+        }
+        String contextSessionId = parentConversationContext.sessionHandle().sessionId();
+        if (!sessionId.equals(contextSessionId)) {
+            throw new IOException("Parent Conversation Context 与当前 Session 不一致，已拒绝执行 Plan");
+        }
+        return sessionId;
     }
 
     private void checkpointPlanDurably(ExecutionPlan plan) throws IOException {
@@ -520,10 +544,16 @@ public class PlanExecuteAgent {
     }
 
     public String resumeActivePlan() {
-        reconcilePlanConversationSafely();
         String sessionId = currentSessionId();
         if (planStateStore == null || sessionId == null || sessionId.isBlank()) {
             return "⚠️ 当前没有可绑定的持久化 Session，无法恢复 Plan。";
+        }
+        try {
+            requireDurableParentConversationContext();
+            reconcilePlanConversation();
+        } catch (IOException e) {
+            log.warn("Plan resume reconciliation failed for session {}", sessionId, e);
+            return "❌ 恢复计划失败: " + e.getMessage();
         }
 
         Optional<PlanStateStore.ResumeCandidate> candidateOptional = loadActivePlanForResume();
@@ -544,8 +574,12 @@ public class PlanExecuteAgent {
                 + "，将跳过已完成节点并继续调度。\n");
         try {
             String turnId = currentOpenTurnId(candidate.plan().getId());
+            if (turnId == null || turnId.isBlank()) {
+                return "❌ 恢复计划失败: durable Plan turn 不可用";
+            }
+            String priorConversationContext = priorConversationContextBeforeTurn(turnId);
             PlanRunOutcome outcome = executePlan(
-                    candidate.plan(), new StreamState(), 0, "", turnId);
+                    candidate.plan(), new StreamState(), 0, priorConversationContext, turnId);
             if (outcome.persistAssistantMessage()
                     && outcome.conversationResult() != null
                     && !outcome.conversationResult().isBlank()) {
@@ -792,6 +826,22 @@ public class PlanExecuteAgent {
         }
         return plannerConversationContextBuilder.build(
                 parentConversationContext.conversationNodes());
+    }
+
+    private String priorConversationContextBeforeTurn(String turnId) {
+        if (parentConversationContext == null || turnId == null || turnId.isBlank()) {
+            return "";
+        }
+        List<SessionProjection.ConversationNode> nodes =
+                parentConversationContext.conversationNodes();
+        int cutoff = nodes.size();
+        for (int index = 0; index < nodes.size(); index++) {
+            if (turnId.equals(nodes.get(index).turnId())) {
+                cutoff = index;
+                break;
+            }
+        }
+        return plannerConversationContextBuilder.build(nodes.subList(0, cutoff));
     }
 
     private void reconcilePlanConversation() throws IOException {

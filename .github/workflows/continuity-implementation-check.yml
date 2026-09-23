@@ -19,3 +19,11 @@ jobs:
           mvn -q -DskipTests=false
           -Dtest=SessionReplayerTest,SessionStoreTest,SessionCheckpointStoreTest,SessionCompactionRecoveryTest,AgentSessionResumeTest,ContextTokenTrackerTest,ConversationHistoryCompactorTest,AutoCompactionManagerTest,SessionMemoryCompactorTest,PlannerTest,PlannerPromptTest,PlanExecuteAgentTest,PlanExecuteRecoveryTest,PlanStateStoreTest,PlanConversationReconcilerTest,MainPlanAgentFactoryTest,TurnToolPolicyTest,ToolRegistryTest
           test
+      - name: Quick profile
+        run: mvn -q test -Pquick
+      - name: Full test suite
+        run: mvn -q test -DskipTests=false
+      - name: Clean package
+        run: mvn -q clean package
+      - name: Diff check
+        run: git diff --check HEAD^

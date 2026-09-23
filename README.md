@@ -208,7 +208,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 | **plain 兜底** | `CODEAGENT_RENDERER=plain` | 纯 println，无折叠 / 状态栏，等价 v15 行为 |
 
 - 三种形态共享同一套 `Agent` / `ToolRegistry` / `MemoryManager` / MCP server / SkillRegistry / HITL handler，不创建孤立空会话
-- 普通输入走 ReAct；`/plan <任务>` 走统一的 `PlanExecuteAgent`（人工计划门先审计划，再由 Reviewer 逐步自动评审，未通过自动重试）；`/cancel` 可取消运行中任务
+- 默认 inline/plain 终端的普通输入由 Mode Router 自动选择 ReAct 或 `PlanExecuteAgent`；`/react <任务>`、`/plan <任务>` 可显式覆盖当前轮（Plan 仍先经过人工计划门，再由 Reviewer 逐步自动评审，未通过自动重试）；`/cancel` 可取消运行中任务。Lanterna 全屏 TUI 暂不接入自动路由
 - 通用命令：`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/export`、`/better-harness`、`/hitl`、`/hitl on`、`/hitl off`、`/config`、`/exit`
 - Lanterna 的展示快照保存到 `~/.codeagent/history/session_*.jsonl`
 - 持久化会话保存在 `~/.codeagent/history/sessions/<session-id>/`：ReAct 使用 root session，`/plan` 的任务执行使用独立 child session；每个 session 的 `events.jsonl` append-only 保存完整 system、user、assistant、tool_call、tool_result（含 reasoning、工具参数/结果和图片 payload），父 session 只保存 `child/result` 引用。`/clear` 和上下文压缩只改变 replay 后的模型发送视图，不改写旧事件。旧 `raw/session-*.jsonl` 仅用于兼容读取/幂等迁移，新会话不再写入该目录；POSIX 下会话目录为 0700、文件为 0600。会话可能包含敏感内容，请勿提交或随意分享
@@ -584,13 +584,15 @@ java -jar target/codeagent-1.0-SNAPSHOT.jar
 mvn clean compile exec:java -Dexec.mainClass="com.codeagent.cli.Main"
 ```
 
-### 4. 如何进入 Plan 模式
+### 4. 自动路由与显式模式覆盖
 
-当前默认模式是 `ReAct`。进入 `Plan-and-Execute` 的方式只有 `/plan`：
+默认 inline/plain 终端的普通任务会先由无工具 Mode Router 自动选择 `ReAct` 或 `Plan-and-Execute`。Router 只读取当前原始输入和 Parent Session 的顶层语义，不读取工具结果、Skill/Memory 注入或 `@path`/MCP 展开正文；路由失败时回退 ReAct，用户取消则终止当前任务。
+
+需要确定性指定 Plan 时：
 
 1. 输入 `/plan`
 2. 下一条任务会用计划模式执行
-3. 执行完成后自动回到默认 `ReAct`
+3. 执行完成后恢复自动路由
 
 如果想一条命令切模式并执行任务，可以直接输入：
 
@@ -598,7 +600,7 @@ mvn clean compile exec:java -Dexec.mainClass="com.codeagent.cli.Main"
 /plan 创建一个 demo 项目，然后读取 pom.xml，最后验证项目结构
 ```
 
-这条命令执行完成后，会自动回到默认的 `ReAct` 模式。
+这条命令执行完成后，会恢复自动路由。对称地，`/react` 或 `/react <任务>` 可以强制下一轮或当前轮使用 ReAct。
 
 计划生成后，CLI 会先停下来等待确认：
 
@@ -700,6 +702,8 @@ I
 - `/wechat stop` - 停止当前 CodeAgent 进程内微信通道
 - `/plan` - 下一条任务使用多 Agent 协作 Plan-and-Execute 模式（人工确认计划后执行，每个任务结果由 Reviewer 自动审查，未通过自动重试）
 - `/plan <任务>` - 直接用多 Agent 协作 Plan-and-Execute 模式执行这条任务
+- `/react` - 下一条任务强制使用 ReAct 模式，该轮结束后恢复自动路由
+- `/react <任务>` - 直接用 ReAct 模式执行这条任务
 - `/cancel` - 运行中请求取消当前任务；空闲时会提示当前没有正在运行的任务
 - `/hitl on` - 启用危险操作人工审批（HITL）
 - `/hitl off` - 关闭 HITL 审批

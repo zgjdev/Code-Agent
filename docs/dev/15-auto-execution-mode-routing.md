@@ -1,8 +1,8 @@
 # ReAct / Plan 自动执行模式路由方案
 
-> 状态：待实现（已完成方案评审修订）  
-> 适用范围：默认终端主路径（`Main` + inline/plain Renderer）的普通顶层任务  
-> 依赖前置：`docs/dev/14-plan-session-conversation-continuity.md` 已完成的 Parent Session / Top-level Conversation 统一  
+> 状态：已实现（针对性回归通过；全量回归仍受 Windows 平台现存的非 Router 用例失败阻塞）
+> 适用范围：默认终端主路径（`Main` + inline/plain Renderer）的普通顶层任务
+> 依赖前置：`docs/dev/14-plan-session-conversation-continuity.md` 已完成的 Parent Session / Top-level Conversation 统一
 > 明确不包含：Lanterna 全屏 TUI、Runtime API、WeChat、运行中跨模式迁移、Plan 自动恢复、Task Worker 上下文共享、长期记忆策略变更
 
 ## 1. 背景、目标与非目标
@@ -115,8 +115,7 @@ Mode Router
 8. Router 的非取消性 Provider/解析故障确定性回退 ReAct，保持当前默认行为的可用性。
 9. 用户取消、线程中断或 CancellationContext 已取消时必须终止当前 Turn，不得回退 ReAct。
 10. 自动选择 Plan 后仍完整经过当前默认终端路径的人工计划确认、Plan durable save gate、Task 验证和恢复机制。
-11. 保留关闭自动路由的兼容开关，便于模型路由出现回归时恢复“普通输入直接 ReAct”的旧行为。
-12. Router 的模型调用成本可观测，但不进入 Parent Session 的短期上下文与 token pressure。
+11. Router 的模型调用成本可观测，但不进入 Parent Session 的短期上下文与 token pressure。
 
 ### 1.3 非目标
 
@@ -178,9 +177,7 @@ graph TB
     CLI --> O{显式 one-turn override?}
     O -->|/react| REACT[Agent / ReAct]
     O -->|/plan| PLAN[PlanExecuteAgent]
-    O -->|无| ENABLED{Auto Routing enabled?}
-    ENABLED -->|no| REACT
-    ENABLED -->|yes| ROUTER[ExecutionModeRouter]
+    O -->|无| ROUTER[ExecutionModeRouter]
     ROUTER -->|REACT| REACT
     ROUTER -->|PLAN| PLAN
     REACT --> PC[ParentConversationContext]
@@ -227,32 +224,7 @@ public enum ExecutionMode {
 }
 ```
 
-`ExecutionMode` 只表示本轮已经确定的执行路径。**AUTO 不是 ExecutionMode。** AUTO 只表示是否启用自动路由的选择策略，不得与真正执行模式混成第三种 mode。
-
-#### 自动路由开关
-
-第一版不新增持久化配置 schema，也不增加 AUTO/REACT/PLAN 三态配置对象，只增加运行时兼容开关：
-
-```text
--Dcodeagent.auto.routing=on|off
-CODEAGENT_AUTO_ROUTING=on|off
-```
-
-解析优先级：
-
-```text
-system property > environment variable > 默认 on
-```
-
-合法值只接受大小写不敏感的 `on` / `off`。缺失时为 `on`；非法值打印一次 warning，并按默认 `on` 处理。
-
-`off` 的语义严格等价于旧默认：
-
-```text
-普通输入 -> ReAct
-/plan    -> 显式 Plan
-/react   -> 显式 ReAct
-```
+`ExecutionMode` 只表示本轮已经确定的执行路径。**AUTO 不是 ExecutionMode。** 普通顶层输入始终先经过 Router，AUTO 只是路由决策过程，不得与真正执行模式混成第三种 mode。
 
 #### one-turn override
 
@@ -265,7 +237,7 @@ ExecutionMode nextTaskOverride;
 约定：
 
 ```text
-null  -> 没有显式 override，按 auto-routing 开关决定是否调用 Router
+null  -> 没有显式 override，调用 Router
 PLAN  -> 下一条顶层任务强制 Plan
 REACT -> 下一条顶层任务强制 ReAct
 ```
@@ -279,7 +251,6 @@ REACT -> 下一条顶层任务强制 ReAct
 ```java
 public enum RoutingSource {
     EXPLICIT,
-    CONFIGURED_REACT,
     AUTO_MODEL,
     AUTO_FALLBACK
 }
@@ -299,7 +270,6 @@ usage 语义固定为：
 
 ```text
 EXPLICIT           -> Optional.empty()
-CONFIGURED_REACT   -> Optional.empty()
 AUTO_MODEL         -> normalizeUsage(response)
 AUTO_FALLBACK      -> provider 已返回但内容非法时可保留 response usage；请求未获得 response 则 empty
 ```
@@ -397,10 +367,7 @@ Router 的历史窗口必须使用确定性算法，不允许实现者自行解�
       yes -> /plan => PLAN
              /react => REACT
 
-2. auto routing 是否被配置关闭?
-      yes -> REACT
-
-3. 调用 Mode Router
+2. 调用 Mode Router
       valid plan  -> PLAN
       valid react -> REACT
       非取消性失败 -> REACT fallback
@@ -412,9 +379,7 @@ flowchart TD
     A[收到普通顶层任务] --> B{有 one-turn override?}
     B -- PLAN --> P[ExecutionMode.PLAN]
     B -- REACT --> R[ExecutionMode.REACT]
-    B -- 无 --> C{Auto Routing enabled?}
-    C -- no --> R
-    C -- yes --> D[Mode Router]
+    B -- 无 --> D[Mode Router]
     D --> E{结果}
     E -- valid plan --> P
     E -- valid react --> R
@@ -466,13 +431,24 @@ tools 必须为 null。
 
 Router 不能直接复用完整 `PromptAssembler.assemble(PromptMode.ROUTER, ...)`。当前 PromptAssembler 会自动拼接 base、personality、approval、context-management、handoff、runtime context 等通用 Agent 内容；这与“每个普通 Turn 增加一次轻量二分类请求”的目标冲突，也可能干扰严格 JSON 输出。
 
-新增 prompt 层组件，例如 `com.codeagent.prompt.ModeRouterPromptBuilder`，只允许：
+新增 prompt 层组件 `com.codeagent.prompt.ModeRouterPromptBuilder`，固定生成且只生成两条消息：
 
-```text
-PromptRepository.loadRequired("modes/router.md")
-+ 确定性拼接 Router semantic window
-+ 确定性拼接当前 submittedInput
+```java
+List.of(
+        LlmClient.Message.system(
+                promptRepository.loadRequired("modes/router.md")),
+        LlmClient.Message.user(
+                routerInputJson(formattedSemanticWindow, submittedInput))
+)
 ```
+
+消息角色与数据边界固定为：
+
+1. `modes/router.md` 独占 `system` message，只包含路由规则与严格 JSON 输出契约。
+2. Router semantic window 与当前 `submittedInput` 只能进入 `user` message，禁止拼入或改写 system message。
+3. user message 使用 Jackson 确定性序列化为单个 JSON object，字段顺序固定为 `conversationContext`、`submittedInput`；用户内容必须作为 JSON string 正确转义，不通过字符串模板直接插入结构。
+4. 历史和当前输入均视为待分类数据；其中出现的指令、角色标签、代码块或伪造边界不得改变 system 规则。
+5. 当前 `submittedInput` 只出现一次；Top-level Conversation 快照不包含尚未由实际 Agent 写入的当前 Turn。
 
 禁止在 `ExecutionModeRouter` 中硬编码大段 system prompt。仍通过 PromptRepository 加载，因此保留现有 user/project prompt override 机制。
 
@@ -558,7 +534,7 @@ Router 已成功选择 PLAN，之后 Plan 初始化/durable save/execution 失�
 
 显式 override 不调用 Router。执行完成或用户取消该 Turn 后 override 清空。
 
-当前 `/plan` 文案“执行完成后自动回到默认 ReAct”必须同步修改，因为默认已不再固定 ReAct。推荐统一说“该轮结束后恢复默认执行策略”，避免 auto-routing=off 时文案失真。
+当前 `/plan` 文案“执行完成后自动回到默认 ReAct”必须同步修改，因为默认已不再固定 ReAct。推荐统一说“该轮结束后恢复自动路由”。
 
 Lanterna TUI 本次不新增 `/react`，也不改变其 `/plan` 语义。
 
@@ -572,7 +548,7 @@ Router 是一次真实 LLM 请求，必须与真正执行共享当前 `Cancellat
 runWithCancelSupport
     |
     +-- resolve RoutingDecision
-    |      +-- explicit / configured / auto router
+    |      +-- explicit / auto router
     |
     +-- 如果已取消 -> 终止当前 Turn
     |
@@ -598,9 +574,7 @@ sequenceDiagram
 
     alt explicit override
         M->>M: 直接得到 REACT / PLAN
-    else auto routing disabled
-        M->>M: 得到 REACT
-    else auto routing enabled
+    else ordinary input
         M->>C: 读取 topLevelConversation
         M->>R: submittedInput + semantic window
         R-->>M: RoutingDecision
@@ -761,7 +735,7 @@ Router 历史上下文绝不能作为权限来源。
 event = execution_mode_selected
 mode = router
 actor = mode-router
-source = explicit | configured_react | auto_model | auto_fallback
+source = explicit | auto_model | auto_fallback
 selectedMode = react | plan
 provider/model = ...                 # 有 Router provider 调用时
 input/output/cached tokens = ...     # 有 usage 时
@@ -790,29 +764,7 @@ AUTO_MODEL 选择 Plan 时显示一次：
 
 本方案不修改 Session Event schema、Session checkpoint schema、Plan SQLite schema、ParentConversationContext schema、ConversationNode schema、Lanterna TUI state、Runtime API contract 或 WeChat contract。
 
-旧 Session 和旧 active Plan 均无需迁移。
-
-紧急关闭自动路由：
-
-```text
-CODEAGENT_AUTO_ROUTING=off
-```
-
-或：
-
-```text
--Dcodeagent.auto.routing=off
-```
-
-即可恢复旧默认：
-
-```text
-普通输入 -> ReAct
-/plan    -> 显式 Plan
-/react   -> 显式 ReAct
-```
-
-不需要回滚 Session / SQLite 数据。
+旧 Session 和旧 active Plan 均无需迁移。如需回滚，只回滚本次代码变更，不需要回滚 Session / SQLite 数据。
 
 ## 4. 实现任务与测试矩阵
 
@@ -820,9 +772,9 @@ CODEAGENT_AUTO_ROUTING=off
 
 严格按依赖方向实现，并先补对应测试。
 
-#### Task 1：定义模式模型与 auto-routing 开关
+#### Task 1：定义模式模型与路由结果
 
-新增 `ExecutionMode`、`RoutingSource`、`RoutingDecision` 和配置解析 helper。覆盖 property > env > default、on/off、非法值 warning、Optional usage 语义。
+新增 `ExecutionMode`、`RoutingSource` 和 `RoutingDecision`，覆盖 REACT/PLAN、EXPLICIT/AUTO_MODEL/AUTO_FALLBACK 与 Optional usage 语义。
 
 #### Task 2：抽取 Top-level formatter，并锁定 Router 窗口
 
@@ -837,7 +789,7 @@ src/main/java/com/codeagent/prompt/ModeRouterPromptBuilder.java
 src/main/resources/prompts/modes/router.md
 ```
 
-测试必须证明 Router prompt 不包含完整 Agent 的 Tool Policy、Approval、Handoff 或 Skill/Memory 动态正文。
+测试必须证明 Router prompt 不包含完整 Agent 的 Tool Policy、Approval、Handoff 或 Skill/Memory 动态正文；同时断言消息列表严格为 `system + user` 两条、历史和当前输入不进入 system message、user JSON 可逆解析，并覆盖包含伪造角色标签或 system 指令的输入仍只作为 user 数据。
 
 #### Task 4：实现 ExecutionModeRouter
 
@@ -890,7 +842,6 @@ docs/dev/15-auto-execution-mode-routing.md
 | override Turn 成功结束 | override 清空 |
 | override Turn 取消 | override 清空 |
 | `/plan resume` / `/plan abandon` | 不调用 Router |
-| auto routing = off | 普通任务不调用 Router，直接 ReAct |
 | 最新 SUMMARY 前的历史 | 不进入 Router |
 | 超过 3 个 USER Turn | SUMMARY + 最近 3 个 USER Turn 切片 |
 | 少于等于 3 个 USER Turn | 保留语义下界后的全部 |
@@ -961,7 +912,6 @@ PlannerTest
 PlanExecuteRecoveryTest
 PlanConversationReconcilerTest
 SessionReplayerTest
-ParentConversationContextTest（若现有测试存在）
 ```
 
 针对性测试示例：
@@ -1099,44 +1049,43 @@ Lanterna TUI 当前普通输入在 `TuiSessionController` 内固定走 ReAct，`
 
 ## 6. 验收清单
 
-- [ ] 本次改造范围仅为默认 `Main` inline/plain 终端主路径。
-- [ ] Lanterna `TuiSessionController`、Runtime API、WeChat 行为保持不变。
-- [ ] 普通默认终端任务在 auto-routing=on 时进入 AUTO Router。
-- [ ] `ExecutionMode` 只有 REACT / PLAN，不把 AUTO 当第三种执行模式。
-- [ ] auto-routing=off 时普通任务恢复旧的直接 ReAct 行为。
-- [ ] AUTO Router 只读取 `submittedInput` 和 Top-level Conversation。
-- [ ] Router 不读取 Provider Surface、Tool Result、Task transcript、Skill/Memory 注入。
-- [ ] Router 使用确定性的 SUMMARY + 最近最多 3 个 USER Turn 窗口算法。
-- [ ] Router 使用专用轻量 prompt，不复用完整 Agent PromptAssembler。
-- [ ] Router 不注册任何工具。
-- [ ] Router 响应严格要求单字段 JSON object。
-- [ ] 非取消性 Provider/解析故障确定性回退 ReAct。
-- [ ] 用户取消或线程中断绝不 fallback ReAct。
-- [ ] Router 阶段取消后不启动实际 Agent、不创建 execution snapshot。
-- [ ] Router 不写 Parent Session USER / ASSISTANT。
-- [ ] Router 不改变 Session / Plan 持久化 schema。
-- [ ] Router 每 Turn 使用当前活动 LlmClient；`/model` 后不会继续使用旧 client。
-- [ ] Router 成功返回 REACT 时走现有 ReAct 路径。
-- [ ] Router 成功返回 PLAN 时走完整现有默认终端 Plan 路径。
-- [ ] 已选择 Plan 后的持久化/执行失败不得回退 ReAct。
-- [ ] `/plan` 保留为 one-turn Plan override。
-- [ ] `/react` 提供对称 one-turn ReAct override。
-- [ ] override 成功或取消后均清空。
-- [ ] `/plan resume` 与 `/plan abandon` 不经过 Router。
-- [ ] active Plan 不会被 AUTO 自动恢复、覆盖或放弃。
-- [ ] 模式在一个顶层 Turn 内固定，不发生运行中迁移。
-- [ ] actual execution 仍完整位于原有 `SnapshotService.runTurn` 边界。
-- [ ] AUTO_MODEL 选择 Plan 时终端明确显示一次实际模式。
-- [ ] AUTO_MODEL 选择 ReAct 时不增加用户可见噪声。
-- [ ] Router usage 可观测，不被错误计入 Parent Session 上下文。
+- [x] 本次改造范围仅为默认 `Main` inline/plain 终端主路径。
+- [x] Lanterna `TuiSessionController`、Runtime API、WeChat 行为保持不变。
+- [x] 普通默认终端任务始终进入 AUTO Router。
+- [x] `ExecutionMode` 只有 REACT / PLAN，不把 AUTO 当第三种执行模式。
+- [x] AUTO Router 只读取 `submittedInput` 和 Top-level Conversation。
+- [x] Router 不读取 Provider Surface、Tool Result、Task transcript、Skill/Memory 注入。
+- [x] Router 使用确定性的 SUMMARY + 最近最多 3 个 USER Turn 窗口算法。
+- [x] Router 使用专用轻量 prompt，不复用完整 Agent PromptAssembler。
+- [x] Router 不注册任何工具。
+- [x] Router 响应严格要求单字段 JSON object。
+- [x] 非取消性 Provider/解析故障确定性回退 ReAct。
+- [x] 用户取消或线程中断绝不 fallback ReAct。
+- [x] Router 阶段取消后不启动实际 Agent、不创建 execution snapshot。
+- [x] Router 不写 Parent Session USER / ASSISTANT。
+- [x] Router 不改变 Session / Plan 持久化 schema。
+- [x] Router 每 Turn 使用当前活动 LlmClient；`/model` 后不会继续使用旧 client。
+- [x] Router 成功返回 REACT 时走现有 ReAct 路径。
+- [x] Router 成功返回 PLAN 时走完整现有默认终端 Plan 路径。
+- [x] 已选择 Plan 后的持久化/执行失败不得回退 ReAct。
+- [x] `/plan` 保留为 one-turn Plan override。
+- [x] `/react` 提供对称 one-turn ReAct override。
+- [x] override 成功或取消后均清空。
+- [x] `/plan resume` 与 `/plan abandon` 不经过 Router。
+- [x] active Plan 不会被 AUTO 自动恢复、覆盖或放弃。
+- [x] 模式在一个顶层 Turn 内固定，不发生运行中迁移。
+- [x] actual execution 仍完整位于原有 `SnapshotService.runTurn` 边界。
+- [x] AUTO_MODEL 选择 Plan 时终端明确显示一次实际模式。
+- [x] AUTO_MODEL 选择 ReAct 时不增加用户可见噪声。
+- [x] Router usage 可观测，不被错误计入 Parent Session 上下文。
 - [ ] 模型行为 smoke 覆盖简单任务、复杂任务、历史依赖任务和“重构”关键词边界。
-- [ ] ReAct / Plan 原有 Parent Conversation 连续性测试全部通过。
-- [ ] Plan Task isolation 和权限边界没有变化。
-- [ ] `README.md`、`AGENTS.md`、`docs/agents-reference.md` 已同步。
+- [x] ReAct / Plan 原有 Parent Conversation 连续性测试全部通过。
+- [x] Plan Task isolation 和权限边界没有变化。
+- [x] `README.md`、`AGENTS.md`、`docs/agents-reference.md` 已同步。
 - [ ] `mvn test -Pquick` 通过。
 - [ ] `mvn test -DskipTests=false` 通过。
 - [ ] `mvn clean package` 通过。
-- [ ] `git diff --check` 通过。
+- [x] `git diff --check` 通过。
 
 ## 7. 实现后的目标架构
 
@@ -1155,16 +1104,9 @@ Lanterna TUI 当前普通输入在 `TuiSessionController` 内固定走 ReAct，`
      +-- 无
           |
           v
-   Auto Routing enabled?
-          |
-          +-- no ------> ReAct
-          |
-          +-- yes
-                |
-                v
-           Mode Router
-             /    \
-          ReAct   Plan
+      Mode Router
+        /    \
+     ReAct   Plan
 ```
 
 底层上下文关系：

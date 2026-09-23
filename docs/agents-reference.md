@@ -255,7 +255,10 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ## Core File Descriptions
 
 ### Main.java
-CLI 入口 / Banner / .env 读取 / 日志初始化 / 模式切换 / JLine raw mode
+CLI 入口 / Banner / .env 读取 / 日志初始化 / 自动模式路由与 one-turn override / JLine raw mode
+
+### ExecutionModeRouter.java / ModeRouterPromptBuilder.java
+默认 inline/plain 终端的普通顶层输入始终先经过 Mode Router；`/plan` 与 `/react` 绕过 Router 并只覆盖一个 Turn。Router 使用当前活动 `LlmClient`，只接收原始 `submittedInput` 和 `ParentConversationContext.conversationNodes()` 的确定性窗口，不注册工具，也不写 Parent Session。`modes/router.md` 独占 system message，历史和当前输入作为 JSON user message；响应只接受单字段 `{"mode":"react|plan"}`。非取消性 Provider/解析失败回退 ReAct，取消或线程中断直接终止 Turn。路由 metadata 写入 `ConversationLedger`，但 prompt、历史和用户正文不会复制进去。
 
 ### Agent.java
 ReAct 主循环 / 对话历史 / 工具调用与结果回灌

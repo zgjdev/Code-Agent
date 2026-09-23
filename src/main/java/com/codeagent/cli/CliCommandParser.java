@@ -16,6 +16,7 @@ final class CliCommandParser {
         HISTORY_CLEAR,
         SWITCH_MODEL,
         SWITCH_PLAN,
+        SWITCH_REACT,
         PLAN_RESUME,
         PLAN_ABANDON,
         SWITCH_HITL,
@@ -141,6 +142,14 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/plan ", 0, 6)) {
             return new ParsedCommand(CommandType.SWITCH_PLAN, trimmed.substring(6).trim());
+        }
+
+        if (trimmed.equalsIgnoreCase("/react")) {
+            return new ParsedCommand(CommandType.SWITCH_REACT, null);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/react ", 0, 7)) {
+            return new ParsedCommand(CommandType.SWITCH_REACT, trimmed.substring(7).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/hitl on")) {

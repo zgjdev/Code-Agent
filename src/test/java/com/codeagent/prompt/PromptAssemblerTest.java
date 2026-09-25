@@ -31,6 +31,9 @@ class PromptAssemblerTest {
         assertFalse(prompt.contains("## Freshness Policy（强制规则）"));
         assertFalse(prompt.contains("禁止**直接基于训练知识回答"));
         assertTrue(prompt.contains("## Mode: ReAct Agent"));
+        assertTrue(prompt.contains("当前轮正在使用 ReAct 执行路径"));
+        assertTrue(prompt.contains("尚未接入自动路由的入口直接使用"));
+        assertFalse(prompt.contains("默认 ReAct 模式"));
         assertTrue(prompt.contains("项目规则"));
         assertTrue(prompt.contains("demo://resource"));
         assertTrue(prompt.contains("web-access"));

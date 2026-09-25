@@ -48,8 +48,8 @@ Terminal
 - `InlineRenderer` 增加 `bindLineReader(LineReader)`。
 - `InlineRenderer.stream()` 在 `LineReader.isReading()` 时使用 `LineReader#printAbove`。
 - 未绑定 LineReader、非读取态、plain/test 路径继续走原 `PrintStream`。
-- 保留 transcript 与折叠块数据结构，避免 Agent / Plan / Team 调用方改动。
-- `/index`、ReAct、Plan、Team 已经收口到 renderer stream，应自然受益。
+- 保留 transcript 与折叠块数据结构，避免 Agent / 统一 Plan 路径调用方改动。
+- `/index`、ReAct 与统一 Plan 路径已经收口到 renderer stream，应自然受益。
 
 验收：
 

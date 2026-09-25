@@ -44,7 +44,7 @@ mvn test -DskipTests=false
 
 - 在保留 `ReAct` 模式的基础上新增复杂任务规划能力
 - 支持先拆解任务，再按照依赖顺序执行
-- 新增 `/plan` 入口，以一次性计划执行方式增强默认的 `ReAct`
+- 新增 `/plan` 入口，以一次性计划执行方式补充适合普通任务的 `ReAct`
 - 计划生成后，会先与用户确认再执行
 - CLI/TUI 的 Plan DAG 与 Task 状态会 checkpoint 到 `~/.codeagent/plans/plans.db`，并绑定当前持久化 Session；同一 Session 同时最多一个未终结 Plan
 - ReAct 与 Plan 共享同一 Parent Session 的顶层语义对话：Plan 完成后切回 ReAct 可以引用刚才的 Plan 结果，ReAct 后切入 Plan 时 Planner 也会读取此前顶层对话；Tool Result、Task transcript、Skill/Memory 注入不会直接进入 Planner 历史
@@ -110,7 +110,7 @@ mvn test -DskipTests=false
 - `web_fetch` 新工具：有可信来源的 URL → OkHttp 抓取 → Jsoup 解析 → 简易 readability → Markdown 正文
 - 联网不再对“最新/当前/今天/趋势/新闻/版本”等关键词做自动 freshness 预检。顶层用户输入只是标题、主题或摘录而没有任务目标时，CodeAgent 会先询问用户，本轮不调用工具；用户明确要求不要联网时始终优先遵从。
 - 模型不得根据标题猜测 URL。明确要求查找但没有 URL 时先 `web_search`；`web_fetch` 和浏览器导航只接受用户实际提交的顶层原文（不含 `@path` / MCP resource 展开正文）中的 URL，或当前执行分支由搜索 provider 返回的结构化 `discoveredUrls`。搜索正文/snippet/query 回显/错误提示、`web_fetch` 正文、浏览器结果和普通文件/命令输出里的链接不会自动取得访问授权；StepSearch MCP 的非结构化结果文本也不会生成 URL 凭据。
-- 运行时 `TurnToolPolicy` 覆盖 ReAct / Plan / Team，并在 StepSearch、内置 Web provider 和 MCP / Chrome 路由之前校验顶层意图与 URL 来源；Plan 审阅补充会重建策略。并行任务/worker 不共享新发现的 URL，只有 DAG 中声明的后继依赖会继承前置分支的类型化 `web_search` URL 凭据，不从任务回复文本重新抽取。grounded URL 先只开放导航，成功导航只建立当前页读取上下文，页面读取不扩充 URL 授权；点击/填写等交互需顶层原文明确授权。shared Chrome 状态跨轮读取，非 CodeAgent 创建的标签页只在用户明确要求时开放只读，不能由 Agent 导航、改写或关闭；导航工具返回的全量标签页清单会在回灌模型前裁掉。被拒绝的调用不能靠切换工具绕过。
+- 运行时 `TurnToolPolicy` 覆盖 ReAct 与 Plan 的各执行分支，并在 StepSearch、内置 Web provider 和 MCP / Chrome 路由之前校验顶层意图与 URL 来源；Plan 审阅补充会重建策略。并行任务不共享新发现的 URL，只有 DAG 中声明的后继依赖会继承前置分支的类型化 `web_search` URL 凭据，不从任务回复文本重新抽取。grounded URL 先只开放导航，成功导航只建立当前页读取上下文，页面读取不扩充 URL 授权；点击/填写等交互需顶层原文明确授权。shared Chrome 状态跨轮读取，非 CodeAgent 创建的标签页只在用户明确要求时开放只读，不能由 Agent 导航、改写或关闭；导航工具返回的全量标签页清单会在回灌模型前裁掉。被拒绝的调用不能靠切换工具绕过。
 - 当前模型是 `step-3.7-flash*` 且自动/显式 `step_search` 远程 server 已就绪时，通过 `TurnToolPolicy` 后的内置 `web_search` / `web_fetch` 会优先走 StepSearch MCP；未就绪或调用失败时自动回退到原 provider。
 - 默认安全策略：屏蔽 `file://` / 内网 / loopback；30 秒超时；5MB 响应上限；每分钟 30 次限流
 - 边界明确：SPA / 防爬墙站点会返回空正文 + 已知边界提示，Agent 会 fallback 到浏览器 MCP 路线
@@ -220,14 +220,14 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 - `write_file` 成功后触发 post-edit 诊断，诊断结果不会阻塞工具主流程
 - 当前 MVP 对 Java 文件使用 JavaParser 做轻量语法诊断，不依赖本机安装 JDT LS
-- ReAct、Plan-and-Execute、Multi-Agent 三条路径都会在下一轮 LLM 请求前注入 pending 诊断
+- ReAct 与统一的多 Agent 协作 Plan-and-Execute 两条路径都会在下一轮 LLM 请求前注入 pending 诊断
 - 诊断按 error / warning / info、文件、行列号、message 格式化，默认最多注入 20 条
 - 配置：`CODEAGENT_LSP_ENABLED=false` 可关闭，`CODEAGENT_LSP_MAX_DIAGNOSTICS=20` 可调整注入上限
 - 后续增强：接入 JDT LS / rust-analyzer / pyright / gopls 的 stdio JSON-RPC transport
 
 ### 第十八期：Git Side-History 快照与回滚（MVP）
 
-- 每个 ReAct / Plan / Team turn 开始前创建 `pre-turn` 快照，结束后异步创建 `post-turn` 快照
+- 每个 ReAct / Plan 顶层 turn 开始前创建 `pre-turn` 快照，结束后异步创建 `post-turn` 快照
 - 快照仓库使用 JGit 纯 Java 实现，默认位于 `~/.codeagent/snapshots/<project_hash>/<worktree_hash>/.git`，不写用户项目 `.git`
 - `/snapshot` 查看最近快照，`/snapshot status` 查看配置与 side-git 目录，`/snapshot clean` 清理当前项目快照目录
 - `/restore <N>` 恢复到最近第 N 个 `pre-turn` 快照；恢复前会先创建 `pre-restore` 快照
@@ -236,7 +236,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 ### 第十九期：Prompt 分层架构（MVP）
 
-- ReAct、Plan task executor、Multi-Agent 三角色、Planner 的 system prompt 已从 Java 硬编码抽离到 `src/main/resources/prompts/`
+- ReAct Agent、Plan task executor、Planner 与 Reviewer 的 system prompt 已从 Java 硬编码抽离到 `src/main/resources/prompts/`
 - `PromptAssembler` 按 `base -> personality -> mode -> approval -> project_context -> skills -> context_mgmt -> handoff -> runtime_context` 组装；`runtime_context` 注入当前日期/时区，放在末尾以缩小跨日时的前缀缓存失效半径
 - `project_context` 包含 `CODEAGENT.md` 项目记忆和 MCP resource 索引；`/save` 检索到的相关长期记忆**不进 system prompt**，而是追加到本轮 user 消息末尾，避免每轮改写消息 0 而使整段历史的前缀缓存失效
 - 支持用户级覆盖 `~/.codeagent/prompts/...`，支持项目级覆盖 `.codeagent/prompts/...`，项目级优先级最高
@@ -632,7 +632,7 @@ mvn clean compile exec:java -Dexec.mainClass="com.codeagent.cli.Main"
    - 输入 '/' 后按 Tab 补全命令
    - 输入 '@server:protocol://path' 可显式引用 MCP resource
    - 任务运行中按 ESC 取消当前任务
-   - 默认模式是 ReAct
+   - 普通 inline/plain 任务会自动选择 ReAct 或 Plan-and-Execute
    - 未识别的 `/xxx` 命令会直接提示“未知命令”，不会再交给 Agent 当普通对话处理
 
 * /plan 创建一个名为 demoapp 的 java 项目，然后读取 pom.xml，最后验证项目结构

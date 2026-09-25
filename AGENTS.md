@@ -93,7 +93,7 @@ graph TB
 | Renderer | 输出优先走 Renderer.stream()；inline 用 printAbove | 用 Display/CLEAR_TO_EOS 覆盖 transcript |
 | Ledger/Memory | 原始消息 append-only；短期上下文仅为发送视图 | 改写旧 JSONL、自动保存长期记忆 |
 
-依赖方向：入口 → Agent/Plan/Team → Tool/Policy/LLM/Memory → 基础设施。底层不得反向依赖 CLI 或 Renderer；共享行为应抽到已有接口，而不是复制三份实现。
+依赖方向：入口 → Agent/Plan → Tool/Policy/LLM/Memory → 基础设施。底层不得反向依赖 CLI 或 Renderer；共享行为应抽到已有接口，而不是在两条路径中复制实现。
 
 ## 4. 关键请求时序
 

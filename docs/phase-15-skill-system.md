@@ -1,6 +1,7 @@
 # 第 15 期开发任务：Skill 系统 + 内置 web-access Skill
 
 > 这份文档是给执行 Agent 的开发任务说明书，自包含、可直接照着推进。
+> 文中 `AgentOrchestrator`、独立 Team worker 等术语记录的是本期实施时的历史架构；当前独立 `/team` 已删除，多 Agent 协作已并入统一的 Plan-and-Execute 路径。
 >
 > **开工前必读**：
 > 1. 仓库根 `AGENTS.md`（仓库规则、文档联动硬规则）
@@ -41,7 +42,7 @@
 - Skill marketplace / 远程下载 / 自动更新
 - 把 Skill body 全部一次性注入 system prompt（token 成本失控）
 - 把 scripts/ 注册成虚拟工具（变相绕开 HITL）
-- 跨 Agent 角色的 Skill 路由差异化（ReAct / Plan / Team 共享同一套启用列表）
+- 跨 Agent 角色的 Skill 路由差异化（ReAct 与统一 Plan 路径共享同一套启用列表）
 - 给 Skill 单独的"全部放行"维度（沿用 `execute_command` / MCP 既有 HITL 维度即可）
 - Skill 内嵌 LLM 调用 / sub-agent 编排
 - Markdown 之外的格式（YAML / JSON / TOML 写 SKILL.md，本期只支持 Markdown frontmatter）
@@ -220,7 +221,7 @@ LLM 调 load_skill("web-access")
 
 边界处理：
 - 同一轮 LLM 连续调多个 `load_skill` → buffer 累积（按调用顺序拼接），最多保留 3 个 skill body
-- ReAct / Plan / Team 各自独立 buffer，不共享
+- ReAct 与 Plan 的各任务分支使用独立 buffer，不共享
 - `/clear` 命令 reset buffer
 - buffer 只走内存，不持久化
 

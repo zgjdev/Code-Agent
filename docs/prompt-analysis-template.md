@@ -6,7 +6,7 @@
 
 - 修改的 prompt 文件：
 - 修改目的：
-- 影响模式：ReAct / Plan / Team Planner / Team Worker / Team Reviewer / Planner
+- 影响角色：ReAct Agent / Plan task executor / Planner / Reviewer / Mode Router
 
 ## Gap Analysis
 

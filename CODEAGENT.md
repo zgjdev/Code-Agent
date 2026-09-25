@@ -8,11 +8,11 @@
 
 ## What This Is
 
-CodeAgent 是面向商业使用的 Java Agent CLI 产品，对标 Claude Code；当前主路径是 ReAct、Plan-and-Execute、Multi-Agent 三套执行模式。
+CodeAgent 是面向商业使用的 Java Agent CLI 产品，对标 Claude Code；默认 inline/plain 顶层任务由 Mode Router 自动选择 ReAct 或统一的多 Agent 协作 Plan-and-Execute，`/react` 与 `/plan` 提供单轮显式覆盖。
 
 ## Architecture
 
-- 三条执行路径共享 `ToolRegistry` / `MemoryManager` / `SnapshotService`，不要为某个模式创建孤立能力。
+- 两条执行路径共享 `ToolRegistry` / `MemoryManager` / `SnapshotService`，不要为某个模式创建孤立能力。
 - 精确代码定位优先 `glob_files` / `grep_code` / `read_file`；`search_code` 使用本地优先的 SQLite v2 分层检索，内置 BGE 仅作可降级语义增强，远程 Embedding 必须有当前项目的显式授权。
 - system prompt 由 `PromptAssembler` 分层组装，内置 prompt 在 `src/main/resources/prompts/`，支持 `~/.codeagent/prompts/` 和 `.codeagent/prompts/` 覆盖。
 

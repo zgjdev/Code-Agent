@@ -1,4 +1,6 @@
-# 代码库 RAG 与关系图谱
+# 代码库 RAG 与关系图谱（v1 历史实现）
+
+> 本文主体记录已冻结的 v1 行为，包含当时的外部 Embedding 依赖与 JSON 向量设计，仅供迁移和回滚分析。当前 v2 的实际架构、配置、隐私授权、增量索引与降级语义见 [20-local-first-layered-retrieval-implementation-plan.md](20-local-first-layered-retrieval-implementation-plan.md)，不得把下文 v1 描述当成现行使用说明。
 
 > **本文怎么读**
 >

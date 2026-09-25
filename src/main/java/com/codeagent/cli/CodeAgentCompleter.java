@@ -138,7 +138,25 @@ final class CodeAgentCompleter implements Completer {
         String[] parts = payload.trim().isEmpty() ? new String[0] : payload.trim().split("\\s+");
         if (parts.length <= 1 && !payload.endsWith(" ")) {
             addMatching(candidates, "配置", payload,
-                    option("provider ", "配置 provider", "/config provider <name>"));
+                    option("provider ", "配置 LLM provider", "/config provider <name>"),
+                    option("embedding ", "配置本地或远程 Embedding", "/config embedding <status|local|off|remote|revoke>"));
+            return true;
+        }
+        if (parts.length >= 1 && "embedding".equalsIgnoreCase(parts[0])) {
+            String prefix = payload.endsWith(" ") ? "" : parts[parts.length - 1];
+            if (parts.length <= 2) {
+                addMatching(candidates, "Embedding", prefix,
+                        option("status", "查看 Embedding 状态"),
+                        option("local", "使用内置本地 BGE"),
+                        option("off", "关闭语义层"),
+                        option("remote ", "显式授权远程 provider"),
+                        option("revoke", "撤销当前项目远程授权"));
+            } else if (parts.length == 3 && "remote".equalsIgnoreCase(parts[1])) {
+                addMatching(candidates, "Remote Embedding", prefix,
+                        option("glm", "GLM embedding-3"),
+                        option("jina", "Jina code embeddings"),
+                        option("openai-compatible", "自定义 OpenAI-compatible endpoint"));
+            }
             return true;
         }
         if (parts.length >= 1 && "provider".equalsIgnoreCase(parts[0])) {

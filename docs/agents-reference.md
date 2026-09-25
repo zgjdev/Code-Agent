@@ -35,7 +35,7 @@ For the primary entry point, see `/AGENTS.md`.
 
 ### Embedding Config
 
-环境变量 > 系统属性 > 默认值：`EMBEDDING_PROVIDER`(ollama) / `EMBEDDING_MODEL`(nomic-embed-text:latest) / `EMBEDDING_BASE_URL`(http://localhost:11434)
+配置文件 > 环境变量 > 默认值：`EMBEDDING_MODE`(local)。`local` 使用随 JAR 分发的 `bge-small-zh-v1.5-q`，不访问网络；`off` 仅关闭语义层。`remote` 需要 provider/model/endpoint/API Key 和当前项目的显式授权，可选 `glm`、`jina`、`openai-compatible`。
 
 ### Log Config
 
@@ -336,9 +336,10 @@ GLM_API_KEY=your_api_key_here
 # XFYUN_MAAS_MODEL=Qwen3.6-35B-A3B
 # XFYUN_MAAS_BASE_URL=https://maas-api.cn-huabei-1.xf-yun.com/v2
 # XFYUN_MAAS_LORA_ID=0
-EMBEDDING_PROVIDER=ollama
-EMBEDDING_MODEL=nomic-embed-text:latest
-EMBEDDING_BASE_URL=http://localhost:11434
+EMBEDDING_MODE=local
+# EMBEDDING_PROVIDER=glm
+# EMBEDDING_MODEL=embedding-3
+# EMBEDDING_BASE_URL=https://open.bigmodel.cn/api/paas/v4
 # EMBEDDING_API_KEY=your_api_key_here
 # CODEAGENT_LOG_LEVEL=INFO
 # CODEAGENT_LOG_DIR=/Users/yourname/.codeagent/logs

@@ -48,7 +48,7 @@ class CodeRetrieverTest {
                 new VectorStore.CodeChunkEntry(agentChunk, new float[]{0.80f, 0.20f})
         ));
 
-        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+        EmbeddingClient stubClient = new EmbeddingClient("zhipu", "stub", "http://localhost", "test-key") {
             @Override
             public float[] embed(String text) {
                 return new float[]{1.0f, 0.0f};

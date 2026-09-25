@@ -4,6 +4,18 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.codeagent.browser.BrowserConnector;
 import com.codeagent.mcp.protocol.McpToolDescriptor;
+import com.codeagent.rag.CodeRetrievalService;
+import com.codeagent.rag.IndexRefreshRequest;
+import com.codeagent.rag.IndexRefreshResult;
+import com.codeagent.rag.RepositoryMap;
+import com.codeagent.rag.RetrievalDiagnostics;
+import com.codeagent.rag.RetrievalHit;
+import com.codeagent.rag.RetrievalIndexStatus;
+import com.codeagent.rag.RetrievalIntent;
+import com.codeagent.rag.RetrievalRequest;
+import com.codeagent.rag.RetrievalResponse;
+import com.codeagent.rag.RetrievalSource;
+import com.codeagent.rag.embedding.EmbeddingResolution;
 import com.codeagent.web.SearchProvider;
 import com.codeagent.web.SearchResult;
 import org.junit.jupiter.api.Test;
@@ -15,6 +27,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -25,6 +39,50 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ToolRegistryTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void searchCodeExposesDiagnosticsAndArchitectureMap(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        registry.setCodeRetrievalService(new StubRetrievalService());
+
+        String chunks = registry.executeTool("search_code", "{\"query\":\"router\"}");
+        String architecture = registry.executeTool("search_code",
+                "{\"query\":\"router\",\"intent\":\"architecture\"}");
+
+        assertTrue(chunks.contains("Router.java:4-8"));
+        assertTrue(chunks.contains("sources=[SYMBOL]"));
+        assertTrue(chunks.contains("partial: true"));
+        assertTrue(chunks.contains("degraded: [semantic_unavailable]"));
+        assertFalse(chunks.contains("repository_map:"));
+        assertTrue(architecture.contains("repository_map:"));
+        assertTrue(architecture.contains("Router -> Agent"));
+    }
+
+    private static final class StubRetrievalService implements CodeRetrievalService {
+        @Override
+        public RetrievalResponse search(RetrievalRequest request) {
+            Optional<RepositoryMap> map = request.intent() == RetrievalIntent.ARCHITECTURE
+                    ? Optional.of(new RepositoryMap("Router -> Agent", 4, false))
+                    : Optional.empty();
+            return new RetrievalResponse(
+                    List.of(new RetrievalHit("Router.java", 4, 8, "class", "Router",
+                            "class Router {}", 0.75, Set.of(RetrievalSource.SYMBOL))),
+                    map,
+                    new RetrievalDiagnostics("off", Map.of(), Map.of(),
+                            List.of("semantic_unavailable"), 2),
+                    true);
+        }
+
+        @Override public IndexRefreshResult refresh(IndexRefreshRequest request) {
+            return new IndexRefreshResult(0, 0, 0, 0, List.of());
+        }
+        @Override public RetrievalIndexStatus status() {
+            return new RetrievalIndexStatus(true, false, 0, 0);
+        }
+        @Override public void reconfigureEmbedding(EmbeddingResolution resolution) {}
+        @Override public void close() {}
+    }
 
     @Test
     void executionResultCarriesTypedFailureStatus() {

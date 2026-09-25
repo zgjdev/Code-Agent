@@ -15,6 +15,7 @@ import com.codeagent.browser.BrowserSession;
 import com.codeagent.browser.SensitivePagePolicy;
 import com.codeagent.config.CodeAgentConfig;
 import com.codeagent.hitl.HitlHandler;
+import com.codeagent.hitl.ApprovalRequest;
 import com.codeagent.hitl.HitlToolRegistry;
 import com.codeagent.hitl.SwitchableHitlHandler;
 import com.codeagent.hitl.RendererHitlHandler;
@@ -48,6 +49,10 @@ import com.codeagent.prompt.PromptRepository;
 import com.codeagent.rag.CodeRetriever;
 import com.codeagent.rag.CodeRelation;
 import com.codeagent.rag.SearchResultFormatter;
+import com.codeagent.rag.embedding.EmbeddingProviderFactory;
+import com.codeagent.rag.embedding.RemoteEmbeddingConsentCoordinator;
+import com.codeagent.rag.embedding.RemoteEmbeddingConsentRequest;
+import com.codeagent.rag.embedding.RemoteEmbeddingConsentStore;
 import com.codeagent.runtime.CancellationContext;
 import com.codeagent.runtime.CancellationToken;
 import com.codeagent.runtime.api.RuntimeApiServer;
@@ -791,6 +796,11 @@ public class Main {
                     case CONFIG -> {
                         if (command.payload() == null || command.payload().isBlank()) {
                             handleConfigPalette(renderer, config, llmClient, hitlHandler, skillRegistry);
+                        } else if (command.payload().trim().toLowerCase().startsWith("embedding")) {
+                            ui.println(handleEmbeddingConfigCommand(config, command.payload(),
+                                    Path.of(reactAgent.getToolRegistry().getProjectPath()),
+                                    reactAgent.getToolRegistry(), hitlHandler));
+                            renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         } else {
                             ui.println(handleConfigCommand(config, command.payload()));
                             renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
@@ -965,15 +975,30 @@ public class Main {
                         continue;
                     }
                     case INDEX_CODE -> {
-                        String indexPath = command.payload() != null ? command.payload() : ".";
-                        CodeIndex indexer = new CodeIndex(ui::println);
-                        indexer.index(indexPath);
+                        try {
+                            var parsed = new IndexCommandParser().parse(command.payload());
+                            String indexPath = parsed.path() == null ? reactAgent.getToolRegistry().getProjectPath() : parsed.path();
+                            String absPath = new File(indexPath).getAbsolutePath();
+                            reactAgent.getToolRegistry().setProjectPath(absPath);
+                            reactAgent.getMemoryManager().setProjectPath(absPath);
+                            var service = reactAgent.getToolRegistry().getCodeRetrievalService();
+                            if (parsed.action() == IndexCommandParser.IndexCommand.Action.STATUS) {
+                                ui.println("索引状态: " + service.status());
+                            } else if (parsed.action() == IndexCommandParser.IndexCommand.Action.CLEAR
+                                    && service instanceof com.codeagent.rag.DefaultCodeRetrievalService defaultService) {
+                                defaultService.clear(Path.of(absPath));
+                                ui.println("✅ 已清除当前项目 v2 索引");
+                            } else {
+                                boolean rebuild = parsed.action() == IndexCommandParser.IndexCommand.Action.REBUILD;
+                                var refresh = service.refresh(new com.codeagent.rag.IndexRefreshRequest(Path.of(absPath), rebuild));
+                                ui.println(String.format("✅ 索引完成：变更 %d，未变 %d，删除 %d，失败 %d",
+                                        refresh.changedFiles(), refresh.unchangedFiles(),
+                                        refresh.deletedFiles(), refresh.failedFiles()));
+                            }
+                        } catch (Exception e) {
+                            ui.println("❌ " + e.getMessage());
+                        }
                         ui.println();
-
-                        // 同步项目路径到 ToolRegistry，让 search_code 工具可以正常工作
-                        String absPath = new File(indexPath).getAbsolutePath();
-                        reactAgent.getToolRegistry().setProjectPath(absPath);
-                        reactAgent.getMemoryManager().setProjectPath(absPath);
                         continue;
                     }
                     case SEARCH_CODE -> {
@@ -983,20 +1008,18 @@ public class Main {
                             continue;
                         }
                         ui.println("🔍 检索: " + query);
-                        try (CodeRetriever retriever = new CodeRetriever(".")) {
-                            var stats = retriever.getStats();
-                            if (stats.chunkCount() == 0) {
-                                ui.println("⚠️ 代码库尚未索引，请先使用 /index 命令\n");
-                                continue;
-                            }
-                            List<com.codeagent.rag.VectorStore.SearchResult> results = retriever.hybridSearch(query, 5);
-                            if (results.isEmpty()) {
+                        try {
+                            Path root = Path.of(reactAgent.getToolRegistry().getProjectPath());
+                            var response = reactAgent.getToolRegistry().getCodeRetrievalService().search(
+                                    new com.codeagent.rag.RetrievalRequest(root, query, 5, 24_000,
+                                            true, com.codeagent.rag.RetrievalIntent.CHUNKS));
+                            if (response.hits().isEmpty()) {
                                 ui.println("📭 未找到相关代码\n");
                             } else {
-                                ui.println(SearchResultFormatter.formatForCli(query, results) + "\n");
+                                ui.println(SearchResultFormatter.formatForCli(query, response) + "\n");
                             }
                         } catch (Exception e) {
-                            ui.println("❌ 检索失败: " + e.getMessage() + "\n");
+                            ui.println("❌ 检索失败: " + e.getClass().getSimpleName() + "\n");
                         }
                         continue;
                     }
@@ -1007,30 +1030,18 @@ public class Main {
                             continue;
                         }
                         ui.println("🕸️ 查询类关系图谱: " + className);
-                        try (CodeRetriever retriever = new CodeRetriever(".")) {
-                            var stats = retriever.getStats();
-                            if (stats.chunkCount() == 0) {
-                                ui.println("⚠️ 代码库尚未索引，请先使用 /index 命令\n");
-                                continue;
-                            }
-                            List<CodeRelation> relations = retriever.getRelationGraph(className);
-                            if (relations.isEmpty()) {
+                        try {
+                            Path root = Path.of(reactAgent.getToolRegistry().getProjectPath());
+                            var response = reactAgent.getToolRegistry().getCodeRetrievalService().search(
+                                    new com.codeagent.rag.RetrievalRequest(root, className, 20, 24_000,
+                                            false, com.codeagent.rag.RetrievalIntent.ARCHITECTURE));
+                            if (response.hits().isEmpty()) {
                                 ui.println("📭 未找到相关关系\n");
                             } else {
-                                ui.println("📋 找到 " + relations.size() + " 条关系:\n");
-                                for (CodeRelation rel : relations) {
-                                    String arrow = rel.relationType().equals("contains") ? "├── contains -->"
-                                            : rel.relationType().equals("extends") ? "└── extends -->"
-                                            : rel.relationType().equals("implements") ? "└── implements -->"
-                                            : rel.relationType().equals("calls") ? "├── calls -->"
-                                            : "├── " + rel.relationType() + " -->";
-                                    ui.printf("   %s %s [%s]%n", rel.fromName(), arrow,
-                                            rel.toName() != null ? rel.toName() : "unknown");
-                                }
-                                ui.println();
+                                ui.println(SearchResultFormatter.formatForCli(className, response) + "\n");
                             }
                         } catch (Exception e) {
-                            ui.println("❌ 查询失败: " + e.getMessage() + "\n");
+                            ui.println("❌ 查询失败: " + e.getClass().getSimpleName() + "\n");
                         }
                         continue;
                     }
@@ -2145,6 +2156,87 @@ public class Main {
         }
         out.append("   立即切换: /model ").append(update.provider());
         return out.toString();
+    }
+
+    static String handleEmbeddingConfigCommand(CodeAgentConfig config, String payload,
+            Path projectRoot, ToolRegistry registry, HitlHandler hitlHandler) {
+        try {
+            var command = new EmbeddingConfigCommandParser().parse(payload);
+            var embedding = config.getEmbedding();
+            switch (command.action()) {
+                case STATUS -> {
+                    return "Embedding: mode=" + embedding.getMode() + ", provider="
+                            + (embedding.getProvider() == null ? "(default)" : embedding.getProvider())
+                            + ", model=" + (embedding.getModel() == null ? "(default)" : embedding.getModel());
+                }
+                case LOCAL -> {
+                    embedding.setMode("local");
+                    embedding.setProvider(null);
+                    config.save();
+                    registry.getCodeRetrievalService().reconfigureEmbedding(
+                            new EmbeddingProviderFactory().resolve(config, projectRoot, null));
+                    return "✅ Embedding 已切换为内置本地 BGE";
+                }
+                case OFF -> {
+                    embedding.setMode("off");
+                    embedding.setProvider(null);
+                    config.save();
+                    registry.getCodeRetrievalService().reconfigureEmbedding(
+                            new EmbeddingProviderFactory().resolve(config, projectRoot, null));
+                    return "✅ Embedding 已关闭；词法、符号和关系检索保持可用";
+                }
+                case REVOKE -> {
+                    RemoteEmbeddingConsentRequest marker = RemoteEmbeddingConsentRequest.create(
+                            projectRoot, "revoke", "revoke", "https://embedding.invalid", 1);
+                    int removed = new RemoteEmbeddingConsentCoordinator(
+                            new RemoteEmbeddingConsentStore(), registry.getAuditLog())
+                            .revoke(marker.projectFingerprint());
+                    embedding.setMode("local");
+                    embedding.setProvider(null);
+                    config.save();
+                    registry.getCodeRetrievalService().reconfigureEmbedding(
+                            new EmbeddingProviderFactory().resolve(config, projectRoot, null));
+                    return "✅ 已撤销当前项目远程 Embedding 授权（" + removed + " 条）";
+                }
+                case REMOTE_PROVIDER -> {
+                    String provider = command.provider();
+                    String model = "glm".equals(provider) ? "embedding-3"
+                            : "jina".equals(provider) ? "jina-code-embeddings-1.5b" : embedding.getModel();
+                    String endpoint = "glm".equals(provider) ? "https://open.bigmodel.cn/api/paas/v4"
+                            : "jina".equals(provider) ? "https://api.jina.ai/v1" : embedding.getBaseUrl();
+                    String apiKey = embedding.getApiKey() != null ? embedding.getApiKey() : config.getApiKey(provider);
+                    if (model == null || endpoint == null || apiKey == null) {
+                        return "❌ 远程 Embedding 缺少 model、baseUrl 或 API Key";
+                    }
+                    embedding.setMode("remote");
+                    embedding.setProvider(provider);
+                    embedding.setModel(model);
+                    embedding.setBaseUrl(endpoint);
+                    embedding.setApiKey(apiKey);
+                    RemoteEmbeddingConsentRequest request = RemoteEmbeddingConsentRequest.create(
+                            projectRoot, provider, model, endpoint, 1);
+                    RemoteEmbeddingConsentCoordinator coordinator = new RemoteEmbeddingConsentCoordinator(
+                            new RemoteEmbeddingConsentStore(), registry.getAuditLog());
+                    var capability = coordinator.acquire(request, () -> hitlHandler.requestApproval(
+                            ApprovalRequest.of("remote_embedding_consent",
+                                    "{\"provider\":\"" + provider + "\",\"model\":\"" + model + "\"}",
+                                    "允许把当前项目代码片段和检索查询发送到该远程 Embedding 服务"))
+                            .isApproved());
+                    if (capability.isEmpty()) {
+                        embedding.setMode("local");
+                        embedding.setProvider(null);
+                        return "已拒绝远程 Embedding；继续使用本地检索";
+                    }
+                    config.save();
+                    registry.getCodeRetrievalService().reconfigureEmbedding(
+                            new EmbeddingProviderFactory().resolve(config, projectRoot, capability.orElseThrow()));
+                    return "✅ 已授权并启用远程 Embedding: " + provider;
+                }
+            }
+        } catch (Exception e) {
+            return "❌ " + e.getMessage();
+        }
+        return "❌ 未知 embedding 配置命令";
     }
 
     static ProviderConfigUpdate parseProviderConfigUpdate(String payload) {

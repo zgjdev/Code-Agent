@@ -73,6 +73,9 @@ class PromptAssemblerTest {
         assertTrue(prompt.contains("搜索正文/snippet/query 回显/错误提示"));
         assertTrue(prompt.contains("`web_fetch` 正文、浏览器导航/快照/网络列表"));
         assertTrue(prompt.contains("TurnToolPolicy"));
+        assertTrue(prompt.contains("\"intent\": \"chunks|architecture\""));
+        assertTrue(prompt.contains("repository_map"));
+        assertTrue(prompt.contains("精确定位仍以 `grep_code` 为准"));
     }
 
     @Test

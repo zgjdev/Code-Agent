@@ -17,7 +17,8 @@ public record CodeChunk(String filePath, String chunkType, String name,
      * 构造一个文件级别的代码块
      */
     public static CodeChunk fileChunk(String filePath, String content) {
-        return new CodeChunk(filePath, "file", filePath, content, 0, 0);
+        int lineCount = content == null || content.isEmpty() ? 1 : content.split("\\R", -1).length;
+        return new CodeChunk(filePath, "file", filePath, content, 1, lineCount);
     }
 
     /**

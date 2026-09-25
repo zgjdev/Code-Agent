@@ -22,6 +22,7 @@ public class CodeAgentConfig {
 
     private String defaultProvider = "glm";
     private Map<String, ProviderConfig> providers = new LinkedHashMap<>();
+    private EmbeddingConfig embedding = new EmbeddingConfig();
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class ProviderConfig {
@@ -54,10 +55,73 @@ public class CodeAgentConfig {
         public void setMaxTokens(int maxTokens) { this.maxTokens = maxTokens; }
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class EmbeddingConfig {
+        private String mode;
+        private String provider;
+        private String model;
+        private String baseUrl;
+        private String apiKey;
+        private int dimension;
+
+        public EmbeddingConfig() {}
+
+        public String getMode() {
+            return isBlank(mode) ? "local" : mode.trim();
+        }
+
+        public void setMode(String mode) { this.mode = mode; }
+        public String getProvider() { return trimToNull(provider); }
+        public void setProvider(String provider) { this.provider = provider; }
+        public String getModel() { return trimToNull(model); }
+        public void setModel(String model) { this.model = model; }
+        public String getBaseUrl() { return trimToNull(baseUrl); }
+        public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
+        public String getApiKey() { return trimToNull(apiKey); }
+        public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+        public int getDimension() { return dimension; }
+        public void setDimension(int dimension) { this.dimension = dimension; }
+
+        private void applyEnvironment(Map<String, String> environment) {
+            if (isBlank(mode)) mode = environment.get("EMBEDDING_MODE");
+            if (isBlank(provider)) provider = environment.get("EMBEDDING_PROVIDER");
+            if (isBlank(model)) model = environment.get("EMBEDDING_MODEL");
+            if (isBlank(baseUrl)) baseUrl = environment.get("EMBEDDING_BASE_URL");
+            if (isBlank(apiKey)) apiKey = environment.get("EMBEDDING_API_KEY");
+        }
+
+        @Override
+        public String toString() {
+            return "EmbeddingConfig{" +
+                    "mode='" + getMode() + '\'' +
+                    ", provider='" + getProvider() + '\'' +
+                    ", model='" + getModel() + '\'' +
+                    ", baseUrl='" + getBaseUrl() + '\'' +
+                    ", dimension=" + dimension +
+                    ", apiKey='" + (getApiKey() == null ? null : "***") + '\'' +
+                    '}';
+        }
+
+        private static boolean isBlank(String value) {
+            return value == null || value.isBlank();
+        }
+
+        private static String trimToNull(String value) {
+            return isBlank(value) ? null : value.trim();
+        }
+    }
+
     public String getDefaultProvider() { return defaultProvider; }
     public void setDefaultProvider(String defaultProvider) { this.defaultProvider = defaultProvider; }
     public Map<String, ProviderConfig> getProviders() { return providers; }
     public void setProviders(Map<String, ProviderConfig> providers) { this.providers = providers; }
+    public EmbeddingConfig getEmbedding() {
+        if (embedding == null) embedding = new EmbeddingConfig();
+        return embedding;
+    }
+    public void setEmbedding(EmbeddingConfig embedding) {
+        this.embedding = embedding == null ? new EmbeddingConfig() : embedding;
+    }
 
     public String getApiKey(String provider) {
         ProviderConfig providerConfig = providers.get(provider);
@@ -92,20 +156,31 @@ public class CodeAgentConfig {
     }
 
     public static CodeAgentConfig load() {
-        if (Files.exists(CONFIG_FILE)) {
+        return load(CONFIG_FILE, System.getenv());
+    }
+
+    public static CodeAgentConfig load(Path configFile, Map<String, String> environment) {
+        CodeAgentConfig config = new CodeAgentConfig();
+        if (Files.exists(configFile)) {
             try {
-                return mapper.readValue(CONFIG_FILE.toFile(), CodeAgentConfig.class);
+                config = mapper.readValue(configFile.toFile(), CodeAgentConfig.class);
             } catch (IOException e) {
                 System.err.println("⚠️ 配置文件读取失败，使用默认配置: " + e.getMessage());
             }
         }
-        return new CodeAgentConfig();
+        config.getEmbedding().applyEnvironment(environment == null ? Map.of() : environment);
+        return config;
     }
 
     public void save() {
+        save(CONFIG_FILE);
+    }
+
+    public void save(Path configFile) {
         try {
-            Files.createDirectories(CONFIG_DIR);
-            mapper.writeValue(CONFIG_FILE.toFile(), this);
+            Path parent = configFile.toAbsolutePath().normalize().getParent();
+            if (parent != null) Files.createDirectories(parent);
+            mapper.writeValue(configFile.toFile(), this);
         } catch (IOException e) {
             System.err.println("⚠️ 配置保存失败: " + e.getMessage());
         }

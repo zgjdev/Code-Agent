@@ -16,11 +16,24 @@ import java.util.regex.Pattern;
  * 目标不是做复杂 NLP，而是把自然语言问题里的“代码关键词”尽量保留下来，
  * 例如类名、方法名、ReAct、Agent、index、memory 等，用于混合检索加权。
  */
-final class RagQueryTokenizer {
+public final class RagQueryTokenizer {
     private static final JiebaSegmenter SEGMENTER = JiebaSegmenterFactory.createSilently();
     private static final Pattern ASCII_TOKEN = Pattern.compile("[A-Za-z][A-Za-z0-9_.$-]{1,}");
 
-    private RagQueryTokenizer() {
+    public RagQueryTokenizer() {
+    }
+
+    public List<String> identifiers(String query) {
+        List<String> result = new java.util.ArrayList<>(3);
+        Matcher matcher = ASCII_TOKEN.matcher(query == null ? "" : query);
+        while (matcher.find() && result.size() < 3) {
+            String token = matcher.group();
+            if ((token.indexOf('_') >= 0 || token.indexOf('.') >= 0
+                    || token.codePoints().anyMatch(Character::isUpperCase)) && !result.contains(token)) {
+                result.add(token);
+            }
+        }
+        return List.copyOf(result);
     }
 
     static Set<String> tokenize(String query) {

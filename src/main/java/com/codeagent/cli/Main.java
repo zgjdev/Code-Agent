@@ -631,7 +631,7 @@ public class Main {
                         ui.println("   /memory search <关键词> - 搜索当前项目可见长期记忆");
                         ui.println("   /memory delete <id> - 删除单条长期记忆");
                         ui.println("   /memory clear - 清空长期记忆");
-                        ui.println("   /save <事实> - 保存项目级长期记忆；/save --global <事实> 保存全局记忆");
+                        ui.println("   /save <事实> - 保存或更新项目级长期记忆；/save --global <事实> 保存或更新全局记忆");
                         ui.println();
                         continue;
                     }
@@ -674,8 +674,9 @@ public class Main {
                         if (saveRequest.fact().isEmpty()) {
                             ui.println("❌ 请提供要保存的内容，例如 /save 这个项目使用Java 17，或 /save --global 默认用中文回答\n");
                         } else {
-                            reactAgent.getMemoryManager().storeFact(saveRequest.fact(), saveRequest.scope());
-                            ui.println("💾 已保存到长期记忆(" + saveRequest.scope() + "): " + saveRequest.fact() + "\n");
+                            String result = reactAgent.getMemoryManager().storeFactWithResult(
+                                    saveRequest.fact(), saveRequest.scope(), command.payload());
+                            ui.println(result + "\n");
                         }
                         continue;
                     }
@@ -1982,7 +1983,7 @@ public class Main {
                 new SlashCommandHint("/memory search ", "/memory search <关键词>", "搜索当前项目可见长期记忆"),
                 new SlashCommandHint("/memory delete ", "/memory delete <id>", "删除单条长期记忆"),
                 new SlashCommandHint("/memory clear", "/memory clear", "清空长期记忆"),
-                new SlashCommandHint("/save ", "/save [--global] <事实内容>", "手动保存项目级或全局长期记忆"),
+                new SlashCommandHint("/save ", "/save [--global] <事实内容>", "手动保存或更新项目级/全局长期记忆"),
                 new SlashCommandHint("/skill", "/skill", "查看 skill 列表"),
                 new SlashCommandHint("/skill list", "/skill list", "查看 skill 列表"),
                 new SlashCommandHint("/skill show ", "/skill show <name>", "查看 SKILL.md 全文"),
@@ -3380,7 +3381,8 @@ public class Main {
             String project = entry.getMetadata().get("project");
             sb.append("- ")
                     .append(entry.getId())
-                    .append(" [").append(scope).append("]");
+                    .append(" [").append(scope).append("]")
+                    .append(" [").append(LongTermMemory.statusOf(entry)).append("]");
             if ("project".equals(scope) && project != null && !project.isBlank()) {
                 sb.append(" ").append(shortenPath(project));
             }

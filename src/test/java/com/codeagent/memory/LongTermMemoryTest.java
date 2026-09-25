@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Map;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -71,7 +72,7 @@ class LongTermMemoryTest {
     }
 
     @Test
-    void shouldDeduplicateConservativeGrammaticalVariantInSameDomain() {
+    void shouldLeaveNaturalLanguageVariantsForWriteResolver() {
         Map<String, String> domain = Map.of(
                 "scope", "project",
                 "project", "/repo/current"
@@ -91,7 +92,7 @@ class LongTermMemoryTest {
                 10
         ));
 
-        assertEquals(1, memory.size());
+        assertEquals(2, memory.size());
     }
 
     @Test
@@ -397,6 +398,37 @@ class LongTermMemoryTest {
         assertTrue(visible.stream().anyMatch(entry -> entry.getId().equals("global")));
         assertTrue(visible.stream().anyMatch(entry -> entry.getId().equals("project-a")));
         assertTrue(visible.stream().noneMatch(entry -> entry.getId().equals("project-b")));
+    }
+
+    @Test
+    void shouldPersistSupersededLifecycleAndHideOldEntryFromActiveView() {
+        MemoryEntry oldEntry = new MemoryEntry(
+                "old",
+                "用户偏好使用 Java",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"),
+                5
+        );
+        MemoryEntry replacement = new MemoryEntry(
+                "new",
+                "用户偏好使用 Python",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"),
+                5
+        );
+        memory.store(oldEntry);
+
+        assertTrue(memory.supersede("old", replacement));
+        assertEquals("superseded", LongTermMemory.statusOf(memory.retrieve("old").orElseThrow()));
+        assertEquals("new", memory.retrieve("old").orElseThrow().getMetadata().get("supersededBy"));
+        assertEquals("old", memory.retrieve("new").orElseThrow().getMetadata().get("supersedes"));
+        assertEquals(List.of("new"), memory.getActiveVisible("/repo/current").stream()
+                .map(MemoryEntry::getId).toList());
+
+        LongTermMemory reloaded = new LongTermMemory(tempDir.toFile());
+        assertEquals("superseded", LongTermMemory.statusOf(reloaded.retrieve("old").orElseThrow()));
+        assertEquals(List.of("new"), reloaded.getActiveVisible("/repo/current").stream()
+                .map(MemoryEntry::getId).toList());
     }
 
     @Test

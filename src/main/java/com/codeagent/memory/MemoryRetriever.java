@@ -1,114 +1,216 @@
 package com.codeagent.memory;
 
-import java.util.*;
-import java.util.stream.Collectors;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 
 /**
- * 记忆检索器 - 根据查询从长期记忆中检索最相关的信息。
- *
- * 检索策略：
- * 1. 关键词匹配：直接匹配内容中的关键词
- * 2. 类型优先：不同场景优先检索不同类型的记忆
- * 3. 时间衰减：越近的记忆权重越高
+ * 长期记忆检索器：词法 + 本地语义混合召回，并使用有界近因加成稳定排序。
  */
-public class MemoryRetriever {
+public class MemoryRetriever implements AutoCloseable {
+    static final double LEXICAL_WEIGHT = 0.45d;
+    static final double SEMANTIC_WEIGHT = 0.55d;
+    static final double SEMANTIC_MIN_SCORE = 0.65d;
+    static final double WRITE_CANDIDATE_MIN_SCORE = 0.50d;
+    static final double RECENCY_MAX_BOOST = 0.05d;
+    static final double RECENCY_HALF_LIFE_DAYS = 30.0d;
+
     private final LongTermMemory longTermMemory;
+    private final MemoryEmbeddingCache embeddingCache;
+    private final Clock clock;
 
     public MemoryRetriever(LongTermMemory longTermMemory) {
-        this.longTermMemory = longTermMemory;
+        this(longTermMemory, new MemoryEmbeddingCache(), Clock.systemUTC());
     }
 
-    /**
-     * 检索与查询最相关的记忆
-     *
-     * @param query 查询文本
-     * @param limit 返回条数上限
-     * @return 按相关度排序的记忆列表
-     */
+    MemoryRetriever(LongTermMemory longTermMemory,
+                    MemoryEmbeddingCache embeddingCache,
+                    Clock clock) {
+        this.longTermMemory = java.util.Objects.requireNonNull(longTermMemory, "longTermMemory");
+        this.embeddingCache = java.util.Objects.requireNonNull(embeddingCache, "embeddingCache");
+        this.clock = java.util.Objects.requireNonNull(clock, "clock");
+    }
+
     public List<MemoryEntry> retrieve(String query, int limit) {
-        return retrieveLongTerm(query, limit);
+        return retrieveLongTerm(query, limit, null);
     }
 
-    /**
-     * 仅从长期记忆中检索稳定事实，用于 system prompt 注入。
-     *
-     * 当前轮用户输入和短期对话已经在 message history 里，不应再次以"相关记忆"身份
-     * 注入给模型，否则容易让模型把当前请求误读成历史事实。
-     */
     public List<MemoryEntry> retrieveLongTerm(String query, int limit) {
         return retrieveLongTerm(query, limit, null);
     }
 
     public List<MemoryEntry> retrieveLongTerm(String query, int limit, String projectKey) {
-        return longTermMemory.getAll().stream()
-                .filter(entry -> LongTermMemory.isVisibleInProject(entry, projectKey))
-                .map(entry -> new ScoredEntry(entry, computeRelevanceScore(entry, query) * 1.2, false))
-                .filter(scoredEntry -> scoredEntry.score() > 0)
-                .sorted(Comparator.comparingDouble(ScoredEntry::score).reversed())
+        if (query == null || query.isBlank() || limit <= 0) {
+            return List.of();
+        }
+        return score(query, longTermMemory.getActiveVisible(projectKey), false).stream()
+                .filter(scored -> scored.lexicalScore() > 0
+                        || scored.semanticScore() >= SEMANTIC_MIN_SCORE)
+                .sorted(resultComparator())
                 .limit(limit)
                 .map(ScoredEntry::entry)
-                .collect(Collectors.toList());
+                .toList();
     }
 
     /**
-     * 构建上下文：将相关记忆组装成文本，用于注入到 LLM 的 system prompt 中
+     * 写入解析使用的候选召回。只负责找“可能谈论同一事实”的旧 active memory，
+     * 不直接决定 duplicate/supersede。
      */
+    List<MemoryEntry> retrieveWriteCandidates(String query,
+                                              int limit,
+                                              List<MemoryEntry> domainEntries,
+                                              MemoryEntry.MemoryType type) {
+        if (query == null || query.isBlank() || limit <= 0
+                || domainEntries == null || domainEntries.isEmpty()) {
+            return List.of();
+        }
+        return score(query, domainEntries, true).stream()
+                .filter(scored -> scored.entry().getType() == type)
+                .filter(scored -> scored.lexicalScore() > 0
+                        || scored.semanticScore() >= WRITE_CANDIDATE_MIN_SCORE)
+                .sorted(Comparator.comparingDouble(ScoredEntry::hybridRelevance).reversed()
+                        .thenComparing((ScoredEntry value) -> value.entry().getTimestamp(),
+                                Comparator.reverseOrder())
+                        .thenComparing(value -> value.entry().getId()))
+                .limit(limit)
+                .map(ScoredEntry::entry)
+                .toList();
+    }
+
     public String buildContextForQuery(String query, int maxTokens) {
         return buildContextForQuery(query, maxTokens, null);
     }
 
     public String buildContextForQuery(String query, int maxTokens, String projectKey) {
         List<MemoryEntry> relevant = retrieveLongTerm(query, 10, projectKey);
-        if (relevant.isEmpty()) return "";
+        if (relevant.isEmpty() || maxTokens <= 0) return "";
 
-        StringBuilder context = new StringBuilder();
-        context.append("## 相关长期记忆\n\n");
-
+        StringBuilder body = new StringBuilder();
         int usedTokens = 0;
         for (MemoryEntry entry : relevant) {
-            if (usedTokens + entry.getTokenCount() > maxTokens) break;
-
-            context.append("- [").append(entry.getType()).append("] ")
+            if (usedTokens + entry.getTokenCount() > maxTokens) {
+                continue;
+            }
+            body.append("- [").append(entry.getType()).append("] ")
                     .append(entry.getContent()).append("\n");
             usedTokens += entry.getTokenCount();
         }
-
-        context.append("\n");
-        return context.toString();
+        if (body.isEmpty()) {
+            return "";
+        }
+        return "## 相关长期记忆\n\n" + body + "\n";
     }
 
-    /**
-     * 计算记忆条目与查询的相关度分数
-     */
-    private double computeRelevanceScore(MemoryEntry entry, String query) {
-        String contentLower = entry.getContent().toLowerCase();
-        String queryLower = query.toLowerCase();
-
-        // 1. 精确匹配加分
-        if (contentLower.contains(queryLower)) {
-            return 1.0;
+    double lexicalScore(MemoryEntry entry, String query) {
+        if (entry == null || query == null || query.isBlank()) {
+            return 0.0d;
+        }
+        String contentLower = entry.getContent().toLowerCase(Locale.ROOT);
+        String queryLower = query.toLowerCase(Locale.ROOT).trim();
+        if (!queryLower.isEmpty() && contentLower.contains(queryLower)) {
+            return 1.0d;
         }
 
-        // 2. 关键词匹配
         Set<String> queryWords = MemoryQueryTokenizer.tokenize(queryLower);
+        if (queryWords.isEmpty()) {
+            return 0.0d;
+        }
         int matchedWords = 0;
         for (String word : queryWords) {
             if (!word.isEmpty() && contentLower.contains(word)) {
                 matchedWords++;
             }
         }
-
-        if (matchedWords == 0) return 0;
-
-        double keywordScore = (double) matchedWords / queryWords.size();
-
-        // 3. 时间衰减（越近分数越高，简单实现）
-        long ageMs = System.currentTimeMillis() - entry.getTimestamp().toEpochMilli();
-        double ageHours = ageMs / (1000.0 * 60 * 60);
-        double timeDecay = Math.max(0.5, 1.0 - ageHours / 24.0); // 24小时内从1.0衰减到0.5
-
-        return keywordScore * timeDecay;
+        return (double) matchedWords / queryWords.size();
     }
 
-    private record ScoredEntry(MemoryEntry entry, double score, boolean fromShortTerm) {}
+    double recencyBoost(Instant timestamp) {
+        if (timestamp == null) {
+            return 0.0d;
+        }
+        double ageDays = Math.max(0.0d,
+                Duration.between(timestamp, clock.instant()).toMillis() / 86_400_000.0d);
+        double signal = Math.exp(-Math.log(2.0d) * ageDays / RECENCY_HALF_LIFE_DAYS);
+        return RECENCY_MAX_BOOST * signal;
+    }
+
+    private List<ScoredEntry> score(String query,
+                                    List<MemoryEntry> entries,
+                                    boolean writeCandidateMode) {
+        if (entries == null || entries.isEmpty()) {
+            return List.of();
+        }
+
+        Optional<float[]> queryVector = embeddingCache.embedQuery(query);
+        Map<String, float[]> entryVectors = queryVector.isPresent()
+                ? embeddingCache.embeddingsFor(entries)
+                : Map.of();
+
+        List<ScoredEntry> scored = new ArrayList<>(entries.size());
+        for (MemoryEntry entry : entries) {
+            double lexical = lexicalScore(entry, query);
+            double semantic = -1.0d;
+            if (queryVector.isPresent()) {
+                float[] entryVector = entryVectors.get(entry.getId());
+                if (entryVector != null) {
+                    semantic = Math.max(0.0d,
+                            Math.min(1.0d, cosineSimilarity(queryVector.get(), entryVector)));
+                }
+            }
+
+            double hybrid = semantic >= 0.0d
+                    ? LEXICAL_WEIGHT * lexical + SEMANTIC_WEIGHT * semantic
+                    : lexical;
+            double finalScore = writeCandidateMode
+                    ? hybrid
+                    : hybrid + recencyBoost(entry.getTimestamp());
+            scored.add(new ScoredEntry(entry, lexical, semantic, hybrid, finalScore));
+        }
+        return scored;
+    }
+
+    private Comparator<ScoredEntry> resultComparator() {
+        return Comparator.comparingDouble(ScoredEntry::finalScore).reversed()
+                .thenComparing(Comparator.comparingDouble(ScoredEntry::hybridRelevance).reversed())
+                .thenComparing((ScoredEntry value) -> value.entry().getTimestamp(),
+                        Comparator.reverseOrder())
+                .thenComparing(value -> value.entry().getId());
+    }
+
+    static double cosineSimilarity(float[] left, float[] right) {
+        if (left == null || right == null || left.length == 0 || left.length != right.length) {
+            return 0.0d;
+        }
+        double dot = 0.0d;
+        double leftNorm = 0.0d;
+        double rightNorm = 0.0d;
+        for (int index = 0; index < left.length; index++) {
+            dot += left[index] * right[index];
+            leftNorm += left[index] * left[index];
+            rightNorm += right[index] * right[index];
+        }
+        if (leftNorm == 0.0d || rightNorm == 0.0d) {
+            return 0.0d;
+        }
+        return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
+    }
+
+    @Override
+    public void close() {
+        embeddingCache.close();
+    }
+
+    private record ScoredEntry(MemoryEntry entry,
+                               double lexicalScore,
+                               double semanticScore,
+                               double hybridRelevance,
+                               double finalScore) {
+    }
 }

@@ -24,8 +24,10 @@ class MemoryManagerTest {
     void shouldClearLongTermMemoryOnlyWhenExplicitlyRequested() {
         LongTermMemory longTerm = new LongTermMemory(tempDir.toFile());
         MemoryManager manager = new MemoryManager(new GLMClient("test-key"), 32768, 128000, longTerm);
-        manager.storeFact("用户偏好使用中文交流");
-        manager.storeFact("项目路径: /tmp/demo");
+        longTerm.store(new MemoryEntry("f1", "用户偏好使用中文交流",
+                MemoryEntry.MemoryType.FACT, java.util.Map.of("scope", "global"), 5));
+        longTerm.store(new MemoryEntry("f2", "项目路径: /tmp/demo",
+                MemoryEntry.MemoryType.FACT, java.util.Map.of("scope", "global"), 5));
         assertEquals(2, longTerm.size());
         manager.clearLongTerm();
         assertEquals(0, longTerm.size());
@@ -48,8 +50,16 @@ class MemoryManagerTest {
     @Test
     void shouldSearchOnlyCurrentProjectAndGlobalFacts() {
         LongTermMemory longTerm = new LongTermMemory(tempDir.toFile());
-        MemoryManager manager = new MemoryManager(new GLMClient("test-key"), 32768, 128000, longTerm);
-        manager.setProjectPath("/repo/current");
+        MemoryTestEmbeddingProvider provider = new MemoryTestEmbeddingProvider().fail(true);
+        MemoryRetriever retriever = new MemoryRetriever(
+                longTerm, new MemoryEmbeddingCache(provider), java.time.Clock.systemUTC());
+        MemoryManager manager = new MemoryManager(
+                new MemoryTestLlmClient("{\"action\":\"create\"}"),
+                com.codeagent.context.ContextProfile.custom(128000),
+                longTerm,
+                retriever,
+                new MemoryRelationClassifier(new MemoryTestLlmClient("{\"action\":\"create\"}")),
+                "/repo/current");
         longTerm.store(new MemoryEntry("current", "当前项目使用 Java 17", MemoryEntry.MemoryType.FACT,
                 java.util.Map.of("scope", "project", "project", manager.getCurrentProject()), 10));
         longTerm.store(new MemoryEntry("other", "其他项目使用 Java 8", MemoryEntry.MemoryType.FACT,
@@ -57,6 +67,41 @@ class MemoryManagerTest {
         List<MemoryEntry> results = manager.searchLongTerm("Java", 10);
         assertEquals(1, results.size());
         assertEquals("current", results.get(0).getId());
+    }
+
+    @Test
+    void explicitUpdateCanSupersedeExistingMemory() {
+        LongTermMemory longTerm = new LongTermMemory(tempDir.toFile());
+        String oldText = "用户偏好使用 Java";
+        String incoming = "用户偏好使用 Python";
+        longTerm.store(new MemoryEntry("old", oldText, MemoryEntry.MemoryType.FACT,
+                java.util.Map.of("scope", "global"), 5));
+
+        MemoryTestEmbeddingProvider provider = new MemoryTestEmbeddingProvider()
+                .vector(oldText, 1f, 0f)
+                .vector(incoming, 1f, 0f);
+        MemoryRetriever retriever = new MemoryRetriever(
+                longTerm, new MemoryEmbeddingCache(provider), java.time.Clock.systemUTC());
+        MemoryTestLlmClient llm = new MemoryTestLlmClient(
+                "{\"action\":\"supersede\",\"targetId\":\"old\","
+                        + "\"evidence\":\"我现在更喜欢 Python\"}");
+        MemoryManager manager = new MemoryManager(
+                llm,
+                com.codeagent.context.ContextProfile.custom(128000),
+                longTerm,
+                retriever,
+                new MemoryRelationClassifier(llm),
+                "/repo/current");
+
+        String result = manager.storeFactWithResult(
+                incoming,
+                "global",
+                "以后不要记我喜欢 Java 了，我现在更喜欢 Python");
+
+        assertTrue(result.contains("已更新长期记忆"));
+        assertEquals("superseded", LongTermMemory.statusOf(longTerm.retrieve("old").orElseThrow()));
+        assertEquals(1, longTerm.getActiveVisible("/repo/current").size());
+        assertEquals(incoming, longTerm.getActiveVisible("/repo/current").get(0).getContent());
     }
 
     @Test

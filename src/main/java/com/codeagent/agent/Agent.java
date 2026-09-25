@@ -93,7 +93,7 @@ public class Agent {
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
-        this.toolRegistry.setScopedMemorySaver(memoryManager::storeFact);
+        this.toolRegistry.setMemoryWriter(memoryManager::storeFactWithResult);
         this.parentConversationContext = new ParentConversationContext(
                 LlmClient.Message.system(buildSystemPrompt()), llmClient);
         this.conversationHistory = parentConversationContext.providerMessages();
@@ -227,6 +227,7 @@ public class Agent {
      */
     public String run(String userInput, String submittedUserInput) {
         synchronizeParentContext();
+        memoryManager.setSubmittedUserInput(submittedUserInput);
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
         TurnToolPolicy turnToolPolicy = TurnToolPolicy.fromUserInput(
                 submittedUserInput,

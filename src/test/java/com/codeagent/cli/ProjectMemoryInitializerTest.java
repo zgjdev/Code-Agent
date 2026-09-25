@@ -26,6 +26,10 @@ class ProjectMemoryInitializerTest {
         assertTrue(result.written());
         assertTrue(content.contains("# CODEAGENT.md"));
         assertTrue(content.contains("CodeAgent 是面向商业使用的 Java Agent CLI 产品"));
+        assertTrue(content.contains("Mode Router"));
+        assertTrue(content.contains("两条执行路径"));
+        assertFalse(content.contains("三套执行模式"));
+        assertFalse(content.contains("三条执行路径"));
         assertTrue(content.contains("mvn test -Pquick"));
         assertTrue(content.contains("不要为某个模式创建孤立能力"));
         assertTrue(content.lines().count() < 45, content);

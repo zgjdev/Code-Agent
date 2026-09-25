@@ -214,7 +214,7 @@ public final class TurnToolPolicy {
                 submittedUserInput, true, sharedBrowserSession, agentOwnedCurrentPage);
     }
 
-    /** Isolates URL discovery state for a parallel plan task or team worker. */
+    /** Isolates URL discovery state for a parallel plan task branch. */
     public TurnToolPolicy fork() {
         return new TurnToolPolicy(this);
     }

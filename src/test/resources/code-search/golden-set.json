@@ -9,7 +9,7 @@
   },
   {
     "id": "parallel-tool-execution",
-    "question": "三条执行路径共享的并行工具入口在哪里？",
+    "question": "两条顶层执行路径共享的并行工具入口在哪里？",
     "pattern": "executeTools",
     "glob": "**/ToolRegistry.java",
     "expectedPath": "src/main/java/com/codeagent/tool/ToolRegistry.java",

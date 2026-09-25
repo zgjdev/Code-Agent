@@ -104,9 +104,9 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `AutoCompactionManager` 统一协调两条自动压缩路径：
   1. `CODEAGENT_SESSION_MEMORY_COMPACTION_ENABLED=true` 时，`SessionMemoryCompactor` 在阈值前异步维护每份 history 独立的增量会话摘要，到阈值后优先使用摘要并保留最近原始消息。
   2. 摘要未就绪、边界失效、压缩后仍超阈值或功能关闭时，回退 `ConversationHistoryCompactor` 完整摘要。
-- 两条路径都在 user message 边界切割，直接原地重建真实 conversationHistory；Plan 并行任务和 Team worker 的预计算状态互相隔离。
+- 两条路径都在 user message 边界切割，直接原地重建真实 conversationHistory；Plan 并行任务分支的预计算状态互相隔离。
 - ReAct、Plan、SubAgent 都接入同一个协调器；`/compact` 始终走稳定的完整摘要路径并保留最近 1 个 user 轮次。
-- `ConversationLedger` 与可变 conversationHistory 解耦：默认 CLI 的 ReAct、Plan、Team（含 planner / worker / reviewer）共享一个 append-only JSONL。每行带 schemaVersion / sessionId / sequence / timestamp / event / mode / actor / source，并保留完整 `LlmClient.Message`；最终响应的 reasoning 也只在账本中完整保留，不改变 provider 的发送视图语义
+- `ConversationLedger` 与可变 conversationHistory 解耦：默认 CLI 的 ReAct 与 Plan 路径（含 planner / task / reviewer 归因）共享一个 append-only JSONL。每行带 schemaVersion / sessionId / sequence / timestamp / event / mode / actor / source，并保留完整 `LlmClient.Message`；最终响应的 reasoning 也只在账本中完整保留，不改变 provider 的发送视图语义
 - `/clear`、历史图片 payload 裁剪和 conversationHistory 压缩只能追加 boundary event，不能覆盖或删除账本旧行。原始工具参数、工具结果和图片 payload 可能敏感；POSIX 下 `history/raw` 为 0700、账本文件为 0600
 - 长期记忆只通过 `/save` 或用户明确要求保存
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
@@ -117,12 +117,12 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `CODEAGENT.md` 中独占一行的 `@relative/path.md` 会被展开；导入路径必须留在用户配置目录或项目根内，总注入内容按预算截断
 - `/init` 生成精简 `CODEAGENT.md`，只写 commands / project positioning / architecture / pitfalls / don'ts；已有文件默认不覆盖，`/init --force` 重写
 
-### Multi-Agent
+### 统一的多 Agent 协作 Plan-and-Execute
 
-- 三角色：Planner / Worker(默认 2 个) / Reviewer
-- 流程：规划 → 按依赖分配 Worker → Reviewer 审查 → 未通过重试(最多 2 次)
-- SubAgent IOException 返回 ERROR 类型
-- 所有子代理共享 ToolRegistry 和 MemoryManager
+- 顶层只保留 `/plan` 入口；独立 `/team` 命令和第三套执行路径已删除
+- 组件职责：Planner 生成 DAG，PlanExecuteAgent 调度并执行 Task，SubAgent 只承担 Reviewer 角色
+- 流程：规划 → 人工计划门 → 依赖/资源感知批次 → Task 执行 → Reviewer 审查 → 未通过重试或失败重规划
+- ReAct 与 Plan 共享 ToolRegistry、MemoryManager 和 ParentConversationContext；Task 使用隔离的 task-local messages
 
 ### HITL System
 
@@ -144,7 +144,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - `executeTools()` 固定线程池并行，默认最多 4 个并发
 - 返回结果保持原始顺序
-- Agent/PlanExecuteAgent/SubAgent 三条路径都走 executeTools()
+- Agent 与 PlanExecuteAgent 的工具调用都经过 `TurnToolPolicy` 后进入 `executeTools()`；Reviewer SubAgent 不调用工具
 
 ### Web Capabilities
 
@@ -153,7 +153,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - Prompt 不包含 Freshness Policy，也不对“最新/当前/今天”等关键词做自动 `web_search` 预检。模型只能在顶层用户目标明确时主动选择联网工具；明确“不要联网”始终优先。
 - 顶层输入只是裸标题、主题或摘录，且无动作、问题或目标时，当前轮只做澄清，不调用任何工具。模型不得根据标题、记忆或自己的 reasoning 猜测 URL。
 - 用户明确要求查找但没有 URL 时，先 `web_search`；`web_fetch` 或 Chrome / MCP 导航 URL 只能来自用户实际提交的顶层原文（不能是 `@path` / MCP resource 展开正文），或同一执行分支由搜索 provider 返回的结构化 `discoveredUrls`。搜索正文、snippet、query 回显、错误提示、`web_fetch` 正文、浏览器导航/快照/网络列表、普通本地工具结果、assistant reasoning、回复文本和 tool arguments 都不能建立 URL provenance；当前 StepSearch MCP 的非结构化文本不会生成凭据。
-- `TurnToolPolicy` 是运行时确定性边界：ReAct / Plan / Team 都必须单独传入用户提交原文与展开后的执行内容，不能让 planner / worker 派生的“搜索”子任务自行获得联网授权。Plan 审阅补充会重建策略；Plan 并行任务和 Team worker 使用 fork 后的独立 URL 集合，避免跨分支扩权。只有 DAG 中声明的后继依赖会继承前置分支不可伪造的 `TrustedUrlContext`；任务结果文本不作为授权来源。grounded URL 先只曝光导航，成功导航只建立当前页读取上下文，读取结果不产生新 URL 授权；交互工具必须有顶层原文明确授权。shared Chrome 的真实模式与 CodeAgent-owned 当前页从 `BrowserSession` 跨轮注入策略；非 owned 标签页只在用户明确要求时开放只读，导航/写入/关闭会硬拒绝，导航结果的全量 `# Pages` 会在回灌模型前裁成单页回执。策略在 StepSearch、内置 SearchProvider / WebFetcher 和 Chrome / MCP 路由之前执行，拒绝结果不得用 fallback 绕过。
+- `TurnToolPolicy` 是运行时确定性边界：ReAct 与 Plan 的每个执行分支都必须单独传入用户提交原文与展开后的执行内容，不能让 planner / task 派生的“搜索”子任务自行获得联网授权。Plan 审阅补充会重建策略；Plan 并行任务使用 fork 后的独立 URL 集合，避免跨分支扩权。只有 DAG 中声明的后继依赖会继承前置分支不可伪造的 `TrustedUrlContext`；任务结果文本不作为授权来源。grounded URL 先只曝光导航，成功导航只建立当前页读取上下文，读取结果不产生新 URL 授权；交互工具必须有顶层原文明确授权。shared Chrome 的真实模式与 CodeAgent-owned 当前页从 `BrowserSession` 跨轮注入策略；非 owned 标签页只在用户明确要求时开放只读，导航/写入/关闭会硬拒绝，导航结果的全量 `# Pages` 会在回灌模型前裁成单页回执。策略在 StepSearch、内置 SearchProvider / WebFetcher 和 Chrome / MCP 路由之前执行，拒绝结果不得用 fallback 绕过。
 - StepSearch 优先级：通过 `TurnToolPolicy` 后，当前模型 provider=`step` 且 model 以 `step-3.7-flash` 开头，并且自动/显式 `mcp__step_search__web_search` / `mcp__step_search__web_fetch` 已注册时，内置 `web_search` / `web_fetch` 会先代理到 StepSearch MCP；MCP 未就绪或返回不可用结果时回退原实现。
 - 本地“当前项目/当前 README/当前文件/当前代码”属于代码库任务，应选择 `glob_files` / `grep_code` / `read_file`，而不是联网工具。
 - JS 渲染 fallback 到 Chrome DevTools MCP

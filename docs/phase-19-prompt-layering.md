@@ -1,6 +1,6 @@
 # 第 19 期：Prompt 分层架构
 
-> 当前状态：MVP 已落地。目标是把 ReAct / Plan / Team / Planner 的 system prompt 从 Java 源码中抽离为 Markdown 资源，并支持用户级、项目级覆盖。
+> 当前状态：MVP 已落地。ReAct Agent、统一 Plan 路径的 task executor、Planner 与 Reviewer system prompt 已从 Java 源码中抽离为 Markdown 资源，并支持用户级、项目级覆盖。
 
 ## 目标
 
@@ -9,7 +9,7 @@
 1. 调 prompt 不再需要改 Java 源码。
 2. 不同职责的 prompt 分层存放，避免一个超长字符串承担所有职责。
 3. 稳定内容在前，动态上下文在后，尽量提高 prompt cache 命中。
-4. Agent / Plan / Team / Planner 四条路径共用同一个组装器。
+4. ReAct 与统一 Plan 路径的各 prompt 角色共用同一个组装器。
 5. 用户可以覆盖内置 prompt，项目也可以覆盖 prompt。
 
 ## 已落地范围
@@ -40,19 +40,19 @@ src/main/resources/prompts/
 │   ├── agent.md
 │   ├── plan.md
 │   ├── planner.md
-│   ├── team-planner.md
-│   ├── team-reviewer.md
-│   └── team-worker.md
+│   ├── router.md
+│   └── team-reviewer.md
 └── personalities/
     └── calm.md
 ```
 
 接入点：
 
-- `Agent`：默认 ReAct system prompt 由 `PromptAssembler` 组装。
+- `Agent`：Router 或 `/react` 选择 ReAct 后，其 system prompt 由 `PromptAssembler` 组装。
 - `PlanExecuteAgent`：每个 task 的执行 system prompt 由 `PromptAssembler` 组装，并注入 `taskType` / `taskDescription`。
-- `SubAgent`：Planner / Worker / Reviewer 三角色按 `PromptMode` 组装。
+- `SubAgent`：统一 Plan 路径当前使用 Reviewer 角色，由 `PromptMode.TEAM_REVIEWER` 组装。
 - `Planner`：Plan-and-Execute 的规划 prompt 由 `PromptAssembler` 组装。
+- `ModeRouterPromptBuilder`：Router 独占 `modes/router.md`，不与 Agent 执行 prompt 混合。
 
 ## 组装顺序
 
@@ -90,7 +90,7 @@ handoff
 ```text
 ~/.codeagent/prompts/base.md
 ~/.codeagent/prompts/modes/agent.md
-.codeagent/prompts/modes/team-worker.md
+.codeagent/prompts/modes/team-reviewer.md
 ```
 
 覆盖是“整文件替换”，不是局部 merge。
@@ -114,7 +114,7 @@ handoff
 - [x] 校验 `## Language`
 - [x] ReAct 接入
 - [x] Plan task executor 接入
-- [x] Multi-Agent 三角色接入
+- [x] 统一 Plan 路径的 task executor 与 Reviewer 接入
 - [x] Planner 接入
 - [x] 写 `PromptAssemblerTest`
 - [x] 更新 `AGENTS.md`

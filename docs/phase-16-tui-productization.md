@@ -17,7 +17,7 @@
 > 5. `src/main/java/com/codeagent/util/TerminalMarkdownRenderer.java`（现有 Markdown 渲染器，TUI 需复用或增强）
 > 6. `src/main/java/com/codeagent/agent/Agent.java`、`PlanExecuteAgent.java`、`SubAgent.java`（系统提示词构造路径）
 >
-> **核心原则**：本期**不写新工具、不修改 Agent 核心逻辑**，只做**可视化层**。TUI 是 Main.java 的"皮肤"，ReAct / Plan / Team 三条执行路径完全不动，只是把原来 JLine 行编辑器的输入输出升级成 Lanterna 面板布局。页面布局、样式定制、键盘交互是本期重点，LLM 协议和工具层保持稳定。
+> **核心原则**：本期**不写新工具、不修改 Agent 核心逻辑**，只做**可视化层**。TUI 是 Main.java 的"皮肤"，ReAct 与统一 Plan 两条执行路径完全不动，只是把原来 JLine 行编辑器的输入输出升级成 Lanterna 面板布局。页面布局、样式定制、键盘交互是本期重点，LLM 协议和工具层保持稳定。
 
 ---
 
@@ -998,7 +998,7 @@ CODEAGENT_TUI=true NO_TUI=true java -jar target/codeagent-1.0-SNAPSHOT.jar
 - [x] `com.codeagent.tui` 包落地，`Main.java` 接入 TUI / CLI 分支
 - [x] `shouldUseTui()` 默认返回 CLI；显式 `CODEAGENT_TUI=true` / `-Dcodeagent.tui=true` 才检查 TUI 条件；`NO_TUI=true` 和小终端降级
 - [x] 三栏布局渲染：文件树 + 对话流 + 状态栏 + 底部输入栏
-- [x] TUI 输入桥接真实 Agent runtime：普通输入走 ReAct，`/plan <任务>` 走 Plan-and-Execute，`/team <任务>` 走 Multi-Agent
+- [x] TUI 输入桥接真实 Agent runtime：普通输入走 ReAct，`/plan <任务>` 走统一的多 Agent 协作 Plan-and-Execute；Lanterna TUI 尚未接入自动路由
 - [x] TUI 支持核心命令：`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/hitl`、`/hitl on`、`/hitl off`、`/config`、`/cancel`、`/exit`
 - [x] `CodeHighlighter` 支持 Java / Python / TypeScript / Bash / JSON / Markdown 等常见语言，`CenterPane` 可渲染高亮代码块
 - [x] HITL 弹窗 TUI 模态框（Lanterna），CLI 模式保留原有 `TerminalHitlHandler`；TUI 不默认批准危险操作

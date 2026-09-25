@@ -256,7 +256,7 @@
   - `resources/list_changed` / `resources/updated` → cache 失效
   - **不做 health ping**，不主动探活，避免对按量或按月计费 server 造成额外负担
 - **新增 CLI**：`/mcp resources <server>`、`/mcp prompts <server>`
-- **运行中取消**：任务执行期间输入 `/cancel` 并回车，请求取消当前 Agent run；ReAct、Plan、Team、工具批次与 `execute_command` 在边界处协同检查取消信号
+- **运行中取消**：任务执行期间输入 `/cancel` 并回车，请求取消当前 Agent run；ReAct、统一 Plan 路径的各执行阶段、工具批次与 `execute_command` 在边界处协同检查取消信号
 
 **不做（明确边界）**：
 - OAuth 2.0 Authorization Code + PKCE
@@ -295,7 +295,7 @@
   - DeepSeek V4 走 automatic prefix cache；当前不注入未确认兼容的 provider 私有字段
 - 上下文成本可见化：每轮输出 `已用 X / Y token (window W, cached: Z, 估算 ¥A)`
 - 检索策略自适应：`search_code` 未传 `top_k` 时按上下文模式选择 5 / 10 / 20
-- **MCP resources 自动注入**（与第 11 期联动）：长模式下，把所有 server 已知 resources 的 URI + 描述（不含 body）作为索引注入 system prompt；ReAct / Plan / Team 都接入
+- **MCP resources 自动注入**（与第 11 期联动）：长模式下，把所有 server 已知 resources 的 URI + 描述（不含 body）作为索引注入 system prompt；ReAct 与统一 Plan 路径都接入
 - `/context` 命令扩展：显示当前 window、动态预算、模式、prompt cache、RAG topK、resources 是否已自动注入
 
 **核心知识点**：
@@ -406,7 +406,7 @@
 - 代码高亮显示
 - 对话历史可视化（`~/.codeagent/history/session_*.jsonl`）
 - 配置文件管理（TUI `/config` 面板）
-- TUI 输入桥接真实 ReAct / Plan / Team 执行链
+- TUI 输入桥接真实 ReAct / 统一 Plan 执行链
 - TUI HITL 模态审批（批准 / 拒绝 / 跳过）
 - 安装包分发
 
@@ -485,14 +485,14 @@
 
 **前置依赖**：第 1–16 期全链路（所有 system prompt 的累积）
 
-**当前状态**：MVP 已落地。ReAct、Plan task executor、Multi-Agent 三角色、Planner 已接入 `PromptAssembler`，内置资源位于 `src/main/resources/prompts/`，覆盖路径支持 `~/.codeagent/prompts/...` 与 `.codeagent/prompts/...`。
+**当前状态**：MVP 已落地。ReAct Agent、Plan task executor、Planner 与 Reviewer 已接入 `PromptAssembler`，内置资源位于 `src/main/resources/prompts/`，覆盖路径支持 `~/.codeagent/prompts/...` 与 `.codeagent/prompts/...`。
 
 **目标**：把分散在 `Agent.java` / `PlanExecuteAgent.java` / `SubAgent.java` 三处的硬编码 system prompt 重构为编译时嵌入的 Markdown 分层，支持用户级覆盖，让 prompt 调优从"改 Java 源码 + 重编译"变成"改 Markdown 文件"。
 
 **功能迭代**：
 - 分层 prompt 文件（`src/main/resources/prompts/`）：
   - `base.md`：核心规则（工具使用、输出格式、子 Agent 协议、上下文管理）
-  - `modes/agent.md` / `modes/plan.md` / `modes/planner.md` / `modes/team-reviewer.md`：各模式的工作流预期和权限
+- `modes/agent.md` / `modes/plan.md` / `modes/planner.md` / `modes/team-reviewer.md`：各执行角色的工作流预期和权限
   - `approvals/suggest.md` / `approvals/auto.md` / `approvals/never.md`：审批策略
   - `personalities/calm.md`：语调（保留现有 `AGENTS.md` 中的 Personality 规范）
 - `PromptAssembler`：按固定顺序组装（base → personality → mode → approval → project_context → skills → context_mgmt → handoff），遵循"volatile content last"原则以最大化 KV prefix cache 命中率
@@ -646,7 +646,7 @@ Git       Prompt    异步后台    图片
 **候选实现**：
 
 - **Spring AI 版本**：用 `ChatModel` / `StreamingChatModel` / `ToolCallback` / Spring Boot DI 重写主流程；`Agent` / `PlanExecuteAgent` / `ToolRegistry` / `MemoryManager` 全面 Bean 化；HITL 通过 AOP 拦截
-- **LangGraph4J 版本**：用图状态机模型重构 Agent 流程，把 ReAct / Plan-and-Execute / Multi-Agent 三种模式统一到 graph 抽象下，节点 = 角色/工具调用，边 = 状态转移条件
+- **LangGraph4J 版本**：用图状态机模型重构 Agent 流程，把 ReAct 与统一的多 Agent 协作 Plan-and-Execute 两条路径纳入 graph 抽象，节点 = 角色/工具调用，边 = 状态转移条件
 
 **设计价值**：完整呈现「自己造轮子 → 用社区轮子」的取舍——什么场景手写更清晰、什么场景框架更省心，让用户既能看懂底层、又能切换主流框架。
 

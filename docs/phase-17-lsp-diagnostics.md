@@ -9,7 +9,7 @@ Agent 写完代码后，不等用户手动执行 `mvn compile`，就能在下一
 1. 文件写入成功后触发 post-edit 诊断。
 2. 诊断不会阻塞工具主流程。
 3. 诊断在下一轮 LLM 请求前以合成 user message 注入。
-4. ReAct、Plan-and-Execute、Multi-Agent 三条路径共享同一机制。
+4. ReAct 与统一的多 Agent 协作 Plan-and-Execute 两条路径共享同一机制。
 
 ## 已实现范围
 

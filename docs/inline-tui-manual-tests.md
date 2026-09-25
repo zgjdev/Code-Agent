@@ -313,7 +313,7 @@ TERM=dumb java -jar target/codeagent-1.0-SNAPSHOT.jar
 - 模型名跟当前 `/model` 一致
 - MCP 与 Skill 摘要跟当前配置一致，形如 `MCP 4/4`、`Skill 2/2`
 - token 计数在 LLM 响应回来后跳动（如 `1.3k/200.0k`）
-- 任务运行时阶段从 `idle` 切到 `react` / `plan` / `team`，流式响应期间 elapsed 持续增长
+- 任务运行时阶段从 `idle` 切到 `routing`，再进入 `react` 或 `plan`；流式响应期间 elapsed 持续增长
 - HITL 列反映 `/hitl on/off` 状态
 
 **通过判定**：状态区与 prompt 之间只有 1 行间距；输入文字时不与状态区冲突，输入提交后状态区和后续空白被清掉。

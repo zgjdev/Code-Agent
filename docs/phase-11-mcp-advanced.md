@@ -58,7 +58,7 @@ src/main/java/com/codeagent/mcp/
 - `Main`：Agent run 放入后台 runner，前台监听 `/cancel`；取消时设置 `CancellationToken` 并 interrupt runner
 - `CliCommandParser`：新增 `MCP_RESOURCES` / `MCP_PROMPTS` / `CANCEL`
 - `AuditLog`：新增 `approver=mention`，记录用户显式 @-mention 读取 resource
-- `CancellationContext`：运行级取消上下文，供 ReAct / Plan / Team / 工具批次协同检查
+- `CancellationContext`：运行级取消上下文，供 ReAct / 统一 Plan 路径 / 工具批次协同检查
 
 ## 4. 用户行为
 
@@ -94,7 +94,7 @@ src/main/java/com/codeagent/mcp/
 @([a-zA-Z][\w-]*):([a-z]+)://([^\s@]+)
 ```
 
-Plan / Team 的 raw-mode 单键交互不接 autocomplete，避免干扰 `ESC` / `Ctrl+O` 等输入路径。
+Plan 的 raw-mode 单键交互不接 autocomplete，避免干扰 `ESC` / `Ctrl+O` 等输入路径。
 
 ### prompts 查看
 

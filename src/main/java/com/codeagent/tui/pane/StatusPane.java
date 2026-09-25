@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * - 模型名称 / 提供商
  * - Token 使用量（已用 / 预算）
  * - 任务耗时
- * - 当前模式（ReAct / Plan / Team）
+ * - 当前模式（ReAct / Plan）
  * - 快捷键提示（精简版）
  *
  * <p>由 TUI 会话控制器在任务开始、结束和 token 变化时更新。
@@ -67,7 +67,7 @@ public class StatusPane extends Panel {
     /**
      * 更新当前模式。
      *
-     * @param mode 模式（ReAct / Plan / Team）
+     * @param mode 模式（ReAct / Plan）
      */
     public void updateMode(String mode) {
         modeLabel.setText("🔄 " + (mode != null ? mode : "ReAct"));

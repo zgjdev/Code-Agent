@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>它在 conversationHistory 尚未达到自动压缩阈值时，异步维护一份增量结构化摘要；真正达到
  * 阈值后，直接使用已经准备好的摘要并保留最近原始消息。每一份消息列表都有独立状态，避免
- * ReAct、Plan 并行任务和 Team worker 之间互相污染。摘要不可用时，调用方必须回退到完整摘要。</p>
+ * ReAct 与 Plan 并行任务分支之间互相污染。摘要不可用时，调用方必须回退到完整摘要。</p>
  */
 public class SessionMemoryCompactor {
     private static final Logger log = LoggerFactory.getLogger(SessionMemoryCompactor.class);

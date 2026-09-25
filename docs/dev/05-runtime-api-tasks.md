@@ -232,8 +232,8 @@ runtime/
 
 | 执行模式 | 交互式 CLI | 无头路径（后台任务 / HTTP Turn） |
 |---|---|---|
-| ReAct | 默认分支（`Main.java:1003`） | **唯一支持** |
-| Plan-and-Execute | `/plan` 分支（`Main.java:992`） | 不支持 |
+| ReAct | Mode Router 选择或 `/react` 显式覆盖 | **唯一支持** |
+| Plan-and-Execute | Mode Router 选择或 `/plan` 显式覆盖 | 不支持 |
 
 原因不是「忘了接」，而是契约形状决定的：`TaskRunner` 只有 `run(String prompt)`（`TaskRunner.java:5`），**没有回传中间计划、审批请求或子 agent 消息的通道**。Plan 依赖 `PlanExecuteAgent.PlanReviewHandler` 的人工审阅（`Main.java:1291-1322`）。没有终端的执行环境里，这条路无处落脚。
 

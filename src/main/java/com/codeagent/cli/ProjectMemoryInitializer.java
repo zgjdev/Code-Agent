@@ -86,13 +86,13 @@ final class ProjectMemoryInitializer {
         List<String> donts = new ArrayList<>();
 
         if (combined.contains("codeagent")) {
-            description = "CodeAgent 是面向商业使用的 Java Agent CLI 产品，对标 Claude Code；主路径是 ReAct、Plan-and-Execute、Multi-Agent 三套执行模式。";
+            description = "CodeAgent 是面向商业使用的 Java Agent CLI 产品，对标 Claude Code；默认 inline/plain 顶层任务由 Mode Router 自动选择 ReAct 或统一的多 Agent 协作 Plan-and-Execute，`/react` 与 `/plan` 提供单轮显式覆盖。";
             commands = List.of(
                     "构建：`mvn clean package` 默认跳过测试，优先产出可手工验收 jar。",
                     "常规回归：`mvn test -Pquick`；TUI 相关跑 `mvn test -Pphase16-smoke`。",
                     "针对性测试：`mvn test -Dtest=XxxTest -DskipTests=false`。"
             );
-            architecture.add("三条执行路径共享 `ToolRegistry` / `MemoryManager` / `SnapshotService`，不要为某个模式创建孤立能力。");
+            architecture.add("两条执行路径共享 `ToolRegistry` / `MemoryManager` / `SnapshotService`，不要为某个模式创建孤立能力。");
             architecture.add("精确代码定位优先 `glob_files` / `grep_code` / `read_file`，`search_code` 只做 RAG 语义辅助。");
             architecture.add("system prompt 由 `PromptAssembler` 分层组装；内置 prompt 在 `src/main/resources/prompts/`。");
             pitfalls.add("改行为要同步 `AGENTS.md` / `README.md` / `ROADMAP.md`；路线图只在状态变化时更新。");

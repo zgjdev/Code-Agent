@@ -50,6 +50,8 @@ class MainInputNormalizationTest {
         List<String> hints = Main.startupHints();
 
         assertTrue(hints.stream().anyMatch(hint -> hint.contains("输入 '/' 后按 Tab 补全命令")));
+        assertTrue(hints.stream().anyMatch(hint -> hint.contains("普通任务自动选择 ReAct 或 Plan-and-Execute")));
+        assertTrue(hints.stream().noneMatch(hint -> hint.contains("默认模式是 ReAct")));
         assertTrue(hints.stream().noneMatch(hint -> hint.contains("/model")));
         assertTrue(hints.stream().noneMatch(hint -> hint.contains("/index [路径]")));
         assertTrue(hints.stream().noneMatch(hint -> hint.contains("/skill list")));
@@ -65,6 +67,8 @@ class MainInputNormalizationTest {
         assertTrue(lines.stream().anyMatch(line -> line.contains("████████")));
         assertTrue(lines.stream().anyMatch(line -> line.contains("Tips for getting started")));
         assertTrue(lines.stream().anyMatch(line -> line.contains("@path")));
+        assertTrue(lines.stream().anyMatch(line -> line.contains("Auto Route")));
+        assertTrue(lines.stream().noneMatch(line -> line.contains("skills · ReAct")));
         assertTrue(lines.stream().noneMatch(line -> line.contains("for shortcuts")));
         assertTrue(lines.stream().noneMatch(line -> line.contains("────────────────")));
         assertTrue(lines.stream().noneMatch(line -> line.endsWith("║")),

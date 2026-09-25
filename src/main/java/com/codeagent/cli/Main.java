@@ -1901,7 +1901,7 @@ public class Main {
                 "输入 '/' 后按 Tab 补全命令",
                 "输入 '@server:protocol://path' 可显式引用 MCP resource",
                 "任务运行中按 ESC 取消当前任务",
-                "默认模式是 ReAct"
+                "普通任务自动选择 ReAct 或 Plan-and-Execute"
         );
     }
 
@@ -3316,7 +3316,7 @@ public class Main {
                 : info.skillsEnabled() + "/" + info.skillsTotal() + " skills";
         String ready = "Model " + model + " (" + provider + ")";
         String capabilities = "ReAct · Plan · MCP · Browser · Image · Tools · Memory · RAG";
-        String state = mcp + " · " + skills + " · ReAct";
+        String state = mcp + " · " + skills + " · Auto Route";
         List<String> lines = new ArrayList<>(List.of(
                 "   " + AnsiStyle.section("██████████") + "    " + AnsiStyle.emphasis("CodeAgent") + "  " + AnsiStyle.subtle("v" + VERSION),
                 "   " + AnsiStyle.section("██") + "            " + AnsiStyle.subtle(ready),

@@ -10,7 +10,7 @@ Agent 能放心改代码的前提不是“永远不犯错”，而是“改坏�
 2. turn 结束后再保存一次快照，用于对比和审计。
 3. 用户可以恢复到最近某个 turn 的 pre-turn 状态。
 4. 快照仓库与用户项目 `.git` 完全隔离，不写用户提交历史。
-5. 快照与恢复链路同时覆盖 ReAct、Plan、Team、TUI。
+5. 快照与恢复链路同时覆盖 ReAct、统一 Plan 路径和 TUI。
 
 ## MVP 范围
 
@@ -87,14 +87,7 @@ postTurnSnapshot(turnId)
 - 计划生成前或用户确认执行前做 pre-turn，需要落地时二选一并写清理由
 - 所有 DAG task 完成后做 post-turn
 - 不要每个 task 都自动快照，避免快照噪声过大
-
-#### Multi-Agent
-
-以整个 `/team <任务>` 为一个 turn：
-
-- Orchestrator 执行前做 pre-turn
-- 所有步骤完成后做 post-turn
-- Worker 内部不要额外快照
+- 多 Agent 协作已并入这条统一 Plan 路径，不再存在独立 `/team` turn
 
 #### TUI
 
@@ -228,8 +221,7 @@ revert_turn
 ### Day 5：运行时接入
 
 - [x] ReAct 普通输入接入 pre/post snapshot
-- [x] `/plan <任务>` 接入 turn 级快照
-- [x] `/team <任务>` 接入 turn 级快照
+- [x] 统一的 `/plan <任务>`（含多 Agent 协作）接入 turn 级快照
 - [x] TUI `TuiSessionController` 接入同一 wrapper
 - [x] 快照失败不影响 Agent 主流程
 
@@ -289,4 +281,4 @@ mvn -q clean package -DskipTests
 - `/restore 1` 能恢复最近 turn 开始前的工作区文件。
 - 用户项目 `.git` 不被写入、不被 reset、不被 checkout。
 - `maxSnapshots` 对列表/定位上限生效；历史压缩留作后续增强。
-- ReAct / Plan / Team / TUI 四条入口行为一致。
+- ReAct / Plan 顶层 Turn 与 TUI 入口行为一致。

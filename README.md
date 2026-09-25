@@ -65,8 +65,8 @@ mvn test -DskipTests=false
 
 ### 第四期：RAG 检索 + 代码库理解
 
-- 代码向量化（Embedding），支持本地 Ollama 和远程 API
-- SQLite 持久化 + 余弦相似度语义检索
+- JAR 内置量化 BGE Embedding（默认离线、进程内），远程 API 仅在项目级显式授权后启用
+- SQLite v2 双 FTS、符号/关系与 BLOB 向量分层持久化；语义层失败时自动降级
 - 代码分块（文件/类/方法粒度）与 AST 解析
 - 代码关系图谱（extends/implements/imports/calls/contains）
 - 新增 `/index`、`/search`、`/graph` CLI 命令
@@ -342,7 +342,7 @@ Tips for getting started:
 
 - 🔍 代码库实时搜索 + RAG 语义辅助（精确定位优先 glob/grep/read，自然语言模糊查询再 search_code）
 - 🕸️ 代码关系图谱（类继承、接口实现、方法调用）
-- 📡 本地 Ollama Embedding + 远程 API 可配置
+- 📡 进程内本地 BGE Embedding + 经显式授权的远程 API
 - 🗃️ SQLite 向量存储与持久化
 
 ### 第五期
@@ -574,7 +574,7 @@ OAuth 和 `sampling/createMessage` 当前未实现；远程 server 需要鉴权�
 # 编译（默认跳过测试）
 mvn clean package
 
-# 运行（需要本地 Ollama 已启动且拉取了 nomic-embed-text；grep_code 会优先使用本机 ripgrep，未安装时自动回退）
+# 运行（本地 Embedding 已随 JAR 分发；grep_code 会优先使用本机 ripgrep，未安装时自动回退）
 java -jar target/codeagent-1.0-SNAPSHOT.jar
 ```
 
@@ -731,9 +731,10 @@ I
 - `/init` - 生成精简项目级记忆 `CODEAGENT.md`；已存在时不覆盖，`/init --force` 可重写
 - `/export` - 导出当前 ReAct 会话对话记录为 Markdown（包含完整 system prompt），写入 `~/.codeagent/exports/session-*.md`
 - `/better-harness [quick|normal] [--inline]` - 审查当前项目的 AI 编码工作流；默认在 `.codeagent/better-harness/` 生成 Markdown、HTML 和 findings JSON
-- `/index [路径]` - 索引代码库（默认当前目录）
+- `/index [路径]` 或 `/index refresh|rebuild|status|clear` - 增量刷新、全量重建、查看或清除 v2 索引
 - `/search <查询>` - 语义检索代码（RAG 辅助路径）
 - `/graph <类名>` - 查看代码关系图谱
+- `/config embedding status|local|off|remote <glm|jina|openai-compatible>|revoke` - 配置语义增强；远程模式首次使用会请求项目级授权
 - `/clear` - 清空当前 ReAct 对话历史、Session Memory 预计算状态、待注入 Skill 上下文和历史中的检索记忆注入；长期记忆条目保留
 - `/exit` / `/quit` - 退出程序
 
@@ -794,7 +795,7 @@ Tips for getting started:
 - JLine 4（终端交互、Status、输入 widgets）
 - SQLite（向量与图谱持久化）
 - JavaParser（AST 分析）
-- Ollama（本地 Embedding）
+- LangChain4j + ONNX Runtime（进程内量化 BGE Embedding）
 
 ## 项目结构
 

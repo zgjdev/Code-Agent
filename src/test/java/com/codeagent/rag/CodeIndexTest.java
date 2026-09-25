@@ -56,7 +56,7 @@ class CodeIndexTest {
 
     private static final class FakeEmbeddingClient extends EmbeddingClient {
         private FakeEmbeddingClient() {
-            super("test", "test", "http://localhost", "");
+            super("zhipu", "test", "http://localhost", "test-key");
         }
 
         @Override

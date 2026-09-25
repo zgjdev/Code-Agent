@@ -58,6 +58,41 @@ public final class SearchResultFormatter {
         return sb.toString().trim();
     }
 
+    public static String formatForCli(String query, RetrievalResponse response) {
+        StringBuilder output = new StringBuilder();
+        output.append("📋 找到 ").append(response.hits().size()).append(" 个相关代码块:\n\n");
+        appendHits(output, response);
+        appendDiagnostics(output, response);
+        return output.toString().trim();
+    }
+
+    public static String formatForTool(String query, RetrievalResponse response) {
+        StringBuilder output = new StringBuilder("检索结果:\n");
+        appendHits(output, response);
+        appendDiagnostics(output, response);
+        return output.toString().trim();
+    }
+
+    private static void appendHits(StringBuilder output, RetrievalResponse response) {
+        for (int i = 0; i < response.hits().size(); i++) {
+            RetrievalHit hit = response.hits().get(i);
+            output.append(i + 1).append(". [").append(hit.chunkType()).append(":")
+                    .append(hit.symbol()).append("] score=")
+                    .append(String.format("%.5f", hit.score())).append(" ")
+                    .append(hit.filePath()).append(":").append(hit.startLine())
+                    .append("-").append(hit.endLine()).append(" sources=")
+                    .append(hit.sources()).append("\n   ")
+                    .append(buildSnippet(hit.content(), 240).replace("\n", "\n   ")).append("\n\n");
+        }
+    }
+
+    private static void appendDiagnostics(StringBuilder output, RetrievalResponse response) {
+        response.repositoryMap().ifPresent(map -> output.append("repository_map:\n")
+                .append(map.text()).append("\n"));
+        output.append("partial: ").append(response.partial()).append("\n")
+                .append("degraded: ").append(response.diagnostics().degradedReasonCodes());
+    }
+
     static String buildSummary(String query, List<VectorStore.SearchResult> results) {
         if (results.isEmpty()) {
             return "搜索摘要:\n- 没有命中可用代码块。";

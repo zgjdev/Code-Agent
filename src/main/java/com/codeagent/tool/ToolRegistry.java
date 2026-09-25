@@ -12,9 +12,20 @@ import com.codeagent.context.ContextProfile;
 import com.codeagent.lsp.LspDiagnosticReport;
 import com.codeagent.lsp.LspManager;
 import com.codeagent.mcp.protocol.McpToolDescriptor;
-import com.codeagent.rag.CodeRetriever;
+import com.codeagent.rag.CodeRetrievalService;
+import com.codeagent.rag.DefaultCodeRetrievalService;
+import com.codeagent.rag.RetrievalIntent;
+import com.codeagent.rag.RetrievalRequest;
+import com.codeagent.rag.SqliteRetrievalIndex;
 import com.codeagent.rag.SearchResultFormatter;
-import com.codeagent.rag.VectorStore;
+import com.codeagent.rag.embedding.EmbeddingResolution;
+import com.codeagent.rag.embedding.InProcessBgeEmbeddingProvider;
+import com.codeagent.search.CodeSearchRequest;
+import com.codeagent.search.CodeSearchResult;
+import com.codeagent.search.CodeSearchService;
+import com.codeagent.search.ContextLine;
+import com.codeagent.search.GrepMatch;
+import com.codeagent.search.RipgrepCodeSearchService;
 import com.codeagent.policy.AuditLog;
 import com.codeagent.policy.CommandGuard;
 import com.codeagent.policy.PathGuard;
@@ -104,6 +115,8 @@ public class ToolRegistry {
     private boolean sanitizeCommandEnvironment;
     private volatile String currentProvider = "";
     private volatile String currentModel = "";
+    private volatile CodeSearchService codeSearchService;
+    private volatile CodeRetrievalService codeRetrievalService;
 
     public ToolRegistry() {
         this(DEFAULT_COMMAND_TIMEOUT_SECONDS, DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS);
@@ -116,6 +129,7 @@ public class ToolRegistry {
     ToolRegistry(long commandTimeoutSeconds, long toolBatchTimeoutSeconds) {
         this.commandTimeoutSeconds = commandTimeoutSeconds;
         this.toolBatchTimeoutSeconds = toolBatchTimeoutSeconds;
+        this.codeSearchService = new RipgrepCodeSearchService(SEARCH_EXCLUDED_DIRS);
         // 注册内置工具
         registerFileTools();
         registerShellTools();
@@ -146,6 +160,36 @@ public class ToolRegistry {
      */
     public String getProjectPath() {
         return projectPath;
+    }
+
+    public void setCodeSearchService(CodeSearchService codeSearchService) {
+        this.codeSearchService = Objects.requireNonNull(codeSearchService, "codeSearchService");
+    }
+
+    public void setCodeRetrievalService(CodeRetrievalService codeRetrievalService) {
+        this.codeRetrievalService = Objects.requireNonNull(codeRetrievalService, "codeRetrievalService");
+    }
+
+    public CodeRetrievalService getCodeRetrievalService() {
+        CodeRetrievalService current = codeRetrievalService;
+        if (current != null) return current;
+        synchronized (this) {
+            if (codeRetrievalService == null) {
+                try {
+                    Path directory = Path.of(System.getProperty("codeagent.rag.dir",
+                            Path.of(System.getProperty("user.home"), ".codeagent", "rag").toString()));
+                    codeRetrievalService = new DefaultCodeRetrievalService(
+                            new SqliteRetrievalIndex(directory.resolve("codebase-v2.db"),
+                                    directory.resolve("codebase.db")),
+                            codeSearchService,
+                            new EmbeddingResolution(Optional.of(new InProcessBgeEmbeddingProvider()),
+                                    "local_embedding", false));
+                } catch (Exception e) {
+                    throw new IllegalStateException("Unable to initialize code retrieval", e);
+                }
+            }
+            return codeRetrievalService;
+        }
     }
 
     /**
@@ -463,7 +507,7 @@ public class ToolRegistry {
                 maxResults,
                 headLimit
         );
-        CodeSearchResult result = new RipgrepCodeSearchEngine(SEARCH_EXCLUDED_DIRS).search(request);
+        CodeSearchResult result = codeSearchService.search(request);
 
         if (!result.partialReason().isBlank() && result.matches().isEmpty()) {
             return "代码搜索失败: " + result.partialReason();
@@ -599,7 +643,8 @@ public class ToolRegistry {
                 "RAG 语义辅助检索代码库，根据自然语言描述查找相关代码块；精确符号/字符串定位请优先用 grep_code/glob_files/read_file；默认 top_k=5，可显式指定（上限 30）",
                 createParameters(
                         new Param("query", "string", "自然语言查询描述，例如'用户登录的实现'", true),
-                        new Param("top_k", "integer", "返回结果数量（默认 5，上限 30）", false)
+                        new Param("top_k", "integer", "返回结果数量（默认 5，上限 30）", false),
+                        new Param("intent", "string", "检索意图：chunks（默认）或 architecture", false)
                 ),
                 args -> {
                     String query = args.get("query");
@@ -611,21 +656,20 @@ public class ToolRegistry {
                     } catch (NumberFormatException ignored) {
                     }
                     topK = Math.max(1, Math.min(topK, 30));
+                    RetrievalIntent intent = "architecture".equalsIgnoreCase(args.get("intent"))
+                            ? RetrievalIntent.ARCHITECTURE
+                            : RetrievalIntent.CHUNKS;
 
-                    try (CodeRetriever retriever = new CodeRetriever(projectPath)) {
-                        var stats = retriever.getStats();
-                        if (stats.chunkCount() == 0) {
-                            return "代码库尚未索引，请先使用 /index 命令索引当前项目。";
-                        }
-
-                        List<VectorStore.SearchResult> results = retriever.hybridSearch(query, topK);
-                        if (results.isEmpty()) {
+                    try {
+                        var response = getCodeRetrievalService().search(new RetrievalRequest(
+                                pathGuard.getRootPath(), query, topK, DEFAULT_GREP_MAX_CHARS,
+                                true, intent));
+                        if (response.hits().isEmpty()) {
                             return "未找到与查询相关的代码。";
                         }
-
-                        return SearchResultFormatter.formatForTool(query, results);
+                        return SearchResultFormatter.formatForTool(query, response);
                     } catch (Exception e) {
-                        return "代码检索失败: " + e.getMessage();
+                        return "代码检索失败: " + e.getClass().getSimpleName();
                     }
                 }
         ));

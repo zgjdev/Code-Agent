@@ -7,6 +7,10 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -14,19 +18,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
- * 长期记忆 - 跨对话持久化的关键信息
+ * 长期记忆 - 跨对话持久化的关键信息。
  *
- * 职责：
- * 1. 持久化用户偏好、项目事实、关键决策等
- * 2. 支持关键词检索
- * 3. 在相同类型和作用域内，基于规范化内容近似匹配自动去重
- * 4. 定期持久化到磁盘
+ * <p>JSON 文件仍是唯一事实源；active/superseded 生命周期存放在 metadata 中。
+ * legacy 条目没有 status 时按 active 处理。</p>
  */
 public class LongTermMemory implements Memory {
     private static final Logger log = LoggerFactory.getLogger(LongTermMemory.class);
     private static final String STORAGE_DIR_PROPERTY = "codeagent.memory.dir";
     private static final String STORAGE_DIR_ENV = "CODEAGENT_MEMORY_DIR";
     private static final String STORAGE_FILE = "long_term_memory.json";
+    private static final String STATUS_ACTIVE = "active";
+    private static final String STATUS_SUPERSEDED = "superseded";
+
     private final Map<String, MemoryEntry> entries;
     private final AtomicInteger tokenCounter;
     private final ObjectMapper mapper;
@@ -42,32 +46,84 @@ public class LongTermMemory implements Memory {
         this.mapper = new ObjectMapper();
         this.mapper.enable(SerializationFeature.INDENT_OUTPUT);
 
-        // 确保存储目录存在
         File dir = storageDir;
         if (!dir.exists()) {
             dir.mkdirs();
         }
         this.storageFile = new File(dir, STORAGE_FILE);
-
-        // 启动时加载已有记忆
         loadFromDisk();
     }
 
     @Override
     public synchronized void store(MemoryEntry entry) {
-        // type + scope + project 共同限定去重域，避免不同项目或不同可见性的记忆互相误杀。
+        storeIfNovel(entry);
+    }
+
+    /**
+     * 存储一条 active 记忆；只对确定性完全等价内容做 no-op。
+     *
+     * @return true 表示内存中发生写入，false 表示命中 exact duplicate。
+     */
+    public synchronized boolean storeIfNovel(MemoryEntry entry) {
+        Objects.requireNonNull(entry, "entry");
         boolean duplicate = entries.values().stream()
+                .filter(LongTermMemory::isActive)
                 .anyMatch(existing -> MemoryDeduplicator.isDuplicate(existing, entry));
         if (duplicate) {
-            return;
+            return false;
         }
 
-        MemoryEntry previous = entries.put(entry.getId(), entry);
+        MemoryEntry normalized = withStatus(entry, STATUS_ACTIVE);
+        MemoryEntry previous = entries.put(normalized.getId(), normalized);
         if (previous != null) {
             tokenCounter.addAndGet(-previous.getTokenCount());
         }
-        tokenCounter.addAndGet(entry.getTokenCount());
+        tokenCounter.addAndGet(normalized.getTokenCount());
         saveToDisk();
+        return true;
+    }
+
+    /**
+     * 原子地让旧 active 记忆失效，并写入替代它的新 active 记忆。
+     *
+     * <p>任一校验或持久化失败都不会留下“新旧同时 active”的半更新内存状态。</p>
+     */
+    public synchronized boolean supersede(String targetId, MemoryEntry replacement) {
+        if (targetId == null || targetId.isBlank() || replacement == null) {
+            return false;
+        }
+        MemoryEntry existing = entries.get(targetId);
+        if (existing == null || !isActive(existing)
+                || !MemoryDeduplicator.sameDomain(existing, replacement)
+                || targetId.equals(replacement.getId())
+                || entries.containsKey(replacement.getId())) {
+            return false;
+        }
+
+        Map<String, String> oldMetadata = new HashMap<>(existing.getMetadata());
+        oldMetadata.put("status", STATUS_SUPERSEDED);
+        oldMetadata.put("supersededBy", replacement.getId());
+        MemoryEntry superseded = copyWithMetadata(existing, oldMetadata);
+
+        Map<String, String> newMetadata = new HashMap<>(replacement.getMetadata());
+        newMetadata.put("status", STATUS_ACTIVE);
+        newMetadata.put("supersedes", targetId);
+        MemoryEntry activeReplacement = copyWithMetadata(replacement, newMetadata);
+
+        int tokenSnapshot = tokenCounter.get();
+        entries.put(targetId, superseded);
+        entries.put(activeReplacement.getId(), activeReplacement);
+        tokenCounter.addAndGet(activeReplacement.getTokenCount());
+        try {
+            saveToDiskOrThrow();
+            return true;
+        } catch (IOException e) {
+            entries.put(targetId, existing);
+            entries.remove(activeReplacement.getId());
+            tokenCounter.set(tokenSnapshot);
+            log.warn("长期记忆更新持久化失败，已回滚: {}", e.getMessage(), e);
+            return false;
+        }
     }
 
     @Override
@@ -80,10 +136,11 @@ public class LongTermMemory implements Memory {
         return search(query, limit, null);
     }
 
+    /** legacy 词法搜索入口；只返回当前仍 active 的可见记忆。 */
     public List<MemoryEntry> search(String query, int limit, String projectKey) {
         Set<String> queryTokens = MemoryQueryTokenizer.tokenize(query);
-
         return entries.values().stream()
+                .filter(LongTermMemory::isActive)
                 .filter(entry -> isVisibleInProject(entry, projectKey))
                 .filter(entry -> {
                     if (MemoryQueryTokenizer.matches(entry.getContent(), queryTokens)) {
@@ -101,8 +158,17 @@ public class LongTermMemory implements Memory {
         return new ArrayList<>(entries.values());
     }
 
+    /** 保留历史可见性语义：包括 superseded 条目，供 list/audit 使用。 */
     public List<MemoryEntry> getAll(String projectKey) {
         return entries.values().stream()
+                .filter(entry -> isVisibleInProject(entry, projectKey))
+                .collect(Collectors.toList());
+    }
+
+    /** 正常检索和写入关系解析只使用 active 记忆。 */
+    public List<MemoryEntry> getActiveVisible(String projectKey) {
+        return entries.values().stream()
+                .filter(LongTermMemory::isActive)
                 .filter(entry -> isVisibleInProject(entry, projectKey))
                 .collect(Collectors.toList());
     }
@@ -135,9 +201,6 @@ public class LongTermMemory implements Memory {
         return entries.size();
     }
 
-    /**
-     * 按类型筛选记忆
-     */
     public List<MemoryEntry> getByType(MemoryEntry.MemoryType type) {
         return entries.values().stream()
                 .filter(entry -> entry.getType() == type)
@@ -161,17 +224,55 @@ public class LongTermMemory implements Memory {
         return "global";
     }
 
-    /**
-     * 持久化到磁盘
-     */
+    public static boolean isActive(MemoryEntry entry) {
+        if (entry == null) {
+            return false;
+        }
+        String status = entry.getMetadata().get("status");
+        return status == null || status.isBlank() || STATUS_ACTIVE.equalsIgnoreCase(status);
+    }
+
+    public static String statusOf(MemoryEntry entry) {
+        return isActive(entry) ? STATUS_ACTIVE : STATUS_SUPERSEDED;
+    }
+
+    private static MemoryEntry withStatus(MemoryEntry entry, String status) {
+        Map<String, String> metadata = new HashMap<>(entry.getMetadata());
+        metadata.put("status", status);
+        return copyWithMetadata(entry, metadata);
+    }
+
+    private static MemoryEntry copyWithMetadata(MemoryEntry entry, Map<String, String> metadata) {
+        return new MemoryEntry(
+                entry.getId(),
+                entry.getContent(),
+                entry.getType(),
+                entry.getTimestamp(),
+                Map.copyOf(metadata),
+                entry.getTokenCount());
+    }
+
     private void saveToDisk() {
         try {
-            List<Map<String, Object>> dataList = entries.values().stream()
-                    .map(this::entryToMap)
-                    .collect(Collectors.toList());
-            mapper.writeValue(storageFile, dataList);
+            saveToDiskOrThrow();
         } catch (IOException e) {
             log.warn("长期记忆持久化失败: {}", e.getMessage(), e);
+        }
+    }
+
+    private void saveToDiskOrThrow() throws IOException {
+        List<Map<String, Object>> dataList = entries.values().stream()
+                .sorted(Comparator.comparing(MemoryEntry::getId))
+                .map(this::entryToMap)
+                .collect(Collectors.toList());
+        Path target = storageFile.toPath();
+        Path temporary = target.resolveSibling(target.getFileName() + ".tmp");
+        mapper.writeValue(temporary.toFile(), dataList);
+        try {
+            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 
@@ -186,9 +287,6 @@ public class LongTermMemory implements Memory {
         return new File(new File(System.getProperty("user.home"), ".codeagent"), "memory");
     }
 
-    /**
-     * 从磁盘加载
-     */
     @SuppressWarnings("unchecked")
     private void loadFromDisk() {
         if (!storageFile.exists()) return;
@@ -235,22 +333,22 @@ public class LongTermMemory implements Memory {
             if (metaObj instanceof Map) {
                 ((Map<String, Object>) metaObj).forEach((k, v) -> metadata.put(k, String.valueOf(v)));
             }
-            int tokenCount = map.get("tokenCount") instanceof Number n ? n.intValue() : MemoryEntry.estimateTokens(content);
+            int tokenCount = map.get("tokenCount") instanceof Number n
+                    ? n.intValue() : MemoryEntry.estimateTokens(content);
             return new MemoryEntry(id, content, type, timestamp, metadata, tokenCount);
         } catch (Exception e) {
             return null;
         }
     }
 
-    /**
-     * 生成记忆状态摘要
-     */
     public String getStatusSummary() {
         Map<MemoryEntry.MemoryType, Long> typeCounts = entries.values().stream()
                 .collect(Collectors.groupingBy(MemoryEntry::getType, Collectors.counting()));
+        long active = entries.values().stream().filter(LongTermMemory::isActive).count();
+        long superseded = entries.size() - active;
 
-        return String.format("长期记忆: %d条 / %d tokens (事实: %d, 摘要: %d, 工具结果: %d)",
-                entries.size(), tokenCounter.get(),
+        return String.format("长期记忆: %d条 / %d tokens (active: %d, superseded: %d, 事实: %d, 摘要: %d, 工具结果: %d)",
+                entries.size(), tokenCounter.get(), active, superseded,
                 typeCounts.getOrDefault(MemoryEntry.MemoryType.FACT, 0L),
                 typeCounts.getOrDefault(MemoryEntry.MemoryType.SUMMARY, 0L),
                 typeCounts.getOrDefault(MemoryEntry.MemoryType.TOOL_RESULT, 0L));

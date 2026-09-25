@@ -546,6 +546,19 @@ class ToolRegistryTest {
         assertTrue(result.contains("长期记忆(global)"));
     }
 
+    @Test
+    void saveMemoryToolReturnsResolvedWriteOutcome() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setMemoryWriter((fact, scope) ->
+                "💾 已更新长期记忆(" + scope + "): " + fact);
+
+        String result = registry.executeTool(
+                "save_memory",
+                "{\"fact\":\"用户偏好使用 Python\",\"scope\":\"global\"}");
+
+        assertEquals("💾 已更新长期记忆(global): 用户偏好使用 Python", result);
+    }
+
     private static void restoreSystemProperty(String key, String previous) {
         if (previous == null) {
             System.clearProperty(key);

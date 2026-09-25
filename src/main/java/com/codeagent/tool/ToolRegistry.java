@@ -105,7 +105,7 @@ public class ToolRegistry {
     private ContextProfile contextProfile = ContextProfile.from(null);
     private BrowserGuard browserGuard;
     private BrowserConnector browserConnector;
-    private BiConsumer<String, String> memorySaver;
+    private MemoryWriter memoryWriter;
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
@@ -238,11 +238,21 @@ public class ToolRegistry {
     }
 
     public void setMemorySaver(Consumer<String> memorySaver) {
-        this.memorySaver = memorySaver == null ? null : (fact, scope) -> memorySaver.accept(fact);
+        this.memoryWriter = memorySaver == null ? null : (fact, scope) -> {
+            memorySaver.accept(fact);
+            return "💾 已保存到长期记忆(" + scope + "): " + fact;
+        };
     }
 
     public void setScopedMemorySaver(BiConsumer<String, String> memorySaver) {
-        this.memorySaver = memorySaver;
+        this.memoryWriter = memorySaver == null ? null : (fact, scope) -> {
+            memorySaver.accept(fact, scope);
+            return "💾 已保存到长期记忆(" + scope + "): " + fact;
+        };
+    }
+
+    public void setMemoryWriter(MemoryWriter memoryWriter) {
+        this.memoryWriter = memoryWriter;
     }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
@@ -770,9 +780,9 @@ public class ToolRegistry {
     private void registerMemoryTools() {
         tools.put("save_memory", new Tool(
                 "save_memory",
-                "当且仅当用户明确说“记一下”“记住”“以后记得”或要求保存长期偏好/稳定事实时调用，把精炼事实写入长期记忆；scope 默认 project，跨项目偏好才用 global；不要保存一次性任务请求、临时文件名或模型猜测。",
+                "当且仅当用户明确要求记住、保存或更新长期偏好/稳定事实时调用。只提交精炼后的当前事实；系统会自动判断是新建、同义重复还是替代旧记忆。scope 默认 project，跨项目偏好才用 global；不要保存一次性任务、临时文件名或模型猜测。",
                 createParameters(
-                        new Param("fact", "string", "要长期保存的稳定事实或用户偏好，必须精炼、可跨会话复用", true),
+                        new Param("fact", "string", "要长期保存的当前稳定事实或偏好；如果用户更新旧偏好，填写更新后的事实", true),
                         new Param("scope", "string", "记忆作用域：project 或 global。默认 project；跨项目长期偏好才用 global", false)
                 ),
                 args -> {
@@ -780,13 +790,15 @@ public class ToolRegistry {
                     if (fact == null || fact.isBlank()) {
                         return "保存长期记忆失败: fact 不能为空";
                     }
-                    if (memorySaver == null) {
+                    if (memoryWriter == null) {
                         return "保存长期记忆失败: 记忆保存器未初始化";
                     }
                     String normalized = fact.trim();
                     String scope = "global".equalsIgnoreCase(args.get("scope")) ? "global" : "project";
-                    memorySaver.accept(normalized, scope);
-                    return "💾 已保存到长期记忆(" + scope + "): " + normalized;
+                    String result = memoryWriter.write(normalized, scope);
+                    return result == null || result.isBlank()
+                            ? "💾 已处理长期记忆(" + scope + "): " + normalized
+                            : result;
                 }
         ));
     }
@@ -1562,6 +1574,11 @@ public class ToolRegistry {
     }
 
     // 记录定义
+    @FunctionalInterface
+    public interface MemoryWriter {
+        String write(String fact, String scope);
+    }
+
     private record Param(String name, String type, String description, boolean required) {}
 
     public record Tool(String name, String description, JsonNode parameters, ToolExecutor executor) {}

@@ -192,7 +192,7 @@ CODEAGENT_SESSION_RESUME=off
 - `CODEAGENT.md` 或 `.codeagent/CODEAGENT.md`：可提交的团队规则
 - `CODEAGENT.local.md` 或 `.codeagent/CODEAGENT.local.md`：本地覆盖
 
-长期记忆不会自动从普通对话中提取。只有用户明确要求记住，或执行 `/save` 时才会保存。
+长期记忆不会自动从普通对话中提取。只有用户明确要求记住/更新，或执行 `/save` 时才会写入。检索使用词法 + 本地 BGE 混合召回；同义重复会 no-op，用户明确改变旧偏好/事实时旧记忆会保留为 superseded 历史，新事实成为 active。
 
 ```text
 /memory

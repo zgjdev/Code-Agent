@@ -153,6 +153,7 @@ sequenceDiagram
 - MCP 启动默认最多等待 8 秒，超时 server 保持 STARTING 并后台继续；用 /mcp 查看状态。
 - /clear 只清空当前发送视图、session memory 预计算状态和 Skill buffer，长期记忆及 raw ledger 保留；/compact 手动执行完整摘要压缩。
 - RAG 默认使用随 JAR 分发的进程内 BGE；词法 FTS、符号和关系召回不依赖 Embedding。远程 Embedding 仅在当前项目/provider/model/endpoint/policy-version 匹配的显式授权后启用，拒绝或故障必须降级而不能中止检索。
+- 长期记忆的事实源仍是 `~/.codeagent/memory/long_term_memory.json`；普通检索只读取当前 scope 可见的 active 记忆，使用词法 + 进程内 BGE 混合排名，embedding 只做进程内派生缓存且不得发送到远端。显式 `save_memory` / `/save` 写入统一解析 CREATE / DUPLICATE / SUPERSEDE；embedding 只召回候选，SUPERSEDE 必须由无工具关系分类器返回当前 `submittedUserInput` 的原文 evidence，失败时不得让旧记忆失效。
 - DeepSeek/Kimi thinking 的 reasoning_content 必须回传下一轮；DeepSeek 当前不发送图片 block。usage 未经真实契约验证的 provider 必须保持 trusted=false 并使用本地完整估算。
 - Side-Git snapshot 独立于系统 git；revert 前先创建 pre-restore snapshot，并纳入 HITL/AuditLog。
 - raw session JSONL 可能含敏感内容：用户目录权限按平台收紧，禁止提交、复制或在报告中泄露正文、工具参数、结果、图片 payload、Memory 正文和 secret。
@@ -190,7 +191,7 @@ TUI：mvn test -Pphase16-smoke
 
 ## 10. 协作准则
 
-使用中文沟通；大规模重构先进入 Plan Mode；优先最小化、可回滚的改动；遇到不确定的协议或安全边界先停下来核对代码和测试。长期记忆只在用户明确要求或执行 /save 时写入，不自动提取事实。形成稳定协作规则时更新本文件，具体实现细节补充到 docs/agents-reference.md。
+使用中文沟通；大规模重构先进入 Plan Mode；优先最小化、可回滚的改动；遇到不确定的协议或安全边界先停下来核对代码和测试。长期记忆只在用户明确要求或执行 /save 时写入，不自动提取事实；同义重复与明确更新必须走统一写入关系解析，不能仅凭 embedding 相似度覆盖旧事实。形成稳定协作规则时更新本文件，具体实现细节补充到 docs/agents-reference.md。
 
 ### 分支、提交与文档约束
 

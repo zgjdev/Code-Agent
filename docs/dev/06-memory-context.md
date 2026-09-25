@@ -181,14 +181,14 @@ flowchart TB
 
 ## 1.4 边界：本模块不负责什么
 
-- **不负责代码库检索（RAG）。** `memory` 包里没有任何 `VectorStore` / `EmbeddingClient` / 向量库引用，长期记忆是「JSON 文件 + jieba 关键词检索」。代码库的语义检索是另一套系统（见 `04-code-rag-graph.md`）。为什么记忆系统不选向量，见 10.2。
+- **不负责代码库检索（RAG）。** 长期记忆仍不复用代码 RAG 的 `VectorStore` / SQLite 索引；但检索层现在复用 `rag.embedding.EmbeddingProvider` 与随 JAR 分发的 `InProcessBgeEmbeddingProvider` 作为本地语义信号。长期记忆 JSON 仍是唯一事实源，向量只做进程内派生缓存。代码库检索仍是另一套生命周期（见 `04-code-rag-graph.md`）。
 - **不负责单轮 ReAct 循环本身。** 「什么时候该继续调工具、什么时候该结束」是 `01-react-agent.md` 的话题；本文只讲**循环里与上下文体积有关的那一步**（压缩判断）。
 - **不负责对话协议解析。** 消息怎么序列化成 provider 的 JSON，在 `llm` 包里。
 - **不做自动事实抽取。** 长期记忆只在显式入口写入（3.4）。
 
 ## 1.5 容易混淆的几组东西
 
-**长期记忆 vs 代码库 RAG。** 两者都是「检索后塞进 prompt」，但数据源、生命周期、存储完全不同：长期记忆存的是「用户偏好、项目约定」这类少量稳定事实，存在用户目录的 JSON 里，跨会话；RAG 存的是整个代码库的切片，重建索引时刷新。两者代码上零耦合。
+**长期记忆 vs 代码库 RAG。** 两者都是「检索后塞进 prompt」，数据源、生命周期和事实存储仍然不同：长期记忆存少量用户偏好/项目约定，JSON 跨会话持久化；RAG 存代码切片并维护可重建索引。两者只共享 `EmbeddingProvider` / 本地 BGE 这一基础能力，不共享 `VectorStore`、SQLite 表或索引生命周期。
 
 **长期记忆 vs `CODEAGENT.md`。** 长期记忆是「Agent 运行时攒下来的」，通过 `/save`、`save_memory`、启发式写入，颗粒是「一条事实」；`CODEAGENT.md` 是「人写给 Agent 的」，跟着仓库走、能进 Git、团队共享，颗粒是「一篇文档」。**两者注入位置不同**：`CODEAGENT.md` 进 system prompt 的 `## Project Context`（`prompt/PromptAssembler.java:38`），长期记忆追加在本轮 user 消息末尾（`agent/Agent.java:233-235`）。区别的由来见 10.3，不能互相替代。
 
@@ -229,26 +229,59 @@ flowchart TB
 
 ## 2.3 第三层：`LongTermMemory` 跨会话事实
 
-存的是「用户偏好、项目约定」这类**跨会话仍然成立**的少量事实。
+存的是「用户偏好、项目约定、稳定决策」这类**跨会话仍然成立**的少量事实。
 
-- 存储：内存里是 `ConcurrentHashMap`，token 计数是 `AtomicInteger`（`memory/LongTermMemory.java:30-31`）。
-- 写入：`store` 是 `synchronized`，流程是「去重 → put → 计数 → 立刻全量写盘」（`memory/LongTermMemory.java:56-71`）。
-- 持久化：JSON 数组文件，全量重写（见 6.1）。
-- 可见性：靠 `scope`（`project` / `global`）过滤（`memory/LongTermMemory.java:147-154`）。
-- 检索：jieba 关键词子串匹配（`memory/LongTermMemory.java:83-97`）。
+### 存储与作用域
 
-**去重是这套设计里最细致的一块。** `MemoryDeduplicator` 的定位写得很清楚：它**不是冲突消解器**（`memory/MemoryDeduplicator.java:7-13`）。规则是：
+- JSON 文件仍是唯一事实源；进程内由 `LongTermMemory` 维护 `MemoryEntry`。
+- `scope=global` 对所有项目可见；`scope=project` 还要匹配规范化 workspace 路径。
+- legacy 条目没有 `metadata.status` 时按 `active` 处理。
+- `/memory list` 保留 active 与 superseded 历史供审计；正常自动检索与 `/memory search` 只使用 active 条目。
 
-1. **去重域** = 类型 + 作用域；如果作用域是 `project`，还要求项目路径完全相等（`memory/MemoryDeduplicator.java:41-60`）。所以同一句话在 `global` 和 `project` 下会各存一份——这是**有意的**，不是 bug。
-2. 域内先做规范化：Unicode NFKC、转小写、丢掉普通标点空白，但**保留有意义的符号**（`+`、`#`、`/`、`@`、货币符号、emoji 等），因为 `C++` 和 `C` 不能混为一谈（`memory/MemoryDeduplicator.java:75-115`）。
-3. 规范化后完全相同 → 判重。
-4. 否则允许一种**保守的近似**：一侧只比另一侧多出「的/地/得/是」这类中文语法助词，且内容足够长、覆盖率足够高，才算重复（`memory/MemoryDeduplicator.java:129-154`）。数字、代码符号或实词不同则**继续保留两份**，交给用户自己审计删除。
+### 检索：词法 + 本地 BGE + 有界近因加成
 
-这个边界是刻意收窄的：宁可留两条冗余，也不要误删一条「刚被更新过、结论相反」的事实。
+`MemoryRetriever` 不再是纯 jieba 子串检索，而是：
 
-**一个实际后果：判重发生在写盘之前。** 重复条目会直接 `return`，连磁盘都不碰（`memory/LongTermMemory.java:59-63`）——这一点对「为什么我保存了但文件没变」的排查很关键。
+```text
+scope/status 过滤
+    ↓
+lexical score
++
+local BGE semantic cosine
+    ↓
+0.45 * lexical + 0.55 * semantic
+    ↓
+最多 +0.05 的 recency boost
+    ↓
+稳定排序 + Token 预算打包
+```
 
-**另一个实际后果：从磁盘加载时不判重。** `loadFromDisk` 只做 `entries.put`，不调用 `MemoryDeduplicator`（`memory/LongTermMemory.java:193-209`）。如果文件被手工编辑出重复条目，加载后它们会共存，直到下一次写入触发判重（但下次写入判重时，重复项已经被加载进内存了，`store` 的去重只针对新写入的条目）。这是**读路径与写路径的不对称**，属于实现边界。
+普通语义召回阈值为 `0.65`。本地 embedding 不可用时回退 lexical-only，不阻断 ReAct / Plan。MemoryEntry 向量由 `MemoryEmbeddingCache` 以 `id + content hash + embeddingSpaceId` 做进程内懒缓存；query 每次检索重新 embedding，向量不写回 JSON。
+
+时间不再直接乘一个“大幅惩罚旧事实”的衰减因子，而只提供小幅近因加成：
+
+```text
+recencySignal = exp(-ln(2) * ageDays / 30)
+recencyBoost  = 0.05 * recencySignal
+finalScore    = hybridRelevance + recencyBoost
+```
+
+因此 30 天后近因加成减半，但高度相关的旧 active 事实不会仅仅因为年龄被淘汰。事实是否仍有效由 active/superseded 生命周期决定，而不是由时间决定。
+
+### 写入：统一 CREATE / DUPLICATE / SUPERSEDE
+
+`save_memory` 与 `/save` 最终都进入 `MemoryWriteResolver`。写入不再依赖旧的“中文助词差异”近似去重：
+
+1. 先在同 type/scope/project 域内做确定性 canonical equality fast-path：NFKC、大小写、空白与普通句读归一；`C++`、版本号、URL 等有意义符号仍保留。
+2. 若不是显而易见的 exact duplicate，则只在同域 active memory 中用 lexical + 本地 embedding 找 Top-K 候选。embedding **只负责候选召回**，不能用 cosine 阈值直接删除或覆盖记忆。
+3. `MemoryRelationClassifier` 复用当前 `LlmClient` 做一次**无工具**严格 JSON 分类：
+   - `CREATE`：新事实/补充事实；
+   - `DUPLICATE`：同一稳定事实的同义表达；
+   - `SUPERSEDE`：用户明确说旧事实已改变、失效或应替换。
+4. `SUPERSEDE` 必须带 evidence，且 evidence 必须是**当前顶层 submittedUserInput 的原文子串**。分类器异常、非法 JSON、target 不存在或 evidence 不合法，都不能让旧事实失效。
+5. supersede 成功后旧条目写 `status=superseded` / `supersededBy=<new-id>`，新条目保持 `status=active` 并记录 `supersedes=<old-id>`。多记录持久化失败时回滚内存修改，旧事实继续 active。
+
+这个边界把“同义去重”和“事实更新”统一成一次写入关系解析，同时保留一个零歧义的确定性 fast-path，避免所有保存都额外调用 LLM。
 
 ## 2.4 第四层：`CODEAGENT.md` 项目记忆
 
@@ -853,7 +886,7 @@ sequenceDiagram
 这个场景要记住两点：
 
 1. **写入不发生在当前这一轮请求里**。`save_memory` 是模型在已经收到本轮请求之后才调用的工具，所以它的效果对**当前这条请求**不可见。
-2. **写进去 ≠ 一定召得回**。检索是关键词+时间衰减的启发式，事实正文和后续查询没有共同词时分数为 0，不会注入。用户会以为「我明明记住了」，实际是**检索没命中**。这是关键词方案的固有弱点（10.2）。
+2. **写进去 ≠ 一定召得回**。当前检索同时使用词法与本地语义信号，并有语义最低阈值；如果查询与事实在两种信号上都不够相关，仍不会注入。这是相关性过滤的有意边界，而不再是“没有共同关键词就必然漏召回”。
 
 想立即验证保存是否成功，用 `/memory list` 或 `/memory search 中文`（7.3）。
 
@@ -912,15 +945,15 @@ sequenceDiagram
 | 图片 token 估算 | 以为按分辨率 | 从 base64 长度反推字节数再除以除数，并用**上下限夹取**；无 base64 时取固定值 | `memory/TokenBudget.java:184-190` |
 | `TokenBudget` 的可用预算 | 以为它就是压缩阈值 | 是**另一个数字**（窗口减三个固定预留），且**不驱动压缩** | `memory/TokenBudget.java:58-60` |
 | `isWithinBudget` | 以为它在主循环里守着预算 | **无生产调用方** | `memory/TokenBudget.java:65-68` |
-| 长期记忆判重 | 以为只按正文相等 | 去重域 = 类型 + 作用域（project 还要路径相等）；域内先 NFKC/大小写/标点归一，再容忍「只多出中文语法助词」的近似；数字/代码符号/实词不同则保留两份 | `memory/MemoryDeduplicator.java:34-60`、`129-154` |
+| 长期记忆写入关系 | 以为仍靠“的/地/得/是”近似去重 | `MemoryDeduplicator` 只保留同域 canonical exact-equivalence fast-path；真正同义重复/事实替换由 `MemoryWriteResolver` 候选召回 + 无工具 `MemoryRelationClassifier` 判 CREATE / DUPLICATE / SUPERSEDE | `memory/MemoryDeduplicator.java`；`memory/MemoryWriteResolver.java`；`memory/MemoryRelationClassifier.java` |
 | 判重与写盘 | 以为每次 store 都会写盘 | **判重命中会直接 return，不写盘** | `memory/LongTermMemory.java:59-63` |
 | 从磁盘加载 | 以为加载也会判重 | `loadFromDisk` 只做 `put` + 计数，**不判重**；读写路径不对称 | `memory/LongTermMemory.java:193-209` |
 | 长期记录 tokenCount | 以为加载时沿用保存值 | 缺 `tokenCount` 时回退为 `estimateTokens(content)` | `memory/LongTermMemory.java:238` |
 | 切换模型 / profile | 以为只更新配置 | `applyContextProfile` **重建一个新的 `TokenBudget`**，累计 usage 统计被清零 | `memory/MemoryManager.java:53-56` |
-| 检索排序 | 以为 CLI 搜索和自动注入同序 | `/memory search` 走 `LongTermMemory.search`（集合迭代顺序 + 截断），**不使用**相关度与时间衰减 | `memory/LongTermMemory.java:83-97`；`cli/Main.java:626-636` |
-| 时间衰减 | 以为老记忆会一直掉分 | 有**下限**，降到下限后不再下降 | `memory/MemoryRetriever.java:105-108` |
-| 注入预算裁剪 | 以为会「跳过放不下的那条继续试」 | 是**遇到第一条放不下的就整体停止**，后续小条目也不再考虑 | `memory/MemoryRetriever.java:68-69` |
-| `ScoredEntry.fromShortTerm` | 以为它区分短期/长期来源 | **恒为 `false`**，是重构残留字段 | `memory/MemoryRetriever.java:45`、`113` |
+| 检索排序 | 以为 CLI 搜索和自动注入仍是两套逻辑 | `/memory search` 与自动注入都委托 `MemoryRetriever`，共享 lexical + local semantic + recency 排名；普通检索只返回 active 且当前 scope 可见记忆 | `memory/MemoryManager.java`；`memory/MemoryRetriever.java` |
+| 时间衰减 | 以为时间会直接让旧事实失效 | 时间现在只提供最大 0.05 的指数型 recency boost，30 天半衰期；事实有效性由 active/superseded 决定 | `memory/MemoryRetriever.java`；`memory/LongTermMemory.java` |
+| 注入预算裁剪 | 以为第一条放不下就停止 | 已改为跳过超预算条目并继续尝试后续较短候选，最终仍保持相关度排序顺序 | `memory/MemoryRetriever.java` |
+
 | 会话记忆快路径 | 以为它总能省一次同步摘要 | 默认关闭；仅在窄带条件下可能生效，且会被完整摘要的 `clear()` 抹掉（见 5.4） | `memory/SessionMemoryCompactor.java:99-103`、`197-201`；`memory/AutoCompactionManager.java:53-60` |
 | 实验路径的测试 | 以为端到端被覆盖 | `SessionMemoryCompactorTest` 直接调内部方法；`AutoCompactionManagerTest` 用 stub 替换了门控方法 | `SessionMemoryCompactorTest.java:109-124`；`AutoCompactionManagerTest.java:99-118` |
 | 记忆注入位置 | 旧文档称「替换 `conversationHistory[0]`，下一轮容易覆盖上一轮」 | **已改**：检索结果追加到本轮 user 消息末尾（`agent/Agent.java:233-235`），system prompt 不再逐轮承载检索结果；历史消息永不被改写。**代价**：旧记忆不再被覆盖，改为随历史累积、由自动压缩消化 | `agent/Agent.java:227-238`、`agent/Agent.java:543-562`；`docs/dev/11-prompt-cache-friendly-context-injection.md` |
@@ -940,15 +973,19 @@ sequenceDiagram
 
 早期有两份状态：`conversationHistory`（真的发出去的）和一份「短期记忆」结构（被压缩器压的）。问题是**压缩影子结构不会缩短真实请求**——压缩了 A，发出去的 B 一点没变。删掉后只剩一条真实路径，不存在度量错位。代价是：压缩器必须直接操作 `List<Message>` 并原地重建，接口更「脏」，但正确性可验证。
 
-## 10.2 关键词检索还是向量检索
+## 10.2 为什么采用词法 + 本地语义混合检索
 
-**为什么记忆系统不用向量？** 从记忆系统自己的角度看，理由有三条：
+旧实现只做 jieba + 子串匹配，优点是简单、可解释，但同义改写的召回明显不足。仓库后来已经具备随 JAR 分发的 `InProcessBgeEmbeddingProvider`，所以“增加语义检索必然依赖远程 embedding 服务”这个旧前提已经不存在。
 
-1. **数据量小。** 长期记忆存的是几十条「用户偏好、项目约定」，全量遍历打分成本可以忽略。向量索引的优势在百万级候选上才显现。
-2. **结果必须可解释、可审计。** 用户能通过 `/memory list` / `search` / `delete` 精确管理每一条。向量召回很难向用户解释「为什么这条命中了」。
-3. **不能引入额外服务依赖。** 向量检索需要 embedding 服务（要么调 API，要么本地跑模型）。记忆系统是一个**离线也在工作**的本地功能，为几十条事实引入 embedding 依赖不划算。
+当前取舍是：
 
-代价也很清楚：**语义改写召回弱**。用户存了「默认用中文回答」，后来问「帮我翻译一段英文」，查询词和事实正文没有交集，分数为 0，不会被召回。如果将来事实规模上去了，可以加向量召回，但**仍要保留 scope 过滤和可删除性**——这两点是记忆系统的刚需，不能因为换了检索方式就丢。
+1. **不建设新的向量数据库。** 长期记忆规模仍然很小，JSON 是事实源，entry embedding 仅做进程内缓存；本地全量 cosine 足够。
+2. **保留词法信号。** exact/关键词命中可解释，而且对版本号、框架名等精确实体很重要。
+3. **语义信号只补足 paraphrase。** 普通检索按 lexical + local BGE 融合；本地 embedding 出错就 lexical-only。
+4. **embedding 不直接决定去重或覆盖。** 写入时它只负责找可能相关的旧 active memory；DUPLICATE / SUPERSEDE 由无工具 LLM 关系分类器判定，并由确定性 scope/target/evidence 校验兜底。
+5. **长期记忆正文不发远程 embedding。** 当前 Memory 检索固定使用 in-process provider，不复用代码 RAG 的远程 embedding 授权。
+
+因此 Memory 和代码 RAG 共享的是 embedding 基础抽象与本地模型，而不是数据存储、索引或生命周期。
 
 ## 10.3 记忆注入为什么从 system prompt 改成追加到用户消息
 
@@ -1281,11 +1318,11 @@ base64 图片成本高，而且后续每一轮都会重复携带，会迅速挤�
 - **Token 是启发式估算**，CJK 判定严格、surrogate pair 双计、全角标点按拉丁比率、多模态只算 parts，且整体**偏乐观**。不能等同于 provider 精确 usage。
 - **长窗口下压缩触发阈值有上限预留**，200k → 约 167k 是「输出预留 + 缓冲」的结果，不是固定 80%。且「50%」是比率下限，不是触发比例本身。
 - **`TokenBudget.getAvailableForConversation` 是另一条口径**，不驱动压缩；把它和压缩阈值混用会算错。
-- **长期记忆是 JSON 全量重写**，缺事务和多进程一致性；去重域限定类型与作用域、不做冲突消解、也不自动升级作用域；**读路径不判重**（与写路径不对称）。
-- **相关度检索是关键词 + 时间衰减 + 长期权重**，不是语义向量召回；跨语义改写会漏召回。CLI 搜索走的是另一条无排序路径，顺序可能与注入不同。
-- **长期记忆写盘失败对用户静默**（仅 warn），而会话事件写失败会**中止本轮 run**。
-- **`MemoryManager.retrieveRelevant` 是无调用方的死 API**，且它传入的 `projectKey` 为 `null`——即便被调用也只会返回 global 条目（`memory/MemoryManager.java:90-92`）。
-- **`ScoredEntry.fromShortTerm` 恒为 false**，是重构残留字段（`memory/MemoryRetriever.java:45`、`113`）。`TokenBudget.isWithinBudget` 同样无生产调用方（`memory/TokenBudget.java:65-68`）。
+- **长期记忆仍是 JSON 全量重写**，不支持多进程事务协调；普通 store 延续“写盘失败仅 warn”的旧语义。SUPERSEDE 属于多记录一致性操作，因此额外使用临时文件 + atomic move，并在失败时回滚内存状态。
+- **相关度检索已经是 lexical + 本地 BGE 混合召回**；entry 向量只做进程内缓存，重启后首次语义检索需要重新计算。语义阈值必须由真实 bundled BGE golden test 持续校准，不能把任意正 cosine 当相关。
+- **事实更新依赖无工具 LLM 关系分类。** embedding 只负责同域候选召回；分类器失败/非法输出不会自动 supersede。SUPERSEDE 还要求当前 submittedUserInput 的原文 evidence，因此历史推理不能自行改写用户事实。
+- **`MemoryManager.retrieveRelevant` 现在使用当前 project scope**，与自动注入的可见性一致；`/memory search` 也复用同一 `MemoryRetriever` 排名。
+- `TokenBudget.isWithinBudget` 仍无生产调用方（`memory/TokenBudget.java:65-68`）。
 - **统一 `/plan` 的记忆边界按角色不同**：执行任务由 `PlanExecuteAgent` 自身承担，会检索长期记忆且可通过工具写入；Reviewer `SubAgent` 不检索长期记忆，也不暴露工具。
 - **`SessionStore` 每次 append 全量重放事件流**，写入成本随事件数线性增长；checkpoint 是性能兜底，哈希不匹配时回退全量重放（只慢不错）。
 - **摘要压缩依赖 LLM 调用**，存在信息损失；完整摘要路径只对「IO 失败」和「空摘要」做防护，不校验摘要质量。

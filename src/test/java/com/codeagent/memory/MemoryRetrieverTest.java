@@ -5,11 +5,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class MemoryRetrieverTest {
+    private static final Instant NOW = Instant.parse("2026-09-25T00:00:00Z");
+
     @TempDir Path tempDir;
     private LongTermMemory longTerm;
     private MemoryRetriever retriever;
@@ -17,18 +22,24 @@ class MemoryRetrieverTest {
     @BeforeEach
     void setUp() {
         longTerm = new LongTermMemory(tempDir.toFile());
-        retriever = new MemoryRetriever(longTerm);
+        MemoryTestEmbeddingProvider provider = new MemoryTestEmbeddingProvider().fail(true);
+        retriever = new MemoryRetriever(
+                longTerm,
+                new MemoryEmbeddingCache(provider),
+                Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     @Test
     void shouldRetrieveFromLongTerm() {
-        longTerm.store(new MemoryEntry("f1", "用户偏好：喜欢用Spring Boot", MemoryEntry.MemoryType.FACT, null, 10));
+        longTerm.store(new MemoryEntry("f1", "用户偏好：喜欢用Spring Boot",
+                MemoryEntry.MemoryType.FACT, null, 10));
         assertFalse(retriever.retrieve("Spring Boot", 5).isEmpty());
     }
 
     @Test
     void shouldBuildContextForQuery() {
-        longTerm.store(new MemoryEntry("f1", "项目路径: /home/dev/myapp", MemoryEntry.MemoryType.FACT, null, 10));
+        longTerm.store(new MemoryEntry("f1", "项目路径: /home/dev/myapp",
+                MemoryEntry.MemoryType.FACT, null, 10));
         String context = retriever.buildContextForQuery("项目路径", 200);
         assertFalse(context.isEmpty());
         assertTrue(context.contains("/home/dev/myapp"));
@@ -36,8 +47,10 @@ class MemoryRetrieverTest {
 
     @Test
     void shouldNotTreatCurrentConversationAsRetrievableMemory() {
-        longTerm.store(new MemoryEntry("f1", "用户偏好使用中文交流", MemoryEntry.MemoryType.FACT, null, 10));
-        assertTrue(retriever.buildContextForQuery("新建一个第六期的文件夹，里面有一个test.txt文件", 200).isEmpty());
+        longTerm.store(new MemoryEntry("f1", "用户偏好使用中文交流",
+                MemoryEntry.MemoryType.FACT, null, 10));
+        assertTrue(retriever.buildContextForQuery(
+                "新建一个第六期的文件夹，里面有一个test.txt文件", 200).isEmpty());
     }
 
     @Test
@@ -47,7 +60,8 @@ class MemoryRetrieverTest {
 
     @Test
     void shouldRetrieveChineseByPhraseFragments() {
-        longTerm.store(new MemoryEntry("f1", "用户偏好使用Java开发", MemoryEntry.MemoryType.FACT, null, 10));
+        longTerm.store(new MemoryEntry("f1", "用户偏好使用Java开发",
+                MemoryEntry.MemoryType.FACT, null, 10));
         var results = retriever.retrieve("偏好设置", 5);
         assertFalse(results.isEmpty());
         assertEquals("f1", results.get(0).getId());
@@ -64,5 +78,97 @@ class MemoryRetrieverTest {
         String context = retriever.buildContextForQuery("项目 使用", 300, "/repo/current");
         assertTrue(context.contains("当前项目使用 Java 17"));
         assertFalse(context.contains("其他项目使用 Python"));
+    }
+
+    @Test
+    void semanticRetrievalRecallsParaphraseWithoutSharedKeywords() {
+        String memoryText = "默认使用中文回答用户";
+        String query = "后续都用汉语和我沟通";
+        MemoryTestEmbeddingProvider provider = new MemoryTestEmbeddingProvider()
+                .vector(memoryText, 1f, 0f)
+                .vector(query, 1f, 0f);
+        MemoryRetriever semanticRetriever = new MemoryRetriever(
+                longTerm,
+                new MemoryEmbeddingCache(provider),
+                Clock.fixed(NOW, ZoneOffset.UTC));
+        longTerm.store(new MemoryEntry("f1", memoryText, MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"), 8));
+
+        var results = semanticRetriever.retrieveLongTerm(query, 5, "/repo/current");
+
+        assertEquals(1, results.size());
+        assertEquals("f1", results.get(0).getId());
+    }
+
+    @Test
+    void unrelatedSemanticResultBelowThresholdIsNotInjected() {
+        String memoryText = "默认使用中文回答用户";
+        String query = "修复 Maven 编译失败";
+        MemoryTestEmbeddingProvider provider = new MemoryTestEmbeddingProvider()
+                .vector(memoryText, 1f, 0f)
+                .vector(query, 0f, 1f);
+        MemoryRetriever semanticRetriever = new MemoryRetriever(
+                longTerm,
+                new MemoryEmbeddingCache(provider),
+                Clock.fixed(NOW, ZoneOffset.UTC));
+        longTerm.store(new MemoryEntry("f1", memoryText, MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"), 8));
+
+        assertTrue(semanticRetriever.retrieveLongTerm(query, 5, "/repo/current").isEmpty());
+    }
+
+    @Test
+    void recencyBoostUsesThirtyDayHalfLife() {
+        assertEquals(0.05, retriever.recencyBoost(NOW), 0.000001);
+        assertEquals(0.025, retriever.recencyBoost(NOW.minusSeconds(30L * 86400L)), 0.000001);
+        assertEquals(0.0125, retriever.recencyBoost(NOW.minusSeconds(60L * 86400L)), 0.000001);
+    }
+
+    @Test
+    void strongOldRelevanceBeatsWeakNewRecency() {
+        String query = "后续都用汉语和我沟通";
+        String oldText = "默认使用中文回答用户";
+        String newText = "当前项目使用 Java 17";
+        MemoryTestEmbeddingProvider provider = new MemoryTestEmbeddingProvider()
+                .vector(query, 1f, 0f)
+                .vector(oldText, 1f, 0f)
+                .vector(newText, 0.8f, 0.6f);
+        MemoryRetriever semanticRetriever = new MemoryRetriever(
+                longTerm,
+                new MemoryEmbeddingCache(provider),
+                Clock.fixed(NOW, ZoneOffset.UTC));
+        longTerm.store(new MemoryEntry("old", oldText, MemoryEntry.MemoryType.FACT,
+                NOW.minusSeconds(365L * 86400L), Map.of("scope", "global"), 8));
+        longTerm.store(new MemoryEntry("new", newText, MemoryEntry.MemoryType.FACT,
+                NOW, Map.of("scope", "global"), 8));
+
+        var results = semanticRetriever.retrieveLongTerm(query, 5, "/repo/current");
+
+        assertEquals("old", results.get(0).getId());
+    }
+
+    @Test
+    void oversizedTopResultDoesNotStarveSmallerResult() {
+        longTerm.store(new MemoryEntry("large", "项目大型约定", MemoryEntry.MemoryType.FACT,
+                NOW, Map.of("scope", "global"), 500));
+        longTerm.store(new MemoryEntry("small", "项目简短约定", MemoryEntry.MemoryType.FACT,
+                NOW.minusSeconds(86400L), Map.of("scope", "global"), 5));
+
+        String context = retriever.buildContextForQuery("项目", 10, "/repo/current");
+
+        assertFalse(context.contains("大型约定"));
+        assertTrue(context.contains("简短约定"));
+    }
+
+    @Test
+    void supersededMemoryIsExcludedFromNormalRetrieval() {
+        MemoryEntry oldEntry = new MemoryEntry("old", "用户偏好 Java", MemoryEntry.MemoryType.FACT,
+                NOW.minusSeconds(86400L), Map.of("scope", "global"), 5);
+        MemoryEntry newEntry = new MemoryEntry("new", "用户偏好 Python", MemoryEntry.MemoryType.FACT,
+                NOW, Map.of("scope", "global"), 5);
+        longTerm.store(oldEntry);
+        assertTrue(longTerm.supersede("old", newEntry));
+
+        assertTrue(retriever.retrieveLongTerm("Java", 5, "/repo/current").isEmpty());
     }
 }

@@ -203,12 +203,13 @@ public class PlanExecuteAgent {
         this.planner = planner != null ? planner : new Planner(llmClient, this.out);
         this.reviewHandler = reviewHandler == null ? (goal, plan) -> PlanReviewDecision.execute() : reviewHandler;
         this.memoryManager = memoryManager != null ? memoryManager : new MemoryManager(llmClient);
+        this.memoryManager.setLlmClient(llmClient);
         this.pipelineOptions = pipelineOptions != null ? pipelineOptions : PipelineOptions.PLAN_PRESET;
         this.autoCompactionManager = new AutoCompactionManager(llmClient);
         this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
-        this.toolRegistry.setScopedMemorySaver(this.memoryManager::storeFact);
+        this.toolRegistry.setMemoryWriter(this.memoryManager::storeFactWithResult);
         this.planner.setProjectMemorySupplier(this::buildProjectMemoryContext);
     }
 
@@ -474,6 +475,7 @@ public class PlanExecuteAgent {
         reconcilePlanConversationSafely();
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
         submittedPolicyInput = submittedUserInput == null ? "" : submittedUserInput;
+        memoryManager.setSubmittedUserInput(submittedPolicyInput);
         turnToolPolicy = TurnToolPolicy.fromUserInput(
                 submittedUserInput,
                 toolRegistry.isSharedBrowserSession(),
@@ -565,6 +567,7 @@ public class PlanExecuteAgent {
         interruptedRecoveryTaskIds.clear();
         interruptedRecoveryTaskIds.addAll(candidate.interruptedTaskIds());
         submittedPolicyInput = candidate.policyInput();
+        memoryManager.setSubmittedUserInput(submittedPolicyInput);
         turnToolPolicy = TurnToolPolicy.forExplicitTask(
                 submittedPolicyInput,
                 toolRegistry.isSharedBrowserSession(),
@@ -653,6 +656,7 @@ public class PlanExecuteAgent {
             interruptedRecoveryTaskIds.clear();
             String revisedGoal = plan.getGoal() + "\n补充要求：" + feedback;
             submittedPolicyInput = submittedPolicyInput + "\n补充要求：" + feedback;
+            memoryManager.setSubmittedUserInput(submittedPolicyInput);
             turnToolPolicy = TurnToolPolicy.fromUserInput(
                     submittedPolicyInput,
                     toolRegistry.isSharedBrowserSession(),

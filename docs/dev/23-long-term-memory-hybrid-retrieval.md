@@ -4,6 +4,7 @@
 > 状态：已实现，待完整 Maven/真实 BGE 验证
 > 基线：main@d72d2bc07a6065241940e833da33c2b4394d07f9
 > 目标分支：feat/long-term-memory-hybrid-retrieval
+> 后续时间策略：乘法衰减与 lastConfirmedAt 由 docs/dev/24-long-term-memory-time-decay.md 接续设计并覆盖本文的 recency boost 部分。
 
 ## 1. 背景、目标与非目标
 

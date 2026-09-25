@@ -105,6 +105,31 @@ class MemoryManagerTest {
     }
 
     @Test
+    void duplicateWriteReportsConfirmationInsteadOfNoOp() {
+        LongTermMemory longTerm = new LongTermMemory(tempDir.toFile());
+        MemoryManager manager = new MemoryManager(
+                new MemoryTestLlmClient("{\"action\":\"create\"}"),
+                32768,
+                128000,
+                longTerm);
+        manager.setProjectPath("/repo/current");
+
+        manager.storeFactWithResult(
+                "默认使用中文回答",
+                "global",
+                "记住，默认使用中文回答");
+        String duplicate = manager.storeFactWithResult(
+                "默认使用中文回答",
+                "global",
+                "再记一下，默认使用中文回答");
+
+        assertTrue(duplicate.contains("已确认已有长期记忆"));
+        assertEquals(1, longTerm.size());
+        assertTrue(longTerm.retrieve(longTerm.getAll().get(0).getId())
+                .orElseThrow().getMetadata().containsKey("lastConfirmedAt"));
+    }
+
+    @Test
     void compressionTriggerRatioAppliesToAllModelsUniformly() {
         MemoryManager manager = new MemoryManager(new GLMClient("test-key"));
         assertEquals(0.835, manager.getContextProfile().compressionTriggerRatio(), 0.001);

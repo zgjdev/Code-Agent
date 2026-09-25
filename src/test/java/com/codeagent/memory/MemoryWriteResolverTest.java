@@ -21,7 +21,9 @@ class MemoryWriteResolverTest {
     void exactEquivalentUsesDeterministicFastPathWithoutLlm() {
         LongTermMemory memory = new LongTermMemory(tempDir.toFile());
         memory.store(new MemoryEntry("old", "用户偏好使用 Ｊａｖａ。",
-                MemoryEntry.MemoryType.FACT, Map.of("scope", "global"), 5));
+                MemoryEntry.MemoryType.FACT,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                Map.of("scope", "global"), 5));
         MemoryTestLlmClient client = new MemoryTestLlmClient("{\"action\":\"create\"}");
         MemoryWriteResolver resolver = resolver(memory,
                 new MemoryTestEmbeddingProvider().fail(true), client);
@@ -32,6 +34,8 @@ class MemoryWriteResolverTest {
         assertEquals(MemoryWriteResolver.Action.DUPLICATE, result.action());
         assertEquals(0, client.calls());
         assertEquals(1, memory.size());
+        assertEquals(CLOCK.instant(),
+                LongTermMemory.lastConfirmedAtOf(memory.retrieve("old").orElseThrow()));
     }
 
     @Test
@@ -40,7 +44,9 @@ class MemoryWriteResolverTest {
         String oldText = "用户偏好使用 Java";
         String incoming = "Java 是用户首选的开发语言";
         memory.store(new MemoryEntry("old", oldText,
-                MemoryEntry.MemoryType.FACT, Map.of("scope", "global"), 5));
+                MemoryEntry.MemoryType.FACT,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                Map.of("scope", "global"), 5));
         MemoryTestEmbeddingProvider provider = new MemoryTestEmbeddingProvider()
                 .vector(oldText, 1f, 0f)
                 .vector(incoming, 1f, 0f);
@@ -54,6 +60,8 @@ class MemoryWriteResolverTest {
         assertEquals(MemoryWriteResolver.Action.DUPLICATE, result.action());
         assertEquals(1, client.calls());
         assertEquals(1, memory.size());
+        assertEquals(CLOCK.instant(),
+                LongTermMemory.lastConfirmedAtOf(memory.retrieve("old").orElseThrow()));
     }
 
     @Test
@@ -84,6 +92,8 @@ class MemoryWriteResolverTest {
                 memory.getActiveVisible("/repo/current").get(0).getContent());
         assertEquals("old",
                 memory.getActiveVisible("/repo/current").get(0).getMetadata().get("supersedes"));
+        assertEquals(CLOCK.instant(),
+                LongTermMemory.lastConfirmedAtOf(memory.getActiveVisible("/repo/current").get(0)));
     }
 
     @Test
@@ -104,6 +114,12 @@ class MemoryWriteResolverTest {
 
         assertEquals(MemoryWriteResolver.Action.CREATED, result.action());
         assertEquals(2, memory.getActiveVisible("/repo/current").size());
+        MemoryEntry created = memory.getActiveVisible("/repo/current").stream()
+                .filter(entry -> incoming.equals(entry.getContent()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(CLOCK.instant(), created.getTimestamp());
+        assertEquals(CLOCK.instant(), LongTermMemory.lastConfirmedAtOf(created));
     }
 
     @Test
@@ -131,6 +147,6 @@ class MemoryWriteResolverTest {
         MemoryRetriever retriever = new MemoryRetriever(
                 memory, new MemoryEmbeddingCache(provider), CLOCK);
         return new MemoryWriteResolver(
-                memory, retriever, new MemoryRelationClassifier(client));
+                memory, retriever, new MemoryRelationClassifier(client), CLOCK);
     }
 }

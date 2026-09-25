@@ -1,5 +1,7 @@
 package com.codeagent.memory;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,13 +40,22 @@ final class MemoryWriteResolver {
     private final LongTermMemory longTermMemory;
     private final MemoryRetriever retriever;
     private final MemoryRelationClassifier classifier;
+    private final Clock clock;
 
     MemoryWriteResolver(LongTermMemory longTermMemory,
                         MemoryRetriever retriever,
                         MemoryRelationClassifier classifier) {
+        this(longTermMemory, retriever, classifier, Clock.systemUTC());
+    }
+
+    MemoryWriteResolver(LongTermMemory longTermMemory,
+                        MemoryRetriever retriever,
+                        MemoryRelationClassifier classifier,
+                        Clock clock) {
         this.longTermMemory = Objects.requireNonNull(longTermMemory, "longTermMemory");
         this.retriever = Objects.requireNonNull(retriever, "retriever");
         this.classifier = Objects.requireNonNull(classifier, "classifier");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     synchronized WriteResult resolveAndStore(String fact,
@@ -56,11 +67,13 @@ final class MemoryWriteResolver {
             throw new IllegalArgumentException("fact must not be blank");
         }
 
+        Instant now = clock.instant();
         MemoryEntry incoming = new MemoryEntry(
                 "fact-" + UUID.randomUUID().toString().substring(0, 8),
                 normalizedFact,
                 MemoryEntry.MemoryType.FACT,
-                metadata(scope, projectKey),
+                now,
+                metadata(scope, projectKey, now),
                 MemoryEntry.estimateTokens(normalizedFact));
 
         List<MemoryEntry> domainEntries = longTermMemory.getActiveVisible(projectKey).stream()
@@ -72,7 +85,7 @@ final class MemoryWriteResolver {
                 .findFirst()
                 .orElse(null);
         if (exact != null) {
-            return WriteResult.duplicate(exact);
+            return WriteResult.duplicate(confirmOrThrow(exact, now));
         }
 
         if (domainEntries.isEmpty()) {
@@ -92,7 +105,7 @@ final class MemoryWriteResolver {
         if (decision.action() == MemoryRelationClassifier.Action.DUPLICATE) {
             MemoryEntry target = validTarget(decision.targetId(), candidates, incoming);
             if (target != null) {
-                return WriteResult.duplicate(target);
+                return WriteResult.duplicate(confirmOrThrow(target, now));
             }
         }
 
@@ -115,7 +128,7 @@ final class MemoryWriteResolver {
                     .filter(entry -> MemoryDeduplicator.isDuplicate(entry, incoming))
                     .findFirst()
                     .orElse(incoming);
-            return WriteResult.duplicate(duplicate);
+            return WriteResult.duplicate(confirmOrThrow(duplicate, now));
         }
         return WriteResult.created(longTermMemory.retrieve(incoming.getId()).orElse(incoming));
     }
@@ -134,11 +147,19 @@ final class MemoryWriteResolver {
                 .orElse(null);
     }
 
-    private static Map<String, String> metadata(String scope, String projectKey) {
+    private MemoryEntry confirmOrThrow(MemoryEntry target, Instant confirmedAt) {
+        if (!longTermMemory.confirm(target.getId(), confirmedAt)) {
+            throw new IllegalStateException("长期记忆确认时间更新失败，旧记忆保持不变");
+        }
+        return longTermMemory.retrieve(target.getId()).orElse(target);
+    }
+
+    private static Map<String, String> metadata(String scope, String projectKey, Instant confirmedAt) {
         Map<String, String> metadata = new HashMap<>();
         metadata.put("source", "fact");
         metadata.put("scope", "global".equals(scope) ? "global" : "project");
         metadata.put("status", "active");
+        metadata.put("lastConfirmedAt", confirmedAt.toString());
         if (!"global".equals(scope) && projectKey != null && !projectKey.isBlank()) {
             metadata.put("project", projectKey);
         }

@@ -12,15 +12,15 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 长期记忆检索器：词法 + 本地语义混合召回，并使用有界近因加成稳定排序。
+ * 长期记忆检索器：词法 + 本地语义混合召回，并使用有下限的确认时间衰减稳定排序。
  */
 public class MemoryRetriever implements AutoCloseable {
     static final double LEXICAL_WEIGHT = 0.45d;
     static final double SEMANTIC_WEIGHT = 0.55d;
     static final double SEMANTIC_MIN_SCORE = 0.65d;
     static final double WRITE_CANDIDATE_MIN_SCORE = 0.50d;
-    static final double RECENCY_MAX_BOOST = 0.05d;
-    static final double RECENCY_HALF_LIFE_DAYS = 30.0d;
+    static final double DECAY_FLOOR = 0.60d;
+    static final double DECAY_HALF_LIFE_DAYS = 30.0d;
 
     private final LongTermMemory longTermMemory;
     private final MemoryEmbeddingCache embeddingCache;
@@ -76,6 +76,8 @@ public class MemoryRetriever implements AutoCloseable {
                 .filter(scored -> scored.lexicalScore() > 0
                         || scored.semanticScore() >= WRITE_CANDIDATE_MIN_SCORE)
                 .sorted(Comparator.comparingDouble(ScoredEntry::hybridRelevance).reversed()
+                        .thenComparing((ScoredEntry value) -> LongTermMemory.lastConfirmedAtOf(value.entry()),
+                                Comparator.reverseOrder())
                         .thenComparing((ScoredEntry value) -> value.entry().getTimestamp(),
                                 Comparator.reverseOrder())
                         .thenComparing(value -> value.entry().getId()))
@@ -131,14 +133,18 @@ public class MemoryRetriever implements AutoCloseable {
         return (double) matchedWords / queryWords.size();
     }
 
-    double recencyBoost(Instant timestamp) {
-        if (timestamp == null) {
-            return 0.0d;
+    double decayFactor(MemoryEntry entry) {
+        return decayFactor(LongTermMemory.lastConfirmedAtOf(entry));
+    }
+
+    double decayFactor(Instant lastConfirmedAt) {
+        if (lastConfirmedAt == null) {
+            return DECAY_FLOOR;
         }
         double ageDays = Math.max(0.0d,
-                Duration.between(timestamp, clock.instant()).toMillis() / 86_400_000.0d);
-        double signal = Math.exp(-Math.log(2.0d) * ageDays / RECENCY_HALF_LIFE_DAYS);
-        return RECENCY_MAX_BOOST * signal;
+                Duration.between(lastConfirmedAt, clock.instant()).toMillis() / 86_400_000.0d);
+        double signal = Math.pow(2.0d, -ageDays / DECAY_HALF_LIFE_DAYS);
+        return DECAY_FLOOR + (1.0d - DECAY_FLOOR) * signal;
     }
 
     private List<ScoredEntry> score(String query,
@@ -170,7 +176,7 @@ public class MemoryRetriever implements AutoCloseable {
                     : lexical;
             double finalScore = writeCandidateMode
                     ? hybrid
-                    : hybrid + recencyBoost(entry.getTimestamp());
+                    : hybrid * decayFactor(entry);
             scored.add(new ScoredEntry(entry, lexical, semantic, hybrid, finalScore));
         }
         return scored;
@@ -179,6 +185,8 @@ public class MemoryRetriever implements AutoCloseable {
     private Comparator<ScoredEntry> resultComparator() {
         return Comparator.comparingDouble(ScoredEntry::finalScore).reversed()
                 .thenComparing(Comparator.comparingDouble(ScoredEntry::hybridRelevance).reversed())
+                .thenComparing((ScoredEntry value) -> LongTermMemory.lastConfirmedAtOf(value.entry()),
+                        Comparator.reverseOrder())
                 .thenComparing((ScoredEntry value) -> value.entry().getTimestamp(),
                         Comparator.reverseOrder())
                 .thenComparing(value -> value.entry().getId());

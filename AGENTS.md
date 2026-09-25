@@ -153,7 +153,7 @@ sequenceDiagram
 - MCP 启动默认最多等待 8 秒，超时 server 保持 STARTING 并后台继续；用 /mcp 查看状态。
 - /clear 只清空当前发送视图、session memory 预计算状态和 Skill buffer，长期记忆及 raw ledger 保留；/compact 手动执行完整摘要压缩。
 - RAG 默认使用随 JAR 分发的进程内 BGE；词法 FTS、符号和关系召回不依赖 Embedding。远程 Embedding 仅在当前项目/provider/model/endpoint/policy-version 匹配的显式授权后启用，拒绝或故障必须降级而不能中止检索。
-- 长期记忆的事实源仍是 `~/.codeagent/memory/long_term_memory.json`；普通检索只读取当前 scope 可见的 active 记忆，使用词法 + 进程内 BGE 混合排名，embedding 只做进程内派生缓存且不得发送到远端。显式 `save_memory` / `/save` 写入统一解析 CREATE / DUPLICATE / SUPERSEDE；embedding 只召回候选，SUPERSEDE 必须由无工具关系分类器返回当前 `submittedUserInput` 的原文 evidence，失败时不得让旧记忆失效。
+- 长期记忆的事实源仍是 `~/.codeagent/memory/long_term_memory.json`；普通检索只读取当前 scope 可见的 active 记忆，使用词法 + 进程内 BGE 混合相关度，并按 `lastConfirmedAt` 应用下限 0.6、30 天半衰期的乘法衰减；legacy 缺失确认时间时回退 creation timestamp。embedding 只做进程内派生缓存且不得发送到远端。显式 `save_memory` / `/save` 写入统一解析 CREATE / DUPLICATE / SUPERSEDE；DUPLICATE 只刷新已有记忆的确认时间、不重复创建，普通 retrieval 不得自动确认；写入候选不应用时间衰减。embedding 只召回候选，SUPERSEDE 必须由无工具关系分类器返回当前 `submittedUserInput` 的原文 evidence，失败时不得让旧记忆失效。
 - DeepSeek/Kimi thinking 的 reasoning_content 必须回传下一轮；DeepSeek 当前不发送图片 block。usage 未经真实契约验证的 provider 必须保持 trusted=false 并使用本地完整估算。
 - Side-Git snapshot 独立于系统 git；revert 前先创建 pre-restore snapshot，并纳入 HITL/AuditLog。
 - raw session JSONL 可能含敏感内容：用户目录权限按平台收紧，禁止提交、复制或在报告中泄露正文、工具参数、结果、图片 payload、Memory 正文和 secret。

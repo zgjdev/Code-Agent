@@ -110,8 +110,9 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `/clear`、历史图片 payload 裁剪和 conversationHistory 压缩只能追加 boundary event，不能覆盖或删除账本旧行。原始工具参数、工具结果和图片 payload 可能敏感；POSIX 下 `history/raw` 为 0700、账本文件为 0600
 - 长期记忆只通过 `/save` 或用户明确要求保存/更新；普通聊天不自动抽取事实
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global；JSON 仍是唯一事实源
-- 普通长期记忆检索先过滤当前 scope 可见且 `active` 的条目，再融合 jieba 词法分数与进程内 BGE cosine；entry 向量仅进程内缓存，query 每次重算，embedding 失败降级 lexical-only；30 天半衰期指数项只提供最多 0.05 的 recency boost
-- 长期记忆写入统一由 `MemoryWriteResolver` 判 CREATE / DUPLICATE / SUPERSEDE：`MemoryDeduplicator` 仅保留确定性 canonical exact-equivalence fast-path；本地 embedding 只召回同 type/scope/project 的 active 候选，不能仅凭 cosine 覆盖旧事实；无工具 `MemoryRelationClassifier` 负责语义关系判定
+- 普通长期记忆检索先过滤当前 scope 可见且 `active` 的条目，再融合 jieba 词法分数与进程内 BGE cosine；entry 向量仅进程内缓存，query 每次重算，embedding 失败降级 lexical-only；最终相关度乘以 `0.6 + 0.4 * 2^(-ageDays/30)`，age 优先取 `metadata.lastConfirmedAt`，缺失/非法时回退 creation timestamp
+- `lastConfirmedAt` 只由显式长期记忆写入更新：CREATE / SUPERSEDE 的新 active 条目初始化为创建时间，exact DUPLICATE 与 classifier DUPLICATE 刷新已有条目；普通 retrieval、prompt 注入、Plan Task 或工具使用都不得自动刷新，避免检索自我强化
+- 长期记忆写入统一由 `MemoryWriteResolver` 判 CREATE / DUPLICATE / SUPERSEDE：`MemoryDeduplicator` 仅保留确定性 canonical exact-equivalence fast-path；本地 embedding 只召回同 type/scope/project 的 active 候选，不能仅凭 cosine 覆盖旧事实；写入候选排序不应用时间衰减；无工具 `MemoryRelationClassifier` 负责语义关系判定
 - SUPERSEDE 必须引用当前顶层 `submittedUserInput` 的非空原文 evidence；成功后旧条目标记 `superseded`、新条目保持 `active`，持久化失败回滚且不得退化为冲突的 CREATE；legacy 无 status 条目按 active 读取
 - `/memory list` 展示 active 与 superseded 历史；`/memory search <关键词>` 与 Agent 自动注入共享 `MemoryRetriever` 排名且只返回 active；`/memory delete <id>`、`/memory clear` 保持显式管理语义
 - `CODEAGENT.md` 不是 `/save` 长期记忆：它是启动时注入 system prompt 的项目指令文件，适合团队共享、长期稳定、可进 git 的规则

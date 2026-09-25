@@ -432,6 +432,127 @@ class LongTermMemoryTest {
     }
 
     @Test
+    void newActiveMemoryInitializesLastConfirmedAtFromTimestamp() {
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        memory.store(new MemoryEntry(
+                "fact-confirmed",
+                "默认用中文回答",
+                MemoryEntry.MemoryType.FACT,
+                createdAt,
+                Map.of("scope", "global"),
+                5
+        ));
+
+        MemoryEntry stored = memory.retrieve("fact-confirmed").orElseThrow();
+        assertEquals(createdAt, stored.getTimestamp());
+        assertEquals(createdAt, LongTermMemory.lastConfirmedAtOf(stored));
+        assertEquals(createdAt.toString(), stored.getMetadata().get("lastConfirmedAt"));
+    }
+
+    @Test
+    void confirmRefreshesLastConfirmedAtWithoutChangingCreationTimestamp() {
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        Instant confirmedAt = Instant.parse("2026-09-25T00:00:00Z");
+        memory.store(new MemoryEntry(
+                "fact-confirmed",
+                "默认用中文回答",
+                MemoryEntry.MemoryType.FACT,
+                createdAt,
+                Map.of("scope", "global"),
+                5
+        ));
+
+        assertTrue(memory.confirm("fact-confirmed", confirmedAt));
+
+        MemoryEntry confirmed = memory.retrieve("fact-confirmed").orElseThrow();
+        assertEquals(createdAt, confirmed.getTimestamp());
+        assertEquals(confirmedAt, LongTermMemory.lastConfirmedAtOf(confirmed));
+
+        LongTermMemory reloaded = new LongTermMemory(tempDir.toFile());
+        assertEquals(confirmedAt,
+                LongTermMemory.lastConfirmedAtOf(reloaded.retrieve("fact-confirmed").orElseThrow()));
+    }
+
+    @Test
+    void confirmNeverMovesLastConfirmedAtBackward() {
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        Instant newer = Instant.parse("2026-09-25T00:00:00Z");
+        Instant older = Instant.parse("2026-06-01T00:00:00Z");
+        memory.store(new MemoryEntry(
+                "fact-confirmed",
+                "默认用中文回答",
+                MemoryEntry.MemoryType.FACT,
+                createdAt,
+                Map.of("scope", "global", "lastConfirmedAt", newer.toString()),
+                5
+        ));
+
+        assertTrue(memory.confirm("fact-confirmed", older));
+        assertEquals(newer,
+                LongTermMemory.lastConfirmedAtOf(memory.retrieve("fact-confirmed").orElseThrow()));
+    }
+
+    @Test
+    void supersededMemoryCannotBeConfirmed() {
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        MemoryEntry oldEntry = new MemoryEntry(
+                "old-confirm",
+                "用户偏好 Java",
+                MemoryEntry.MemoryType.FACT,
+                createdAt,
+                Map.of("scope", "global"),
+                5
+        );
+        MemoryEntry replacement = new MemoryEntry(
+                "new-confirm",
+                "用户偏好 Python",
+                MemoryEntry.MemoryType.FACT,
+                Instant.parse("2026-09-01T00:00:00Z"),
+                Map.of("scope", "global"),
+                5
+        );
+        memory.store(oldEntry);
+        assertTrue(memory.supersede("old-confirm", replacement));
+
+        assertFalse(memory.confirm("old-confirm", Instant.parse("2026-09-25T00:00:00Z")));
+    }
+
+    @Test
+    void invalidLastConfirmedAtFallsBackToTimestamp() {
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        MemoryEntry entry = new MemoryEntry(
+                "legacy-invalid-confirmation",
+                "项目使用 Java 17",
+                MemoryEntry.MemoryType.FACT,
+                createdAt,
+                Map.of("scope", "global", "lastConfirmedAt", "not-an-instant"),
+                5
+        );
+
+        assertEquals(createdAt, LongTermMemory.lastConfirmedAtOf(entry));
+    }
+
+    @Test
+    void confirmRepairsInvalidPersistedConfirmationMetadata() {
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        Instant confirmedAt = Instant.parse("2026-09-25T00:00:00Z");
+        memory.store(new MemoryEntry(
+                "repair-confirmation",
+                "项目使用 Java 17",
+                MemoryEntry.MemoryType.FACT,
+                createdAt,
+                Map.of("scope", "global", "lastConfirmedAt", "not-an-instant"),
+                5
+        ));
+
+        assertTrue(memory.confirm("repair-confirmation", confirmedAt));
+
+        MemoryEntry repaired = memory.retrieve("repair-confirmation").orElseThrow();
+        assertEquals(confirmedAt, LongTermMemory.lastConfirmedAtOf(repaired));
+        assertEquals(confirmedAt.toString(), repaired.getMetadata().get("lastConfirmedAt"));
+    }
+
+    @Test
     void legacyMemoriesWithoutScopeRemainGlobal() {
         MemoryEntry legacy = new MemoryEntry("legacy", "历史偏好", MemoryEntry.MemoryType.FACT, null, 10);
 

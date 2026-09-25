@@ -30,6 +30,7 @@ public class LongTermMemory implements Memory {
     private static final String STORAGE_FILE = "long_term_memory.json";
     private static final String STATUS_ACTIVE = "active";
     private static final String STATUS_SUPERSEDED = "superseded";
+    private static final String LAST_CONFIRMED_AT = "lastConfirmedAt";
 
     private final Map<String, MemoryEntry> entries;
     private final AtomicInteger tokenCounter;
@@ -73,7 +74,7 @@ public class LongTermMemory implements Memory {
             return false;
         }
 
-        MemoryEntry normalized = withStatus(entry, STATUS_ACTIVE);
+        MemoryEntry normalized = withStatusAndConfirmation(entry, STATUS_ACTIVE);
         MemoryEntry previous = entries.put(normalized.getId(), normalized);
         if (previous != null) {
             tokenCounter.addAndGet(-previous.getTokenCount());
@@ -81,6 +82,41 @@ public class LongTermMemory implements Memory {
         tokenCounter.addAndGet(normalized.getTokenCount());
         saveToDisk();
         return true;
+    }
+
+    /**
+     * 刷新 active 记忆的显式确认时间；不改变正文和创建时间。
+     *
+     * <p>持久化失败时回滚内存状态，确认时间永不倒退。</p>
+     */
+    public synchronized boolean confirm(String targetId, Instant confirmedAt) {
+        if (targetId == null || targetId.isBlank() || confirmedAt == null) {
+            return false;
+        }
+        MemoryEntry existing = entries.get(targetId);
+        if (existing == null || !isActive(existing)) {
+            return false;
+        }
+
+        Instant current = lastConfirmedAtOf(existing);
+        Instant effective = confirmedAt.isAfter(current) ? confirmedAt : current;
+        if (effective.equals(current) && hasValidPersistedConfirmation(existing)) {
+            return true;
+        }
+
+        Map<String, String> metadata = new HashMap<>(existing.getMetadata());
+        metadata.put(LAST_CONFIRMED_AT, effective.toString());
+        MemoryEntry confirmed = copyWithMetadata(existing, metadata);
+
+        entries.put(targetId, confirmed);
+        try {
+            saveToDiskOrThrow();
+            return true;
+        } catch (IOException e) {
+            entries.put(targetId, existing);
+            log.warn("长期记忆确认时间持久化失败，已回滚: {}", e.getMessage(), e);
+            return false;
+        }
     }
 
     /**
@@ -107,6 +143,7 @@ public class LongTermMemory implements Memory {
 
         Map<String, String> newMetadata = new HashMap<>(replacement.getMetadata());
         newMetadata.put("status", STATUS_ACTIVE);
+        newMetadata.putIfAbsent(LAST_CONFIRMED_AT, replacement.getTimestamp().toString());
         newMetadata.put("supersedes", targetId);
         MemoryEntry activeReplacement = copyWithMetadata(replacement, newMetadata);
 
@@ -236,9 +273,40 @@ public class LongTermMemory implements Memory {
         return isActive(entry) ? STATUS_ACTIVE : STATUS_SUPERSEDED;
     }
 
-    private static MemoryEntry withStatus(MemoryEntry entry, String status) {
+    private static boolean hasValidPersistedConfirmation(MemoryEntry entry) {
+        String value = entry.getMetadata().get(LAST_CONFIRMED_AT);
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        try {
+            Instant parsed = Instant.parse(value);
+            return !parsed.isBefore(entry.getTimestamp());
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    public static Instant lastConfirmedAtOf(MemoryEntry entry) {
+        if (entry == null) {
+            return Instant.EPOCH;
+        }
+        Instant createdAt = entry.getTimestamp();
+        String value = entry.getMetadata().get(LAST_CONFIRMED_AT);
+        if (value != null && !value.isBlank()) {
+            try {
+                Instant parsed = Instant.parse(value);
+                return parsed.isAfter(createdAt) ? parsed : createdAt;
+            } catch (Exception ignored) {
+                // Legacy/corrupted metadata falls back to immutable creation time.
+            }
+        }
+        return createdAt;
+    }
+
+    private static MemoryEntry withStatusAndConfirmation(MemoryEntry entry, String status) {
         Map<String, String> metadata = new HashMap<>(entry.getMetadata());
         metadata.put("status", status);
+        metadata.put(LAST_CONFIRMED_AT, lastConfirmedAtOf(entry).toString());
         return copyWithMetadata(entry, metadata);
     }
 

@@ -238,9 +238,9 @@ flowchart TB
 - legacy 条目没有 `metadata.status` 时按 `active` 处理。
 - `/memory list` 保留 active 与 superseded 历史供审计；正常自动检索与 `/memory search` 只使用 active 条目。
 
-### 检索：词法 + 本地 BGE + 有界近因加成
+### 检索：词法 + 本地 BGE + 确认时间乘法衰减
 
-`MemoryRetriever` 不再是纯 jieba 子串检索，而是：
+`MemoryRetriever` 的普通检索链路是：
 
 ```text
 scope/status 过滤
@@ -251,22 +251,27 @@ local BGE semantic cosine
     ↓
 0.45 * lexical + 0.55 * semantic
     ↓
-最多 +0.05 的 recency boost
+按 lastConfirmedAt 计算 [0.6, 1.0] decay
+    ↓
+final = hybrid * decay
     ↓
 稳定排序 + Token 预算打包
 ```
 
 普通语义召回阈值为 `0.65`。本地 embedding 不可用时回退 lexical-only，不阻断 ReAct / Plan。MemoryEntry 向量由 `MemoryEmbeddingCache` 以 `id + content hash + embeddingSpaceId` 做进程内懒缓存；query 每次检索重新 embedding，向量不写回 JSON。
 
-时间不再直接乘一个“大幅惩罚旧事实”的衰减因子，而只提供小幅近因加成：
+时间衰减公式：
 
 ```text
-recencySignal = exp(-ln(2) * ageDays / 30)
-recencyBoost  = 0.05 * recencySignal
-finalScore    = hybridRelevance + recencyBoost
+decay = 0.6 + 0.4 * 2^(-ageDays / 30)
+finalScore = hybridRelevance * decay
 ```
 
-因此 30 天后近因加成减半，但高度相关的旧 active 事实不会仅仅因为年龄被淘汰。事实是否仍有效由 active/superseded 生命周期决定，而不是由时间决定。
+其中 age 以 `metadata.lastConfirmedAt` 为基准；legacy 条目缺失或非法时回退不可变的 creation `timestamp`。这里的 30 天半衰期是“高于 0.6 下限的部分每 30 天减半”：0 / 30 / 60 / 90 天的 factor 分别为 1.0 / 0.8 / 0.7 / 0.65，最终趋近 0.6。
+
+`lastConfirmedAt` 只会在用户显式长期记忆写入中刷新：CREATE/SUPERSEDE 的新 active memory 初始化为创建时间；exact DUPLICATE 或 classifier DUPLICATE 会刷新已有记忆的确认时间。普通检索命中、prompt 注入、Plan Task 使用和工具执行都不会自动确认，避免“越常被检索越不衰减”的自我强化循环。
+
+事实是否仍有效依旧由 active/superseded 生命周期决定；时间只影响 active memory 的检索强度，不会自动让事实失效。写入关系候选召回不应用 decay，避免很旧的 active memory 因年龄而找不到 DUPLICATE / SUPERSEDE 目标。
 
 ### 写入：统一 CREATE / DUPLICATE / SUPERSEDE
 
@@ -348,22 +353,38 @@ appendConversationMessage(...)          // 追加本轮 user 消息
 
 一个佐证：`MemoryRetriever.ScoredEntry` 有一个 `fromShortTerm` 字段（`memory/MemoryRetriever.java:113`），但在当前代码里**永远是 `false`**——构造它的地方只传 `false`（`memory/MemoryRetriever.java:45`）。这是重构留下的**残留字段**，说明「从短期记忆检索」这条路已经彻底不存在了。
 
-## 3.3 打分与注入预算
+## 3.3 打分、确认时间衰减与注入预算
 
-`computeRelevanceScore`（`memory/MemoryRetriever.java:83-111`）是一个**可解释的启发式**，不是语义相似度：
+当前 MemoryRetriever 对 scope/status 过滤后的 active 记忆统一计算：
 
-1. 如果条目正文**包含完整查询串**（转小写后），直接满分。
-2. 否则用 jieba 把查询分词，统计命中的词占比作为基础分（`memory/MemoryQueryTokenizer.java:26-41`）。
-3. 再乘一个**时间衰减**：按条目写入时间距今天数线性衰减，但有**下限**（`memory/MemoryRetriever.java:105-108`）。注意这个下限意味着：**超过一定天数后分数不再继续下降**，老记忆不会无限趋近于零。
-4. 长期条目统一再乘一个略大于 1 的权重（`memory/MemoryRetriever.java:45`）。
+```text
+lexicalScore
+semanticScore
+    ↓
+hybridRelevance = 0.45 * lexical + 0.55 * semantic
+    ↓
+lastConfirmedAt（legacy 回退 timestamp）
+    ↓
+decay = 0.6 + 0.4 * 2^(-ageDays / 30)
+    ↓
+finalScore = hybridRelevance * decay
+```
 
-然后 `buildContextForQuery` 组装注入文本（`memory/MemoryRetriever.java:60-78`）：
+词法层仍由 jieba 切分 query，并用 query token 在 Memory 正文中的覆盖率打分；正文包含完整 query 时 lexicalScore=1。语义层使用进程内 BGE cosine；本地 embedding 不可用时只保留 lexicalScore。
 
-- 检索条数有一个**硬编码上限**（`memory/MemoryRetriever.java:61`）。
-- 先加标题，再**逐条累加 `tokenCount`**；一旦「加上这条会超预算」，就 `break`——**不是跳过这条继续试下一条**（`memory/MemoryRetriever.java:68-69`）。这是个刻意的选择：保持注入文本的**相关度单调递减**，而不是塞满预算。代价是：一条超长的记忆会挡住它后面所有本来放得下的小记忆。
-- 无命中时返回空字符串，不生成一个空的「相关长期记忆」章节（`memory/MemoryRetriever.java:62`）。
+普通语义召回要求 lexicalScore>0 或 semanticScore 达到阈值。时间只作用在通过相关性门槛后的排序分数上，不改变一条记忆是否语义相关。
 
-**注入 token 预算**来自 `ContextProfile.memoryContextTokens()`，它是窗口的一个小比例并带上下限（`context/ContextProfile.java:82-84`）。
+确认时间规则：
+
+- 新 CREATE / SUPERSEDE 的 active memory：lastConfirmedAt=创建时间；
+- 用户显式再次保存同一事实，exact DUPLICATE 或 classifier DUPLICATE：刷新已有 memory 的 lastConfirmedAt；
+- 普通 retrieval、prompt 注入、Plan Task 使用和工具调用不会刷新确认时间；
+- legacy / 非法 lastConfirmedAt 回退创建 timestamp；
+- 写入关系候选召回只按 hybridRelevance 排序，不应用 decay。
+
+最终排序按 finalScore、hybridRelevance、lastConfirmedAt、timestamp、id 稳定决胜。
+
+buildContextForQuery 取排好序的候选后按 tokenCount 装入预算；某条过大时跳过并继续尝试后续条目，而不是让单个大 Memory 饿死后续短记忆。注入 token 预算仍来自 ContextProfile.memoryContextTokens()。
 
 ## 3.4 长期记忆的写入入口只有三个
 
@@ -946,12 +967,12 @@ sequenceDiagram
 | `TokenBudget` 的可用预算 | 以为它就是压缩阈值 | 是**另一个数字**（窗口减三个固定预留），且**不驱动压缩** | `memory/TokenBudget.java:58-60` |
 | `isWithinBudget` | 以为它在主循环里守着预算 | **无生产调用方** | `memory/TokenBudget.java:65-68` |
 | 长期记忆写入关系 | 以为仍靠“的/地/得/是”近似去重 | `MemoryDeduplicator` 只保留同域 canonical exact-equivalence fast-path；真正同义重复/事实替换由 `MemoryWriteResolver` 候选召回 + 无工具 `MemoryRelationClassifier` 判 CREATE / DUPLICATE / SUPERSEDE | `memory/MemoryDeduplicator.java`；`memory/MemoryWriteResolver.java`；`memory/MemoryRelationClassifier.java` |
-| 判重与写盘 | 以为每次 store 都会写盘 | **判重命中会直接 return，不写盘** | `memory/LongTermMemory.java:59-63` |
+| 重复写入 | 以为 DUPLICATE 完全 no-op | 内容不会重复创建，但显式 DUPLICATE 会刷新已有 active memory 的 `lastConfirmedAt` 并持久化；普通 retrieval 不会刷新 | `memory/MemoryWriteResolver.java`；`memory/LongTermMemory.java` |
 | 从磁盘加载 | 以为加载也会判重 | `loadFromDisk` 只做 `put` + 计数，**不判重**；读写路径不对称 | `memory/LongTermMemory.java:193-209` |
 | 长期记录 tokenCount | 以为加载时沿用保存值 | 缺 `tokenCount` 时回退为 `estimateTokens(content)` | `memory/LongTermMemory.java:238` |
 | 切换模型 / profile | 以为只更新配置 | `applyContextProfile` **重建一个新的 `TokenBudget`**，累计 usage 统计被清零 | `memory/MemoryManager.java:53-56` |
-| 检索排序 | 以为 CLI 搜索和自动注入仍是两套逻辑 | `/memory search` 与自动注入都委托 `MemoryRetriever`，共享 lexical + local semantic + recency 排名；普通检索只返回 active 且当前 scope 可见记忆 | `memory/MemoryManager.java`；`memory/MemoryRetriever.java` |
-| 时间衰减 | 以为时间会直接让旧事实失效 | 时间现在只提供最大 0.05 的指数型 recency boost，30 天半衰期；事实有效性由 active/superseded 决定 | `memory/MemoryRetriever.java`；`memory/LongTermMemory.java` |
+| 检索排序 | 以为 CLI 搜索和自动注入仍是两套逻辑 | `/memory search` 与自动注入都委托 `MemoryRetriever`，共享 lexical + local semantic + confirmation-decay 排名；普通检索只返回 active 且当前 scope 可见记忆 | `memory/MemoryManager.java`；`memory/MemoryRetriever.java` |
+| 时间衰减 | 以为时间会直接让旧事实失效 | 普通检索按 `lastConfirmedAt` 使用 `0.6 + 0.4 * 2^(-age/30)` 乘法衰减；缺失时回退 creation timestamp；事实有效性仍由 active/superseded 决定 | `memory/MemoryRetriever.java`；`memory/LongTermMemory.java` |
 | 注入预算裁剪 | 以为第一条放不下就停止 | 已改为跳过超预算条目并继续尝试后续较短候选，最终仍保持相关度排序顺序 | `memory/MemoryRetriever.java` |
 
 | 会话记忆快路径 | 以为它总能省一次同步摘要 | 默认关闭；仅在窄带条件下可能生效，且会被完整摘要的 `clear()` 抹掉（见 5.4） | `memory/SessionMemoryCompactor.java:99-103`、`197-201`；`memory/AutoCompactionManager.java:53-60` |

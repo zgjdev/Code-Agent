@@ -112,7 +112,7 @@ public class MemoryManager implements AutoCloseable {
         return switch (result.action()) {
             case CREATED -> "💾 已保存到长期记忆(" + normalizedScope + "): "
                     + result.memory().getContent();
-            case DUPLICATE -> "💾 长期记忆已存在(" + normalizedScope + ")，未重复保存: "
+            case DUPLICATE -> "💾 已确认已有长期记忆(" + normalizedScope + ")，未重复创建: "
                     + result.memory().getContent();
             case SUPERSEDED -> "💾 已更新长期记忆(" + normalizedScope + "): "
                     + result.memory().getContent();

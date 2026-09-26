@@ -258,7 +258,7 @@ final = hybrid * decay
 稳定排序 + Token 预算打包
 ```
 
-普通语义召回阈值为 `0.65`。本地 embedding 不可用时回退 lexical-only，不阻断 ReAct / Plan。MemoryEntry 向量由 `MemoryEmbeddingCache` 以 `id + content hash + embeddingSpaceId` 做进程内懒缓存；query 每次检索重新 embedding，向量不写回 JSON。
+普通语义召回阈值为 `0.475`，写入候选阈值为更宽松的 `0.45`。这两个值由随 JAR 分发的真实 BGE 对方案黄金集的正负样例分布确定；本地 embedding 不可用时回退 lexical-only，不阻断 ReAct / Plan。MemoryEntry 向量由 `MemoryEmbeddingCache` 以 `id + content hash + embeddingSpaceId` 做进程内懒缓存；query 每次检索重新 embedding，向量不写回 JSON。
 
 时间衰减公式：
 

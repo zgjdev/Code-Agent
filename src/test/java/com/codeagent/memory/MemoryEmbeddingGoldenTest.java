@@ -2,9 +2,12 @@ package com.codeagent.memory;
 
 import com.codeagent.rag.embedding.InProcessBgeEmbeddingProvider;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
+import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -13,22 +16,37 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class MemoryEmbeddingGoldenTest {
 
     @Test
-    void bundledBgeSeparatesParaphraseFromUnrelatedQuery() throws Exception {
-        String memory = "默认使用中文回答用户";
-        String paraphrase = "后续都用汉语和我沟通";
-        String unrelated = "修复 Maven 编译失败";
+    void bundledBgeSeparatesRelatedFromUnrelatedQueries() throws Exception {
+        List<GoldenCase> cases = List.of(
+                new GoldenCase("Plan 状态使用 SQLite 持久化，支持任务节点恢复",
+                        "之前的任务恢复机制把计划状态存在哪里？", true),
+                new GoldenCase("默认使用中文回答用户", "后续都用汉语和我沟通", true),
+                new GoldenCase("项目要求 Java 17", "这个仓库需要哪个 JDK 版本？", true),
+                new GoldenCase("默认使用中文回答用户", "修复 Maven 编译失败", false),
+                new GoldenCase("项目要求 Java 17", "解释 Plan DAG 的资源冲突检测", false));
 
         try (InProcessBgeEmbeddingProvider provider = new InProcessBgeEmbeddingProvider()) {
-            List<float[]> vectors = provider.embedAll(List.of(memory, paraphrase, unrelated));
-            double relatedScore = MemoryRetriever.cosineSimilarity(vectors.get(0), vectors.get(1));
-            double unrelatedScore = MemoryRetriever.cosineSimilarity(vectors.get(0), vectors.get(2));
-
-            assertTrue(relatedScore >= MemoryRetriever.SEMANTIC_MIN_SCORE,
-                    "related score=" + relatedScore);
-            assertTrue(unrelatedScore < MemoryRetriever.SEMANTIC_MIN_SCORE,
-                    "unrelated score=" + unrelatedScore);
-            assertTrue(relatedScore > unrelatedScore,
-                    "related=" + relatedScore + ", unrelated=" + unrelatedScore);
+            List<String> inputs = cases.stream()
+                    .flatMap(goldenCase -> List.of(goldenCase.memory(), goldenCase.query()).stream())
+                    .toList();
+            List<float[]> vectors = provider.embedAll(inputs);
+            List<Executable> assertions = new ArrayList<>();
+            List<String> diagnostics = new ArrayList<>();
+            for (int index = 0; index < cases.size(); index++) {
+                GoldenCase goldenCase = cases.get(index);
+                double score = MemoryRetriever.cosineSimilarity(
+                        vectors.get(index * 2), vectors.get(index * 2 + 1));
+                String message = "memory='" + goldenCase.memory() + "', query='"
+                        + goldenCase.query() + "', score=" + score;
+                diagnostics.add((goldenCase.related() ? "related=" : "unrelated=") + score);
+                assertions.add(goldenCase.related()
+                        ? () -> assertTrue(score >= MemoryRetriever.SEMANTIC_MIN_SCORE, message)
+                        : () -> assertTrue(score < MemoryRetriever.SEMANTIC_MIN_SCORE, message));
+            }
+            assertAll(String.join(", ", diagnostics), assertions);
         }
+    }
+
+    private record GoldenCase(String memory, String query, boolean related) {
     }
 }

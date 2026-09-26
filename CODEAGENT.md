@@ -13,7 +13,7 @@ CodeAgent 是面向商业使用的 Java Agent CLI 产品，对标 Claude Code；
 ## Architecture
 
 - 两条执行路径共享 `ToolRegistry` / `MemoryManager` / `SnapshotService`，不要为某个模式创建孤立能力。
-- 精确代码定位优先 `glob_files` / `grep_code` / `read_file`；`search_code` 使用本地优先的 SQLite v2 分层检索，内置 BGE 仅作可降级语义增强，远程 Embedding 必须有当前项目的显式授权。
+- 精确代码定位优先 `glob_files` / `grep_code` / `read_file`；`search_code` 只组合 SQLite FTS5 + BM25、BGE + cosine 和代码关系图三类召回，Symbol Index 仅供 Graph 内部生成 seed。内置 BGE 是可降级语义增强，远程 Embedding 必须有当前项目的显式授权。
 - system prompt 由 `PromptAssembler` 分层组装，内置 prompt 在 `src/main/resources/prompts/`，支持 `~/.codeagent/prompts/` 和 `.codeagent/prompts/` 覆盖。
 
 ## Things That Will Bite You

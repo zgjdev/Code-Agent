@@ -181,7 +181,6 @@ public class ToolRegistry {
                     codeRetrievalService = new DefaultCodeRetrievalService(
                             new SqliteRetrievalIndex(directory.resolve("codebase-v2.db"),
                                     directory.resolve("codebase.db")),
-                            codeSearchService,
                             new EmbeddingResolution(Optional.of(new InProcessBgeEmbeddingProvider()),
                                     "local_embedding", false));
                 } catch (Exception e) {

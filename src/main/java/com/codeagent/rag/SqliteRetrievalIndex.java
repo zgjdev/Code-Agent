@@ -15,7 +15,6 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 
@@ -244,40 +243,6 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         }, true);
     }
 
-    public List<RetrievalCandidate> searchTrigram(
-            Path projectRoot, String query, int limit) throws SQLException {
-        if (query == null || query.isBlank() || limit <= 0) return List.of();
-        int codePoints = query.codePointCount(0, query.length());
-        if (codePoints < 3) {
-            String sql = """
-                    SELECT id, file_path, start_line, end_line, chunk_type, symbol, symbol_id, content, 0.0 AS score
-                    FROM code_chunks_v2
-                    WHERE project_path=? AND (lower(symbol) LIKE ? OR lower(search_terms) LIKE ?)
-                    ORDER BY file_path ASC, start_line ASC LIMIT ?
-                    """;
-            String pattern = "%" + escapeLike(query.toLowerCase(Locale.ROOT)) + "%";
-            return searchCandidates(sql, statement -> {
-                statement.setString(1, projectKey(projectRoot));
-                statement.setString(2, pattern);
-                statement.setString(3, pattern);
-                statement.setInt(4, limit);
-            }, false);
-        }
-        String sql = """
-                SELECT c.id, c.file_path, c.start_line, c.end_line, c.chunk_type,
-                       c.symbol, c.symbol_id, c.content, bm25(code_chunks_trigram_fts_v2) AS score
-                FROM code_chunks_trigram_fts_v2
-                JOIN code_chunks_v2 c ON c.id=code_chunks_trigram_fts_v2.rowid
-                WHERE c.project_path=? AND code_chunks_trigram_fts_v2 MATCH ?
-                ORDER BY score ASC, c.file_path ASC, c.start_line ASC LIMIT ?
-                """;
-        return searchCandidates(sql, statement -> {
-            statement.setString(1, projectKey(projectRoot));
-            statement.setString(2, quoteFts(query));
-            statement.setInt(3, limit);
-        }, true);
-    }
-
     public List<RetrievalCandidate> searchSymbols(
             Path projectRoot, String query, int limit) throws SQLException {
         if (query == null || query.isBlank() || limit <= 0) return List.of();
@@ -419,6 +384,8 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
                       FOREIGN KEY(project_path,file_path) REFERENCES indexed_files_v2(project_path,file_path) ON DELETE CASCADE)
                     """);
             statement.execute("CREATE VIRTUAL TABLE IF NOT EXISTS code_chunks_terms_fts_v2 USING fts5(symbol,search_terms,content='code_chunks_v2',content_rowid='id',tokenize=\"unicode61 tokenchars '_-'\")");
+            // Compatibility-only schema: runtime retrieval no longer queries trigram FTS.
+            // Keep the table and shared triggers so existing v2 databases and older JARs remain usable.
             statement.execute("CREATE VIRTUAL TABLE IF NOT EXISTS code_chunks_trigram_fts_v2 USING fts5(content,content='code_chunks_v2',content_rowid='id',tokenize='trigram')");
             statement.execute("""
                     CREATE TABLE IF NOT EXISTS code_relations_v2 (

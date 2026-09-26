@@ -2,7 +2,6 @@ package com.codeagent.rag;
 
 import com.codeagent.rag.embedding.EmbeddingResolution;
 import com.codeagent.rag.embedding.InProcessBgeEmbeddingProvider;
-import com.codeagent.search.JavaCodeSearchService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -15,7 +14,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -37,7 +35,6 @@ class RetrievalQualityTest {
         try (SqliteRetrievalIndex index = new SqliteRetrievalIndex(temp.resolve("v2.db"));
              InProcessBgeEmbeddingProvider provider = new InProcessBgeEmbeddingProvider()) {
             DefaultCodeRetrievalService service = new DefaultCodeRetrievalService(index,
-                    new JavaCodeSearchService(Set.of("target")),
                     new EmbeddingResolution(Optional.empty(), "off", false));
             service.refresh(new IndexRefreshRequest(root, false));
             Metrics lexical = evaluate(service, root, cases);

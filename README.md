@@ -145,14 +145,14 @@ Plan 路径包含：
 
 ### 代码检索与 RAG
 
-CodeAgent 使用分层检索策略：
+CodeAgent 把实时确定性工具与索引式 RAG 分开：
 
 1. `glob_files` 定位候选文件。
 2. `grep_code` 精确查找符号和文本。
 3. `read_file` 获取必要上下文。
-4. `search_code` 在描述模糊时提供语义辅助。
+4. `search_code` 在描述模糊时组合 SQLite FTS5 + BM25、BGE + cosine 和代码关系图三路召回。
 
-本地语义层使用随 JAR 分发的量化 BGE 模型；词法 FTS、符号和关系召回不依赖 Embedding。远程 Embedding 只有在用户对当前项目和 Provider 明确授权后才会启用，拒绝或故障会自动降级。
+词法层由 `LexicalTextNormalizer` 统一处理中英文、identifier 和 camelCase，再通过 SQLite FTS5 `MATCH` 与 BM25 排序；语义层使用随 JAR 分发的量化 BGE 模型；Graph 层内部使用 Symbol Index 找 seed，再查询代码关系。Symbol 不作为独立召回来源。远程 Embedding 只有在用户对当前项目和 Provider 明确授权后才会启用，拒绝或故障会自动降级且不影响 FTS / Graph。`grep_code` 继续直接搜索当前磁盘，并在 ripgrep 不可用时回退到 Java 实现，不会被 `search_code` 自动调用。
 
 ```text
 /index

@@ -1,5 +1,7 @@
 # Local-First 分层代码检索实现计划
 
+> **现行架构提示（2026-09）：** 本文记录 SQLite v2 Local-First 检索落地时的六路 stage 设计，作为历史实现计划保留。当前运行时已进一步精简为 Term FTS、Semantic、Graph 三类召回；LiveGrep 与 trigram 已退出 RAG，Symbol 仅作为 Graph 内部 seed 基础设施。现行设计、兼容策略和测试矩阵见 [25-simplify-code-rag-retrieval.md](25-simplify-code-rag-retrieval.md)。下文中的六路列表、旧权重和验收项不得视为当前行为。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: 使用 `subagent-driven-development`（推荐）或 `executing-plans` 逐任务实施。所有步骤用 checkbox 跟踪；每个生产代码边界先写失败测试，再写最小实现。未经用户明确允许不得 commit、push、创建 PR 或合并。
 
 **Goal:** 将当前依赖 Ollama 的代码 RAG 改造成零外部服务即可工作的本地优先分层检索：FTS5、精确搜索和 Java 结构关系始终可用，JAR 内量化 ONNX Embedding 作为默认语义增强，远程 Embedding 仅在显式授权后启用；彻底删除 Ollama provider、配置选项和 HTTP 实现。

@@ -37,7 +37,7 @@ class SqliteRetrievalIndexTest {
     }
 
     @Test
-    void lexicalReplacementMaintainsBothFtsIndexes(@TempDir Path tempDir) throws Exception {
+    void lexicalReplacementMaintainsTermFtsAndSymbolIndex(@TempDir Path tempDir) throws Exception {
         Path project = project(tempDir);
         try (SqliteRetrievalIndex index = new SqliteRetrievalIndex(tempDir.resolve("codebase-v2.db"))) {
             index.replaceLexicalFile(batch(project, "src/FooService.java", "hash-1",
@@ -46,27 +46,40 @@ class SqliteRetrievalIndexTest {
 
             assertEquals("src/FooService.java",
                     index.searchTerms(project, "compact context", 5).get(0).filePath());
-            assertEquals("src/FooService.java",
-                    index.searchTrigram(project, "上下文压缩", 5).get(0).filePath());
             assertEquals("FooService", index.searchSymbols(project, "foo", 5).get(0).symbol());
 
             index.replaceLexicalFile(batch(project, "src/FooService.java", "hash-2",
                     "class RenamedService {}", "RenamedService", "renamed service 重命名"));
 
             assertTrue(index.searchTerms(project, "compact", 5).isEmpty());
-            assertTrue(index.searchTrigram(project, "上下文", 5).isEmpty());
             assertEquals("RenamedService", index.searchSymbols(project, "renamed", 5).get(0).symbol());
         }
     }
 
     @Test
-    void safelyHandlesFtsOperatorsQuotesAndShortTrigramQueries(@TempDir Path tempDir) throws Exception {
+    void safelyHandlesFtsOperatorsQuotesAndMultipleTerms(@TempDir Path tempDir) throws Exception {
         Path project = project(tempDir);
         try (SqliteRetrievalIndex index = new SqliteRetrievalIndex(tempDir.resolve("codebase-v2.db"))) {
             index.replaceLexicalFile(batch(project, "src/A.java", "hash", "class A {}", "A", "and or not quote"));
 
             index.searchTerms(project, "AND OR NOT \" ( )", 5);
-            index.searchTrigram(project, "A", 5);
+            assertEquals("src/A.java", index.searchTerms(project, "and quote", 5).get(0).filePath());
+        }
+    }
+
+    @Test
+    void ordersTermMatchesByBm25Relevance(@TempDir Path tempDir) throws Exception {
+        Path project = project(tempDir);
+        try (SqliteRetrievalIndex index = new SqliteRetrievalIndex(tempDir.resolve("codebase-v2.db"))) {
+            index.replaceLexicalFile(batch(project, "src/Weak.java", "weak", "class Weak {}",
+                    "Weak", "context compact unrelated unrelated unrelated unrelated"));
+            index.replaceLexicalFile(batch(project, "src/Strong.java", "strong", "class Strong {}",
+                    "Strong", "context compact context compact"));
+
+            List<RetrievalCandidate> hits = index.searchTerms(project, "context compact", 5);
+
+            assertEquals(2, hits.size());
+            assertEquals("src/Strong.java", hits.get(0).filePath());
         }
     }
 

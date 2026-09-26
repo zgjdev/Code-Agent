@@ -1,6 +1,6 @@
 # 长期记忆确认时间与乘法衰减方案
 
-> 状态：已实现，待完整 Maven 回归验证
+> 状态：已实现并于 2026-09-26 完成针对性、quick、全量与构建验证
 > 基线：main@ea890e0a00752ad3cc8bb9fef378ee5b17332f9d
 > 目标分支：feat/long-term-memory-time-decay
 > 前置能力：docs/dev/23-long-term-memory-hybrid-retrieval.md 已合并到 main
@@ -512,20 +512,20 @@ git diff --check
 
 ## 7. 验收清单
 
-- [ ] 分支基于合并长期记忆混合检索后的最新 main。
-- [ ] 普通检索 finalScore 使用 hybrid * decay。
-- [ ] decay floor 固定 0.6。
-- [ ] 30 天时 decay=0.8，60 天=0.7，90 天=0.65。
-- [ ] lastConfirmedAt 优先于 timestamp。
-- [ ] legacy 无 lastConfirmedAt 自动回退 timestamp。
-- [ ] exact DUPLICATE 和 classifier DUPLICATE 都刷新 lastConfirmedAt。
-- [ ] 自动 retrieval 不刷新 lastConfirmedAt。
-- [ ] CREATE / SUPERSEDE 的新 active memory 初始化 lastConfirmedAt。
-- [ ] 写入候选召回不应用 decay。
-- [ ] active/superseded 仍决定事实有效性，时间不自动失效事实。
-- [ ] confirm 持久化失败不会留下错误内存状态。
-- [ ] 文档与运行时行为同步。
-- [ ] targeted / quick / full / package / diff-check 有真实验证结果后才宣称全部通过。
+- [x] 分支基于合并长期记忆混合检索后的最新 main。
+- [x] 普通检索 finalScore 使用 hybrid * decay。
+- [x] decay floor 固定 0.6。
+- [x] 30 天时 decay=0.8，60 天=0.7，90 天=0.65。
+- [x] lastConfirmedAt 优先于 timestamp。
+- [x] legacy 无 lastConfirmedAt 自动回退 timestamp。
+- [x] exact DUPLICATE 和 classifier DUPLICATE 都刷新 lastConfirmedAt。
+- [x] 自动 retrieval 不刷新 lastConfirmedAt。
+- [x] CREATE / SUPERSEDE 的新 active memory 初始化 lastConfirmedAt。
+- [x] 写入候选召回不应用 decay。
+- [x] active/superseded 仍决定事实有效性，时间不自动失效事实。
+- [x] confirm 持久化失败不会留下错误内存状态。
+- [x] 文档与运行时行为同步。
+- [x] targeted / quick / full / package / diff-check 有真实验证结果后才宣称全部通过。
 
 
 ## 8. 实际实现落点
@@ -565,8 +565,6 @@ MemoryManagerTest
 - superseded memory 不可再次确认；
 - MemoryManager DUPLICATE 回执与确认语义一致。
 
-### 8.2 当前验证边界
+### 8.2 验证结果（2026-09-26）
 
-当前工具环境没有可直接执行该仓库完整 Maven 工作树的运行入口，因此本轮没有真实执行 targeted / quick / full / package。已执行静态结构检查、公式数值核对和修改文件一致性检查；最终交付不得把“测试源码已补齐”描述成“测试已通过”。
-
-合并前仍需实际执行第 4.6 节命令。
+真实执行结果：长期记忆联合针对性测试 90 tests、0 failures、0 errors；`mvn test -Pquick` 1124 tests、0 failures、0 errors、4 skipped；`mvn test -DskipTests=false` 1175 tests、0 failures、0 errors、10 skipped；`mvn clean package -DskipTests` 构建成功；`git diff --check` 通过。

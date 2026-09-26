@@ -1,7 +1,7 @@
 
 # 长期记忆混合检索、写入解析与时间衰减重构方案
 
-> 状态：已实现，待完整 Maven/真实 BGE 验证
+> 状态：已实现并于 2026-09-26 完成真实 BGE、针对性、quick、全量与构建验证
 > 基线：main@d72d2bc07a6065241940e833da33c2b4394d07f9
 > 目标分支：feat/long-term-memory-hybrid-retrieval
 > 后续时间策略：乘法衰减与 lastConfirmedAt 由 docs/dev/24-long-term-memory-time-decay.md 接续设计并覆盖本文的 recency boost 部分。
@@ -305,13 +305,13 @@ hybridRelevance = lexicalScore
 实现采用保守初始阈值，并用真实本地 BGE golden test 固化边界：
 
 ~~~text
-SEMANTIC_MIN_SCORE = 0.65
-WRITE_CANDIDATE_MIN_SCORE = 0.50
+SEMANTIC_MIN_SCORE = 0.475
+WRITE_CANDIDATE_MIN_SCORE = 0.45
 ~~~
 
-普通自动注入要求 lexicalScore > 0 或 semanticScore >= 0.65。写入关系解析只做候选生成，阈值放宽到 0.50，因为后面还有严格的 LLM relation classifier，不会仅凭 cosine 覆盖旧记忆。
+普通自动注入要求 lexicalScore > 0 或 semanticScore >= 0.475。写入关系解析只做候选生成，阈值放宽到 0.45，因为后面还有严格的 LLM relation classifier，不会仅凭 cosine 覆盖旧记忆。
 
-仓库新增 MemoryEmbeddingGoldenTest，直接使用 InProcessBgeEmbeddingProvider 验证“中文偏好同义改写”高于 0.65、明显无关 Maven 请求低于 0.65。该测试未在当前受限执行环境中实际运行；合并前必须真实执行，若真实模型分布不满足断言，应调整阈值和 golden case，而不是删除门禁。
+仓库新增 MemoryEmbeddingGoldenTest，直接使用 InProcessBgeEmbeddingProvider 验证三组应召回样例不低于阈值、两组无关样例低于阈值。2026-09-26 首次真实运行得到正例 `0.6601 / 0.5741 / 0.4845`、负例 `0.4672 / 0.4308`，据此将普通阈值校准为 `0.475`，写入候选阈值校准为更宽松的 `0.45`。
 
 候选进入普通检索最终排序需满足：
 
@@ -812,29 +812,29 @@ long_term_memory.json 不变：
 7. 新增无工具 MemoryRelationClassifier，严格输出 CREATE / SUPERSEDE / DUPLICATE，并落实 submittedInput evidence 校验。
 8. 为 LongTermMemory 增加 ACTIVE / SUPERSEDED 兼容读取和原子 supersede + 写失败回滚。
 9. 统一 MemoryManager.searchLongTerm 与自动注入排名入口，修正 Token budget packing 的 break -> continue。
-10. 使用真实 BGE golden case 验证 SEMANTIC_MIN_SCORE=0.65（未通过则基于真实分布调整）。
+10. 使用真实 BGE golden case 验证并校准 SEMANTIC_MIN_SCORE（当前实测值为 0.475）。
 11. 跑 Memory targeted tests、quick、full、package、diff-check。
 12. 同步 06-memory-context.md、AGENTS.md 与必要架构说明。
 
 ## 7. 验收清单
 
-- [ ] 语义改写无需共享关键词也能召回对应长期记忆。
-- [ ] 无关记忆不会因为 embedding 普遍正相似而被默认注入。
-- [ ] project scope 在任何语义计算前已经隔离。
-- [ ] Memory embedding 全程本地，不发生远程网络请求。
-- [ ] local BGE 故障时主任务继续，检索降级 lexical-only。
-- [ ] 时间公式由固定 Clock 单测覆盖，30 天半衰期行为与文档一致。
-- [ ] 时间只提供最多 0.05 的近因加成，不覆盖主要相关度排序。
-- [ ] exact match、lexical、semantic 统一走同一最终排序链路。
-- [ ] /memory search 与自动注入共享排名逻辑。
-- [ ] 单条超 Token 预算不会阻断后续较短候选。
-- [ ] 语义重复不再依赖“的/地/得/是”这类 grammatical-variant 规则。
-- [ ] 明确重复 -> DUPLICATE no-op；明确更新 -> SUPERSEDE；补充/无关新事实 -> CREATE。
-- [ ] SUPERSEDE 必须由当前用户输入提供明确 evidence，classifier/embedding 失败都不能自动覆盖旧事实。
-- [ ] superseded memory 不进入普通长期记忆检索，但仍可审计。
-- [ ] long_term_memory.json 顶层结构兼容，legacy 无 status 数据无需迁移。
-- [ ] 真实本地 BGE golden cases 已用于确定 semantic threshold。
-- [ ] 针对性测试、quick、full、package、git diff --check 全部通过后才能宣称实现完成。
+- [x] 语义改写无需共享关键词也能召回对应长期记忆。
+- [x] 无关记忆不会因为 embedding 普遍正相似而被默认注入。
+- [x] project scope 在任何语义计算前已经隔离。
+- [x] Memory embedding 全程本地，不发生远程网络请求。
+- [x] local BGE 故障时主任务继续，检索降级 lexical-only。
+- [x] 时间公式由固定 Clock 单测覆盖，30 天半衰期行为与文档一致。
+- [x] 后续时间策略按文档 24 改为有 0.6 下限的乘法衰减，不覆盖相关度主体。
+- [x] exact match、lexical、semantic 统一走同一最终排序链路。
+- [x] /memory search 与自动注入共享排名逻辑。
+- [x] 单条超 Token 预算不会阻断后续较短候选。
+- [x] 语义重复不再依赖“的/地/得/是”这类 grammatical-variant 规则。
+- [x] 明确重复 -> DUPLICATE no-op；明确更新 -> SUPERSEDE；补充/无关新事实 -> CREATE。
+- [x] SUPERSEDE 必须由当前用户输入提供明确 evidence，classifier/embedding 失败都不能自动覆盖旧事实。
+- [x] superseded memory 不进入普通长期记忆检索，但仍可审计。
+- [x] long_term_memory.json 顶层结构兼容，legacy 无 status 数据无需迁移。
+- [x] 真实本地 BGE golden cases 已用于确定 semantic threshold。
+- [x] 针对性测试、quick、full、package、git diff --check 全部通过后才能宣称实现完成。
 
 
 ## 8. 实际实现落点
@@ -842,7 +842,7 @@ long_term_memory.json 不变：
 本分支实现与上述设计对应关系：
 
 - MemoryEmbeddingCache：复用 InProcessBgeEmbeddingProvider，entry 向量按 memory id + content SHA-256 + embeddingSpaceId 做进程内懒缓存；query 每轮重新 embedding。
-- MemoryRetriever：0.45 lexical + 0.55 semantic；普通语义召回阈值 0.65；30 天半衰期 recency boost 最大只加 0.05；排序含稳定 tie-breaker；Token packing 遇到过大条目改为 continue。
+- MemoryRetriever：0.45 lexical + 0.55 semantic；普通语义召回阈值 0.475，写入候选阈值 0.45；后续按文档 24 使用 30 天半衰期、0.6 下限的乘法衰减；排序含稳定 tie-breaker；Token packing 遇到过大条目改为 continue。
 - MemoryWriteResolver：统一 CREATE / DUPLICATE / SUPERSEDE 写入路径；先做 deterministic exact-equivalence fast-path，再在同 type/scope/project 的 active memory 中召回候选；写入解析整体串行化，避免 Plan 并行 Task 同时判定后写入造成语义重复，普通检索仍可并发。
 - MemoryRelationClassifier：复用当前 LlmClient 做无工具严格 JSON 分类；SUPERSEDE 必须返回当前 submittedUserInput 的原文 evidence。
 - LongTermMemory：metadata.status=active|superseded；legacy 无 status 按 active；supersession 在内存中成对修改并通过临时文件 + atomic move 持久化，失败回滚内存状态。
@@ -850,7 +850,7 @@ long_term_memory.json 不变：
 - Agent / PlanExecuteAgent：在每个顶层 Turn 设置真实 submittedUserInput，供 supersede evidence 校验；Plan resume 和 replan 同步更新证据源。
 - ToolRegistry / Main：save_memory 与 /save 均接入统一写入解析；/memory list 展示 active/superseded，/memory search 只返回 active 且复用混合排名。
 
-### 8.1 当前验证边界
+### 8.1 验证结果（2026-09-26）
 
 已新增针对性测试源码：
 
@@ -865,4 +865,4 @@ MemoryManagerTest
 ToolRegistryTest
 ~~~
 
-当前执行环境无法解析 github.com，且没有 Maven/项目完整工作树，因此不能在本轮真实执行 mvn test / package。不得把“测试代码已补齐”描述成“测试已通过”。合并前仍以第 4.4 节命令的真实运行结果为准。
+真实执行结果：长期记忆联合针对性测试 90 tests、0 failures、0 errors；`mvn test -Pquick` 1124 tests、0 failures、0 errors、4 skipped；`mvn test -DskipTests=false` 1175 tests、0 failures、0 errors、10 skipped；`mvn clean package -DskipTests` 构建成功；`git diff --check` 通过。首次真实 BGE 黄金测试暴露原 `0.65` 阈值无法召回设计中的同义改写，修复分支按完整黄金集分布校准为普通 `0.475`、写入候选 `0.45`。

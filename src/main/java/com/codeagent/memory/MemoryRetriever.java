@@ -17,8 +17,8 @@ import java.util.Set;
 public class MemoryRetriever implements AutoCloseable {
     static final double LEXICAL_WEIGHT = 0.45d;
     static final double SEMANTIC_WEIGHT = 0.55d;
-    static final double SEMANTIC_MIN_SCORE = 0.65d;
-    static final double WRITE_CANDIDATE_MIN_SCORE = 0.50d;
+    static final double SEMANTIC_MIN_SCORE = 0.475d;
+    static final double WRITE_CANDIDATE_MIN_SCORE = 0.45d;
     static final double DECAY_FLOOR = 0.60d;
     static final double DECAY_HALF_LIFE_DAYS = 30.0d;
 

@@ -1,6 +1,7 @@
 package com.codeagent.agent;
 
 import com.codeagent.llm.LlmClient;
+import com.codeagent.memory.MemoryEntry;
 import com.codeagent.skill.SkillContextBuffer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -10,6 +11,7 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -32,7 +34,7 @@ class AgentClearHistoryTest {
             Agent agent = new Agent(llmClient);
             SkillContextBuffer skillContextBuffer = new SkillContextBuffer();
             agent.setSkillContextBuffer(skillContextBuffer);
-            agent.getMemoryManager().storeFact("CLEAR_MARKER should only appear when retrieved", "project");
+            storeFixture(agent, "clear", "CLEAR_MARKER should only appear when retrieved");
 
             agent.run("CLEAR_MARKER");
 
@@ -72,8 +74,8 @@ class AgentClearHistoryTest {
                     new LlmClient.ChatResponse("assistant", "ok", null, 50_000, 1_000)
             ));
             Agent agent = new Agent(llmClient);
-            agent.getMemoryManager().storeFact("ALPHA_PROBE 检索探针：偏好 RETRIEVED_TABS 缩进", "project");
-            agent.getMemoryManager().storeFact("BETA_PROBE 检索探针：偏好 RETRIEVED_SPACES 缩进", "project");
+            storeFixture(agent, "alpha", "ALPHA_PROBE 检索探针：偏好 RETRIEVED_TABS 缩进");
+            storeFixture(agent, "beta", "BETA_PROBE 检索探针：偏好 RETRIEVED_SPACES 缩进");
 
             agent.run("ALPHA_PROBE");
             agent.run("BETA_PROBE");
@@ -96,6 +98,15 @@ class AgentClearHistoryTest {
                 System.setProperty("codeagent.memory.dir", oldMemoryDir);
             }
         }
+    }
+
+    private static void storeFixture(Agent agent, String id, String content) {
+        agent.getMemoryManager().getLongTermMemory().store(new MemoryEntry(
+                id,
+                content,
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"),
+                MemoryEntry.estimateTokens(content)));
     }
 
     private static final class RecordingClient implements LlmClient {

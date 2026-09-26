@@ -1,6 +1,6 @@
 # 代码库 RAG 与关系图谱（v1 历史实现）
 
-> 本文主体记录已冻结的 v1 行为，包含当时的外部 Embedding 依赖与 JSON 向量设计，仅供迁移和回滚分析。当前 v2 的实际架构、配置、隐私授权、增量索引与降级语义见 [20-local-first-layered-retrieval-implementation-plan.md](20-local-first-layered-retrieval-implementation-plan.md)，不得把下文 v1 描述当成现行使用说明。
+> 本文主体记录已冻结的 v1 行为，包含当时的外部 Embedding 依赖与 JSON 向量设计，仅供迁移和回滚分析。SQLite v2 的初始 Local-First 落地记录见 [20-local-first-layered-retrieval-implementation-plan.md](20-local-first-layered-retrieval-implementation-plan.md)；当前运行时已经进一步精简为 Term FTS、Semantic、Graph 三类召回，现行架构、兼容策略和测试矩阵见 [25-simplify-code-rag-retrieval.md](25-simplify-code-rag-retrieval.md)。不得把下文 v1 或 20 号文档中的六路 stage 描述当成现行使用说明。
 
 > **本文怎么读**
 >

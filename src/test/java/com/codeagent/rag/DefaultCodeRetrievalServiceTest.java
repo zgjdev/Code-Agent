@@ -15,19 +15,21 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DefaultCodeRetrievalServiceTest {
     @Test
-    void worksWithoutIndexThroughLiveFallback(@TempDir Path temp) throws Exception {
+    void executesOnlyTermGraphAndSemanticStagesWithoutLiveFallback(@TempDir Path temp) throws Exception {
         Path root = Files.createDirectories(temp.resolve("project"));
         Files.writeString(root.resolve("Router.java"), "class Router { void routeRequest() {} }");
         try (DefaultCodeRetrievalService service = service(temp, Optional.empty())) {
             RetrievalResponse response = service.search(new RetrievalRequest(root,
                     "Router routeRequest", 5, 4000, true, RetrievalIntent.CHUNKS));
-            assertFalse(response.hits().isEmpty());
-            assertTrue(response.hits().get(0).sources().contains(RetrievalSource.LIVE_GREP));
+            assertTrue(response.hits().isEmpty(), "RAG must not fall back to live grep");
+            assertEquals(Set.of(RetrievalSource.FTS_TERMS, RetrievalSource.GRAPH,
+                    RetrievalSource.SEMANTIC_LOCAL), response.diagnostics().stageHits().keySet());
         }
     }
 

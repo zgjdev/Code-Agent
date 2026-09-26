@@ -28,7 +28,6 @@ class IndexCoordinatorTest {
             IndexRefreshResult first = coordinator.refresh(new IndexRefreshRequest(root, false));
             assertEquals(1, first.changedFiles());
             assertFalse(index.searchTerms(root, "ContextService", 10).isEmpty());
-            assertFalse(index.searchTrigram(root, "compactHistory", 10).isEmpty());
             assertFalse(index.searchSymbols(root, "ContextService", 10).isEmpty());
 
             IndexRefreshResult second = coordinator.refresh(new IndexRefreshRequest(root, false));

@@ -31,8 +31,6 @@ public final class RetrievalFusion {
         for (Accumulator value : candidates.values()) {
             RetrievalCandidate candidate = value.candidate;
             double factor = 1.0;
-            if (value.sources.contains(RetrievalSource.SYMBOL)
-                    && candidate.symbol() != null && candidate.symbol().equals(query)) factor *= 1.15;
             if ("class".equals(candidate.chunkType()) || "method".equals(candidate.chunkType())) factor *= 1.05;
             if (value.sources.contains(RetrievalSource.GRAPH) && value.sources.size() > 1) factor *= 1.03;
             if (value.sources.size() >= 2) factor *= 1.05;
@@ -61,13 +59,10 @@ public final class RetrievalFusion {
 
     private static Map<RetrievalSource, Double> weights() {
         Map<RetrievalSource, Double> values = new EnumMap<>(RetrievalSource.class);
-        values.put(RetrievalSource.SYMBOL, 1.5);
-        values.put(RetrievalSource.LIVE_GREP, 1.4);
         values.put(RetrievalSource.FTS_TERMS, 1.2);
         values.put(RetrievalSource.SEMANTIC_LOCAL, 1.0);
         values.put(RetrievalSource.SEMANTIC_REMOTE, 1.0);
-        values.put(RetrievalSource.FTS_TRIGRAM, 0.8);
-        values.put(RetrievalSource.GRAPH, 0.7);
+        values.put(RetrievalSource.GRAPH, 0.8);
         return Map.copyOf(values);
     }
 

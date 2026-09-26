@@ -4,11 +4,8 @@ import com.codeagent.rag.embedding.EmbeddingProvider;
 import com.codeagent.rag.embedding.EmbeddingResolution;
 import com.codeagent.rag.stage.CodeRetrieverStage;
 import com.codeagent.rag.stage.GraphRetriever;
-import com.codeagent.rag.stage.LiveGrepRetriever;
 import com.codeagent.rag.stage.SemanticRetriever;
-import com.codeagent.rag.stage.SymbolRetriever;
 import com.codeagent.rag.stage.TermFtsRetriever;
-import com.codeagent.rag.stage.TrigramFtsRetriever;
 import com.codeagent.search.CodeSearchService;
 
 import java.nio.file.Path;
@@ -19,7 +16,6 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public final class DefaultCodeRetrievalService implements CodeRetrievalService {
     private final SqliteRetrievalIndex index;
-    private final CodeSearchService codeSearchService;
     private final List<CodeRetrieverStage> stages;
     private final ReentrantReadWriteLock providerLock = new ReentrantReadWriteLock();
     private EmbeddingResolution embeddingResolution;
@@ -27,15 +23,23 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
     private volatile boolean closed;
 
     public DefaultCodeRetrievalService(SqliteRetrievalIndex index,
-            CodeSearchService codeSearchService, EmbeddingResolution embeddingResolution) {
+            EmbeddingResolution embeddingResolution) {
         this.index = index;
-        this.codeSearchService = codeSearchService;
         this.embeddingResolution = embeddingResolution == null
                 ? new EmbeddingResolution(Optional.empty(), "embedding_disabled", false)
                 : embeddingResolution;
-        this.stages = List.of(new LiveGrepRetriever(), new TermFtsRetriever(),
-                new TrigramFtsRetriever(), new SymbolRetriever(), new GraphRetriever(),
+        this.stages = List.of(new TermFtsRetriever(), new GraphRetriever(),
                 new SemanticRetriever());
+    }
+
+    /**
+     * @deprecated live code search is no longer part of the RAG pipeline. The service is accepted
+     * only to preserve source and binary compatibility; {@code grep_code} owns it independently.
+     */
+    @Deprecated(forRemoval = false)
+    public DefaultCodeRetrievalService(SqliteRetrievalIndex index,
+            CodeSearchService ignoredCodeSearchService, EmbeddingResolution embeddingResolution) {
+        this(index, embeddingResolution);
     }
 
     @Override
@@ -45,7 +49,7 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
         providerLock.readLock().lock();
         try {
             RetrievalContext context = new RetrievalContext(request, index,
-                    embeddingResolution.provider(), codeSearchService);
+                    embeddingResolution.provider());
             RetrievalStageRunner.Result stagesResult = new RetrievalStageRunner().run(stages, context);
             List<RetrievalHit> fused = new RetrievalFusion().fuse(
                     stagesResult.rankings(), request.query(), Math.max(request.topK() * 3, 15));

@@ -2,6 +2,7 @@ package com.codeagent.mcp;
 
 import com.codeagent.mcp.config.McpConfigLoader;
 import com.codeagent.mcp.config.McpServerConfig;
+import com.codeagent.tool.ToolOutput;
 import com.codeagent.tool.ToolRegistry;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -63,6 +64,24 @@ class McpServerManagerTest {
         assertEquals(McpServerStatus.READY, server.status(), "状态应为 READY，错误: " + server.errorMessage());
         assertEquals(1, server.tools().size());
         assertTrue(registry.hasTool("mcp__demo__echo"));
+    }
+
+    @Test
+    void transportFailureIsTypedAsBackendUnavailableButRpcErrorIsExecutionError() throws Exception {
+        enqueueInitialize();
+        enqueueToolsList(toolJson("echo", "Echo back text"));
+        loadServersFromMap(Map.of("demo", httpConfig(webServer)));
+        manager.startAll();
+
+        webServer.enqueue(new MockResponse().setResponseCode(503));
+        ToolOutput unavailable = registry.executeToolOutput("mcp__demo__echo", "{}");
+        assertEquals(ToolOutput.FailureKind.BACKEND_UNAVAILABLE, unavailable.failureKind());
+
+        webServer.enqueue(new MockResponse()
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{\"code\":-32000,\"message\":\"business failure\"}}"));
+        ToolOutput businessError = registry.executeToolOutput("mcp__demo__echo", "{}");
+        assertEquals(ToolOutput.FailureKind.EXECUTION_ERROR, businessError.failureKind());
     }
 
     @Test

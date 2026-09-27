@@ -23,6 +23,7 @@ public class CodeAgentConfig {
     private String defaultProvider = "glm";
     private Map<String, ProviderConfig> providers = new LinkedHashMap<>();
     private EmbeddingConfig embedding = new EmbeddingConfig();
+    private WebToolsConfig webTools = new WebToolsConfig();
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class ProviderConfig {
@@ -111,6 +112,124 @@ public class CodeAgentConfig {
         }
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class WebToolsConfig {
+        private WebToolRouteConfig search = WebToolRouteConfig.autoDefault();
+        private WebToolRouteConfig fetch = WebToolRouteConfig.autoDefault();
+
+        public WebToolsConfig() {}
+
+        public WebToolRouteConfig getSearch() {
+            if (search == null) search = WebToolRouteConfig.autoDefault();
+            return search;
+        }
+
+        public void setSearch(WebToolRouteConfig search) {
+            this.search = search == null ? WebToolRouteConfig.autoDefault() : search;
+        }
+
+        public WebToolRouteConfig getFetch() {
+            if (fetch == null) fetch = WebToolRouteConfig.autoDefault();
+            return fetch;
+        }
+
+        public void setFetch(WebToolRouteConfig fetch) {
+            this.fetch = fetch == null ? WebToolRouteConfig.autoDefault() : fetch;
+        }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class WebToolRouteConfig {
+        private String backend;
+        private String provider;
+        private String tool;
+        private String onUnavailable;
+
+        public WebToolRouteConfig() {}
+
+        private WebToolRouteConfig(String backend) {
+            this.backend = backend;
+        }
+
+        public static WebToolRouteConfig autoDefault() {
+            return new WebToolRouteConfig("auto");
+        }
+
+        public static WebToolRouteConfig providerDefault() {
+            return new WebToolRouteConfig("provider");
+        }
+
+        public static WebToolRouteConfig directDefault() {
+            return new WebToolRouteConfig("direct");
+        }
+
+        public String getBackend() { return normalize(backend); }
+        public void setBackend(String backend) { this.backend = backend; }
+        public String getProvider() { return normalize(provider); }
+        public void setProvider(String provider) { this.provider = provider; }
+        public String getTool() { return trimToNull(tool); }
+        public void setTool(String tool) { this.tool = tool; }
+        public String getOnUnavailable() {
+            String normalized = normalize(onUnavailable);
+            return normalized == null ? "fail" : normalized;
+        }
+        public void setOnUnavailable(String onUnavailable) { this.onUnavailable = onUnavailable; }
+
+        public String validationError(String logicalTool) {
+            String logical = logicalTool == null ? "" : logicalTool.trim().toLowerCase();
+            String selectedBackend = getBackend();
+            if ("web_search".equals(logical)) {
+                if (!"auto".equals(selectedBackend)
+                        && !"provider".equals(selectedBackend) && !"mcp".equals(selectedBackend)) {
+                    return "web_search backend 必须是 auto、provider 或 mcp";
+                }
+                String selectedProvider = getProvider();
+                if ("provider".equals(selectedBackend) && selectedProvider != null
+                        && !java.util.Set.of("zhipu", "serpapi", "searxng").contains(selectedProvider)) {
+                    return "web_search provider 必须是 zhipu、serpapi 或 searxng";
+                }
+            } else if ("web_fetch".equals(logical)) {
+                if (!"auto".equals(selectedBackend)
+                        && !"direct".equals(selectedBackend) && !"mcp".equals(selectedBackend)) {
+                    return "web_fetch backend 必须是 auto、direct 或 mcp";
+                }
+            } else {
+                return "未知 Web 逻辑工具: " + logicalTool;
+            }
+            if ("mcp".equals(selectedBackend)) {
+                String selectedTool = getTool();
+                if (!isNamespacedMcpTool(selectedTool)) {
+                    return logical + " 的 MCP tool 必须使用 mcp__{server}__{tool} 完整名称";
+                }
+                if (logical.equals(selectedTool)) {
+                    return logical + " 不能递归绑定自身";
+                }
+            }
+            String unavailable = getOnUnavailable();
+            if (!"fail".equals(unavailable) && !"default".equals(unavailable)) {
+                return logical + " onUnavailable 必须是 fail 或 default";
+            }
+            return null;
+        }
+
+        private static String normalize(String value) {
+            String trimmed = trimToNull(value);
+            return trimmed == null ? null : trimmed.toLowerCase(java.util.Locale.ROOT);
+        }
+
+        private static String trimToNull(String value) {
+            return value == null || value.isBlank() ? null : value.trim();
+        }
+
+        private static boolean isNamespacedMcpTool(String value) {
+            if (value == null || !value.startsWith("mcp__")) return false;
+            String remainder = value.substring("mcp__".length());
+            int delimiter = remainder.indexOf("__");
+            return delimiter > 0 && delimiter < remainder.length() - 2
+                    && value.chars().noneMatch(Character::isWhitespace);
+        }
+    }
+
     public String getDefaultProvider() { return defaultProvider; }
     public void setDefaultProvider(String defaultProvider) { this.defaultProvider = defaultProvider; }
     public Map<String, ProviderConfig> getProviders() { return providers; }
@@ -121,6 +240,13 @@ public class CodeAgentConfig {
     }
     public void setEmbedding(EmbeddingConfig embedding) {
         this.embedding = embedding == null ? new EmbeddingConfig() : embedding;
+    }
+    public WebToolsConfig getWebTools() {
+        if (webTools == null) webTools = new WebToolsConfig();
+        return webTools;
+    }
+    public void setWebTools(WebToolsConfig webTools) {
+        this.webTools = webTools == null ? new WebToolsConfig() : webTools;
     }
 
     public String getApiKey(String provider) {

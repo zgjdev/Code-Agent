@@ -250,6 +250,7 @@ public class Main {
             TerminalHitlHandler terminalHitlHandler = new TerminalHitlHandler(false);
             SwitchableHitlHandler hitlHandler = new SwitchableHitlHandler(terminalHitlHandler);
             HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler);
+            configureToolRegistry(hitlToolRegistry, config);
             BrowserSession browserSession = new BrowserSession();
             BrowserConnectivityCheck browserConnectivityCheck = new BrowserConnectivityCheck();
             hitlToolRegistry.setBrowserGuard(new BrowserGuard(browserSession, new SensitivePagePolicy()));
@@ -389,7 +390,7 @@ public class Main {
                 Runtime.getRuntime().addShutdownHook(new Thread(() ->
                         closeSessionQuietly(activeSession.get()), "codeagent-session-shutdown"));
             }
-            DurableTaskManager taskManager = openTaskManager(llmClientRef);
+            DurableTaskManager taskManager = openTaskManager(llmClientRef, config);
             taskManager.start();
             Runtime.getRuntime().addShutdownHook(new Thread(taskManager::close, "codeagent-task-shutdown"));
             WechatRuntimeController wechatRuntime = new WechatRuntimeController(renderer);
@@ -1197,7 +1198,7 @@ public class Main {
             RuntimeThreadStore store = new RuntimeThreadStore(RuntimeThreadStore.defaultDbPath());
             RuntimeApiServer server = new RuntimeApiServer(
                     store,
-                    prompt -> runHeadlessTask(prompt, client),
+                    prompt -> runHeadlessTask(prompt, client, config),
                     port,
                     RuntimeApiServer.configuredApiKey());
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -1232,8 +1233,9 @@ public class Main {
         return defaultPort;
     }
 
-    private static String runHeadlessTask(String prompt, LlmClient llmClient) {
+    private static String runHeadlessTask(String prompt, LlmClient llmClient, CodeAgentConfig config) {
         ToolRegistry registry = new ToolRegistry();
+        configureToolRegistry(registry, config);
         registry.setProjectPath(Path.of(".").toAbsolutePath().normalize().toString());
         Agent agent = new Agent(llmClient, registry);
         try {
@@ -1245,11 +1247,18 @@ public class Main {
         return agent.run(prompt);
     }
 
-    private static DurableTaskManager openTaskManager(AtomicReference<LlmClient> llmClientRef) {
+    private static DurableTaskManager openTaskManager(AtomicReference<LlmClient> llmClientRef,
+                                                       CodeAgentConfig config) {
         try {
-            return DurableTaskManager.openDefault(prompt -> runHeadlessTask(prompt, llmClientRef.get()));
+            return DurableTaskManager.openDefault(prompt -> runHeadlessTask(prompt, llmClientRef.get(), config));
         } catch (Exception e) {
             throw new IllegalStateException("后台任务管理器初始化失败: " + e.getMessage(), e);
+        }
+    }
+
+    static void configureToolRegistry(ToolRegistry registry, CodeAgentConfig config) {
+        if (registry != null) {
+            registry.setWebToolsConfig(config == null ? null : config.getWebTools());
         }
     }
 

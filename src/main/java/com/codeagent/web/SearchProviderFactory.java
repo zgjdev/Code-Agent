@@ -30,7 +30,13 @@ public final class SearchProviderFactory {
     private SearchProviderFactory() {}
 
     public static SearchProvider create() {
-        String provider = readEnv("SEARCH_PROVIDER");
+        return create(null);
+    }
+
+    public static SearchProvider create(String configuredProvider) {
+        String provider = configuredProvider == null || configuredProvider.isBlank()
+                ? readEnv("SEARCH_PROVIDER")
+                : configuredProvider.trim();
         String glmKey = readEnv("GLM_API_KEY");
         String zhipuEngine = readEnv("ZHIPU_SEARCH_ENGINE");
         String serpKey = readEnv("SERPAPI_KEY");

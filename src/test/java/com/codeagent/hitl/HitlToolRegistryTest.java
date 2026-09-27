@@ -8,6 +8,7 @@ import com.codeagent.browser.BrowserGuard;
 import com.codeagent.browser.BrowserSession;
 import com.codeagent.browser.SensitivePagePolicy;
 import com.codeagent.mcp.protocol.McpToolDescriptor;
+import com.codeagent.tool.ToolOutput;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -73,6 +74,19 @@ class HitlToolRegistryTest {
         assertTrue(result.contains("too risky"));
         assertFalse(Files.exists(target), "拒绝后文件不应被创建");
         assertEquals(1, stub.requestCount(), "应只发起一次审批");
+    }
+
+    @Test
+    void rejectedDecisionReturnsTypedFailure(@TempDir Path tempDir) {
+        StubHandler stub = new StubHandler(req -> ApprovalResult.reject("too risky"));
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+
+        ToolOutput output = registry.executeToolOutput("write_file",
+                "{\"path\":\"blocked.txt\",\"content\":\"x\"}");
+
+        assertFalse(output.successful());
+        assertEquals(ToolOutput.FailureKind.HITL_REJECTED, output.failureKind());
     }
 
     @Test

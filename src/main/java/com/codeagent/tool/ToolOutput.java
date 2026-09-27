@@ -17,7 +17,19 @@ import java.util.Objects;
 public record ToolOutput(String text,
                          List<LlmClient.ContentPart> imageParts,
                          boolean successful,
-                         List<String> discoveredUrls) {
+                         List<String> discoveredUrls,
+                         FailureKind failureKind) {
+    public enum FailureKind {
+        NONE,
+        INVALID_CONFIGURATION,
+        BACKEND_UNAVAILABLE,
+        TOOL_NOT_FOUND,
+        POLICY_DENIED,
+        HITL_REJECTED,
+        CANCELLED,
+        EXECUTION_ERROR
+    }
+
     public ToolOutput {
         text = text == null ? "" : text;
         imageParts = imageParts == null ? List.of() : List.copyOf(imageParts);
@@ -29,28 +41,52 @@ public record ToolOutput(String text,
                 .filter(url -> !url.isEmpty())
                 .distinct()
                 .toList();
+        failureKind = failureKind == null
+                ? (successful ? FailureKind.NONE : FailureKind.EXECUTION_ERROR)
+                : failureKind;
+    }
+
+    /** Backward-compatible constructor for callers without typed failure metadata. */
+    public ToolOutput(String text,
+                      List<LlmClient.ContentPart> imageParts,
+                      boolean successful,
+                      List<String> discoveredUrls) {
+        this(text, imageParts, successful, discoveredUrls,
+                successful ? FailureKind.NONE : FailureKind.EXECUTION_ERROR);
     }
 
     /** Backward-compatible constructor for successful text/image tools. */
     public ToolOutput(String text, List<LlmClient.ContentPart> imageParts) {
-        this(text, imageParts, true, List.of());
+        this(text, imageParts, true, List.of(), FailureKind.NONE);
     }
 
     public static ToolOutput text(String text) {
-        return new ToolOutput(text, List.of(), true, List.of());
+        return new ToolOutput(text, List.of(), true, List.of(), FailureKind.NONE);
     }
 
     public static ToolOutput failure(String text) {
-        return new ToolOutput(text, List.of(), false, List.of());
+        return failure(FailureKind.EXECUTION_ERROR, text);
     }
 
     public static ToolOutput failure(String text, List<LlmClient.ContentPart> imageParts) {
-        return new ToolOutput(text, imageParts, false, List.of());
+        return failure(FailureKind.EXECUTION_ERROR, text, imageParts);
+    }
+
+    public static ToolOutput failure(FailureKind kind, String text) {
+        return failure(kind, text, List.of());
+    }
+
+    public static ToolOutput failure(FailureKind kind, String text,
+                                     List<LlmClient.ContentPart> imageParts) {
+        FailureKind effective = kind == null || kind == FailureKind.NONE
+                ? FailureKind.EXECUTION_ERROR
+                : kind;
+        return new ToolOutput(text, imageParts, false, List.of(), effective);
     }
 
     public static ToolOutput discovered(String text, Collection<String> discoveredUrls) {
         return new ToolOutput(text, List.of(), true,
-                discoveredUrls == null ? List.of() : List.copyOf(discoveredUrls));
+                discoveredUrls == null ? List.of() : List.copyOf(discoveredUrls), FailureKind.NONE);
     }
 
     public boolean hasImageParts() {

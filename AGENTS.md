@@ -148,9 +148,10 @@ sequenceDiagram
 - ReAct 与 PlanExecuteAgent 共享同一个 ParentConversationContext，但只共享 Session 级顶层语义连续性；Planner 只读取 Top-level Conversation View，不读取 tool result、synthetic user、Skill/Memory 注入或 Task child transcript。Task Worker 仍使用独立 task-local messages；历史对话只用于语义理解，绝不能成为当前 Turn 的权限来源。
 - 工具授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard；策略拒绝不能通过换工具、provider 或分支绕过。
 - URL 只能来自顶层用户原文或成功 web_search 的结构化 discoveredUrls；搜索正文、reasoning、普通工具输出和回复文本都不能产生新授权。计划分支默认隔离 URL 凭据，只有声明的 DAG 后继可继承；步骤自动评审（stepReview）不改变这一步的授权继承。
+- 模型只暴露统一 `web_search` / `web_fetch`；底层 MCP 搜索/抓取工具仅保留在内部 Registry。`webTools.backend=auto` 默认继续按当前 LLM 选择：Step 3.7 Flash 使用 StepSearch MCP，其他模型使用 SearchProvider/direct；显式 provider/direct/MCP 配置优先。只有 `BACKEND_UNAVAILABLE` 且路由允许时才能回退，策略/HITL 拒绝、取消和执行错误不得换通道。
 - @path/MCP resource 展开在进入 Agent 前完成；项目外绝对路径和符号链接逃逸保持原文。
 - 写文件后按配置运行 LSP 诊断；诊断作为下一轮 user message 注入。CODEAGENT_LSP_ENABLED=false 可关闭。
-- MCP 启动默认最多等待 8 秒，超时 server 保持 STARTING 并后台继续；用 /mcp 查看状态。
+- 交互式 CLI 会同时启动已启用的 stdio/HTTP MCP Server；启动默认最多等待 8 秒，超时 server 保持 STARTING 并后台继续，用 /mcp 查看状态。Runtime API/后台 headless 路径不创建 McpServerManager。
 - /clear 只清空当前发送视图、session memory 预计算状态和 Skill buffer，长期记忆及 raw ledger 保留；/compact 手动执行完整摘要压缩。
 - RAG 只保留三类召回：SQLite FTS5 + BM25 词法检索、BGE + cosine 语义检索、代码关系图检索；Symbol Index 仅作为 Graph seed 基础设施，不独立参与融合。实时精确定位继续由 `grep_code` / `glob_files` / `read_file` 承担，不进入 RAG。远程 Embedding 仅在当前项目/provider/model/endpoint/policy-version 匹配的显式授权后启用，拒绝或故障必须降级而不能中止 FTS / Graph 检索。
 - 长期记忆的事实源仍是 `~/.codeagent/memory/long_term_memory.json`；普通检索只读取当前 scope 可见的 active 记忆，使用词法 + 进程内 BGE 混合相关度，并按 `lastConfirmedAt` 应用下限 0.6、30 天半衰期的乘法衰减；legacy 缺失确认时间时回退 creation timestamp。embedding 只做进程内派生缓存且不得发送到远端。显式 `save_memory` / `/save` 写入统一解析 CREATE / DUPLICATE / SUPERSEDE；DUPLICATE 只刷新已有记忆的确认时间、不重复创建，普通 retrieval 不得自动确认；写入候选不应用时间衰减。embedding 只召回候选，SUPERSEDE 必须由无工具关系分类器返回当前 `submittedUserInput` 的原文 evidence，失败时不得让旧记忆失效。

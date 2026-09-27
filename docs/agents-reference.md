@@ -58,9 +58,12 @@ DeepSeek 当前不发送图片输入：`supportsImageInput()` 返回 false，含
 
 ### Web Search Provider Config
 
-1. `SEARCH_PROVIDER` 显式指定 `zhipu` / `serpapi` / `searxng`
-2. 未指定时按 Key 自动判断：`GLM_API_KEY` → zhipu / `SERPAPI_KEY` → serpapi / `SEARXNG_URL` → searxng
-3. 都没有 → zhipu 占位
+模型侧只存在 `web_search` / `web_fetch`。`~/.codeagent/config.json` 的 `webTools` 决定内部实现：
+
+1. 默认 `backend=auto`：Step 3.7 Flash 使用 StepSearch MCP，其他模型使用 SearchProvider/direct；
+2. search 可固定 `provider`（zhipu/serpapi/searxng）或 `mcp`；fetch 可固定 `direct` 或 `mcp`；
+3. provider 未指定时，`SEARCH_PROVIDER` 优先，其次按 `GLM_API_KEY` → `SERPAPI_KEY` → `SEARXNG_URL` 自动判断；
+4. 显式 MCP 路由缺省 `onUnavailable=fail`；`default` 只对 `BACKEND_UNAVAILABLE` 回退。
 
 各 provider：zhipu(`GLM_API_KEY` + 可选 `ZHIPU_SEARCH_ENGINE`) / serpapi(`SERPAPI_KEY`) / searxng(`SEARXNG_URL`)
 
@@ -75,7 +78,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 3. 按 server 名 merge，项目级覆盖用户级
 
 格式兼容 Claude Code：`command` + `args` = stdio，`url` + `headers` = Streamable HTTP。内置变量：`${PROJECT_DIR}`、`${HOME}`；其他 `${VAR}` 从系统环境变量、系统属性、项目 `.env`、用户 `~/.env` 读取。
-检测到 `STEP_API_KEY` 时自动内置 `step_search` 远程 MCP（显式同名配置优先），用于 Step 3.7 Flash 的 `web_search` / `web_fetch` 优先代理。
+检测到 `STEP_API_KEY` 时自动内置 `step_search` 远程 MCP（显式同名配置优先）。默认 auto 路由用于 Step 3.7 Flash；底层 `mcp__step_search__web_search` / `web_fetch` 不进入模型 Tool definitions。
 
 ---
 
@@ -151,13 +154,13 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### Web Capabilities
 
-- `web_search`：SearchProvider 接口，返回 SearchResult 列表
-- `web_fetch`：NetworkPolicy → WebFetcher → HtmlExtractor，SPA/防爬墙返回空正文 + 边界提示
+- `web_search` / `web_fetch` 是模型可见的稳定门面；原始 MCP 同名工具和显式绑定的 MCP 后端仍可内部执行、诊断和审计，但不发送给模型。
+- 默认 `auto` 保留模型感知路由：provider=`step` 且 model 以 `step-3.7-flash` 开头时使用 StepSearch MCP，否则搜索走 SearchProvider、抓取走 NetworkPolicy → WebFetcher → HtmlExtractor。显式路由覆盖 auto。
 - Prompt 不包含 Freshness Policy，也不对“最新/当前/今天”等关键词做自动 `web_search` 预检。模型只能在顶层用户目标明确时主动选择联网工具；明确“不要联网”始终优先。
 - 顶层输入只是裸标题、主题或摘录，且无动作、问题或目标时，当前轮只做澄清，不调用任何工具。模型不得根据标题、记忆或自己的 reasoning 猜测 URL。
 - 用户明确要求查找但没有 URL 时，先 `web_search`；`web_fetch` 或 Chrome / MCP 导航 URL 只能来自用户实际提交的顶层原文（不能是 `@path` / MCP resource 展开正文），或同一执行分支由搜索 provider 返回的结构化 `discoveredUrls`。搜索正文、snippet、query 回显、错误提示、`web_fetch` 正文、浏览器导航/快照/网络列表、普通本地工具结果、assistant reasoning、回复文本和 tool arguments 都不能建立 URL provenance；当前 StepSearch MCP 的非结构化文本不会生成凭据。
 - `TurnToolPolicy` 是运行时确定性边界：ReAct 与 Plan 的每个执行分支都必须单独传入用户提交原文与展开后的执行内容，不能让 planner / task 派生的“搜索”子任务自行获得联网授权。Plan 审阅补充会重建策略；Plan 并行任务使用 fork 后的独立 URL 集合，避免跨分支扩权。只有 DAG 中声明的后继依赖会继承前置分支不可伪造的 `TrustedUrlContext`；任务结果文本不作为授权来源。grounded URL 先只曝光导航，成功导航只建立当前页读取上下文，读取结果不产生新 URL 授权；交互工具必须有顶层原文明确授权。shared Chrome 的真实模式与 CodeAgent-owned 当前页从 `BrowserSession` 跨轮注入策略；非 owned 标签页只在用户明确要求时开放只读，导航/写入/关闭会硬拒绝，导航结果的全量 `# Pages` 会在回灌模型前裁成单页回执。策略在 StepSearch、内置 SearchProvider / WebFetcher 和 Chrome / MCP 路由之前执行，拒绝结果不得用 fallback 绕过。
-- StepSearch 优先级：通过 `TurnToolPolicy` 后，当前模型 provider=`step` 且 model 以 `step-3.7-flash` 开头，并且自动/显式 `mcp__step_search__web_search` / `mcp__step_search__web_fetch` 已注册时，内置 `web_search` / `web_fetch` 会先代理到 StepSearch MCP；MCP 未就绪或返回不可用结果时回退原实现。
+- StepSearch auto 路由：稳定门面先通过一次 `TurnToolPolicy`，内部完整 MCP 名称继续经过 HITL、Registry、BrowserGuard 和 AuditLog，但不重复作为模型调用做策略授权。工具未注册或 transport 不可用时归类为 `BACKEND_UNAVAILABLE` 并回退默认实现；JSON-RPC 业务错误仍为 `EXECUTION_ERROR`。显式 MCP 路由只有配置 `onUnavailable=default` 才做同类回退。通用 MCP 搜索结果不传播 `discoveredUrls`。
 - 本地“当前项目/当前 README/当前文件/当前代码”属于代码库任务，应选择 `glob_files` / `grep_code` / `read_file`，而不是联网工具。
 - JS 渲染 fallback 到 Chrome DevTools MCP
 
@@ -169,6 +172,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 所有 mcp__ 工具默认走 HITL + AuditLog
 - resources 双轨：虚拟工具 + @-mention 输入层
 - CLI 首屏默认只等待 MCP 启动 8 秒，慢 server 后台继续初始化并保持 `starting`，用 `/mcp` / `/mcp logs <name>` 追踪
+- Runtime API 和后台 headless task 只创建 ToolRegistry，不创建 McpServerManager；依赖 MCP 的路由会按不可用策略失败或回退
 - notifications 路由：tools/list_changed → 工具全量替换，resources 变化 → cache 失效
 
 ### Chrome DevTools MCP

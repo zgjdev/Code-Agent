@@ -1,5 +1,7 @@
 package com.codeagent.cli;
 
+import com.codeagent.config.CodeAgentConfig;
+import com.codeagent.tool.ToolRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -9,6 +11,21 @@ import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.*;
 
 class MainConfigBootstrapTest {
+
+    @Test
+    void appliesWebToolRoutesToRegistry() {
+        CodeAgentConfig config = new CodeAgentConfig();
+        CodeAgentConfig.WebToolRouteConfig search = new CodeAgentConfig.WebToolRouteConfig();
+        search.setBackend("mcp");
+        search.setTool("mcp__step_search__web_search");
+        config.getWebTools().setSearch(search);
+        ToolRegistry registry = new ToolRegistry();
+
+        Main.configureToolRegistry(registry, config);
+
+        assertEquals("mcp__step_search__web_search",
+                registry.getWebToolsConfig().getSearch().getTool());
+    }
 
     @Test
     void createsDefaultChromeDevtoolsMcpConfigWhenMissing(@TempDir Path tempHome) throws Exception {

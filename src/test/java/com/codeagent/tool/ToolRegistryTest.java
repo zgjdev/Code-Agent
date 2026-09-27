@@ -3,6 +3,7 @@ package com.codeagent.tool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.codeagent.browser.BrowserConnector;
+import com.codeagent.config.CodeAgentConfig;
 import com.codeagent.mcp.protocol.McpToolDescriptor;
 import com.codeagent.rag.CodeRetrievalService;
 import com.codeagent.rag.IndexRefreshRequest;
@@ -16,6 +17,8 @@ import com.codeagent.rag.RetrievalRequest;
 import com.codeagent.rag.RetrievalResponse;
 import com.codeagent.rag.RetrievalSource;
 import com.codeagent.rag.embedding.EmbeddingResolution;
+import com.codeagent.runtime.CancellationContext;
+import com.codeagent.runtime.CancellationToken;
 import com.codeagent.web.SearchProvider;
 import com.codeagent.web.SearchResult;
 import org.junit.jupiter.api.Test;
@@ -39,6 +42,36 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ToolRegistryTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void cancellationFailureIsTyped() {
+        ToolRegistry registry = new ToolRegistry();
+        CancellationToken token = CancellationContext.startRun();
+        token.cancel();
+        try {
+            ToolOutput output = registry.executeToolOutput("list_dir", "{\"path\":\".\"}");
+
+            assertFalse(output.successful());
+            assertEquals(ToolOutput.FailureKind.CANCELLED, output.failureKind());
+        } finally {
+            CancellationContext.clear(token);
+        }
+    }
+
+    @Test
+    void pathGuardFailureIsTypedAsPolicyDenial(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        Path outside = tempDir.getParent().resolve("outside.txt");
+
+        ToolOutput output = registry.executeToolOutput("write_file", MAPPER.createObjectNode()
+                .put("path", outside.toString())
+                .put("content", "blocked")
+                .toString());
+
+        assertFalse(output.successful());
+        assertEquals(ToolOutput.FailureKind.POLICY_DENIED, output.failureKind());
+    }
 
     @Test
     void searchCodeExposesDiagnosticsAndArchitectureMap(@TempDir Path tempDir) {
@@ -289,9 +322,9 @@ class ToolRegistryTest {
     }
 
     @Test
-    void shouldRouteWebSearchThroughStepSearchMcpForStep37Flash() throws Exception {
+    void shouldRouteWebSearchThroughConfiguredMcpBackend() throws Exception {
         ToolRegistry registry = new ToolRegistry();
-        registry.setCurrentModel("step", "step-3.7-flash");
+        registry.setWebToolsConfig(mcpWebTools("mcp__step_search__web_search", null, "fail"));
         registry.registerMcpTool(stepSearchDescriptor("web_search", """
                 {
                   "type": "object",
@@ -306,13 +339,27 @@ class ToolRegistryTest {
                 "web_search", "{\"query\":\"Step 3.7 Flash\",\"top_k\":3}");
         String result = output.text();
 
-        assertTrue(result.contains("[StepSearch]"));
+        assertTrue(result.contains("[MCP]"));
         assertTrue(result.contains("step-result"));
         assertTrue(result.contains("\"query\":\"Step 3.7 Flash\""));
         assertTrue(result.contains("\"top_k\":3"));
         assertTrue(output.successful());
         assertTrue(output.discoveredUrls().isEmpty(),
                 "unstructured MCP prose must not grant URL provenance");
+    }
+
+    @Test
+    void configuredMcpSearchCannotMintUrlAuthorityWithoutTrustedAdapter() throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setWebToolsConfig(mcpWebTools("mcp__step_search__web_search", null, "fail"));
+        registry.registerMcpToolOutput(stepSearchDescriptor("web_search", """
+                {"type":"object","properties":{"query":{"type":"string"}}}
+                """), args -> ToolOutput.discovered("result", List.of("https://untrusted.example/path")));
+
+        ToolOutput output = registry.executeToolOutput("web_search", "{\"query\":\"routing\"}");
+
+        assertTrue(output.successful());
+        assertTrue(output.discoveredUrls().isEmpty());
     }
 
     @Test
@@ -352,9 +399,9 @@ class ToolRegistryTest {
     }
 
     @Test
-    void shouldRouteWebFetchThroughStepSearchMcpForStep37Flash() throws Exception {
+    void shouldRouteWebFetchThroughConfiguredMcpBackend() throws Exception {
         ToolRegistry registry = new ToolRegistry();
-        registry.setCurrentModel("step", "step-3.7-flash");
+        registry.setWebToolsConfig(mcpWebTools(null, "mcp__step_search__web_fetch", "fail"));
         registry.registerMcpTool(stepSearchDescriptor("web_fetch", """
                 {
                   "type": "object",
@@ -368,23 +415,71 @@ class ToolRegistryTest {
         String result = registry.executeTool("web_fetch",
                 "{\"url\":\"https://203.0.113.10/docs/step-search\",\"max_chars\":1200}");
 
-        assertTrue(result.contains("[StepSearch]"));
+        assertTrue(result.contains("[MCP]"));
         assertTrue(result.contains("step-fetch"));
         assertTrue(result.contains("\"url\":\"https://203.0.113.10/docs/step-search\""));
         assertTrue(result.contains("\"max_chars\":1200"));
     }
 
     @Test
-    void shouldNotRouteStepSearchForOlderStepModel() throws Exception {
+    void shouldRouteStepSearchFromModelIdentityWithoutExposingRawTool() throws Exception {
         ToolRegistry registry = new ToolRegistry();
-        registry.setCurrentModel("step", "step-3.5-flash");
+        registry.setCurrentModel("step", "step-3.7-flash");
         registry.registerMcpTool(stepSearchDescriptor("web_search", """
                 {"type": "object", "properties": {"query": {"type": "string"}}}
                 """), args -> "step-result:" + args);
 
         String result = registry.executeTool("web_search", "{\"query\":\"Step 3.7 Flash\"}");
 
+        assertTrue(result.contains("step-result"));
+        assertFalse(registry.getToolDefinitions().stream()
+                .anyMatch(tool -> tool.name().equals("mcp__step_search__web_search")));
+    }
+
+    @Test
+    void explicitProviderRouteOverridesStepModelSelection() throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        CodeAgentConfig.WebToolsConfig config = new CodeAgentConfig.WebToolsConfig();
+        CodeAgentConfig.WebToolRouteConfig search = new CodeAgentConfig.WebToolRouteConfig();
+        search.setBackend("provider");
+        config.setSearch(search);
+        registry.setWebToolsConfig(config);
+        registry.setCurrentModel("step", "step-3.7-flash");
+        registry.setSearchProvider(stubSearchProvider("provider-result"));
+        registry.registerMcpTool(stepSearchDescriptor("web_search", """
+                {"type": "object", "properties": {"query": {"type": "string"}}}
+                """), args -> "step-result:" + args);
+
+        String result = registry.executeTool("web_search", "{\"query\":\"routing\"}");
+
+        assertTrue(result.contains("provider-result"));
         assertFalse(result.contains("step-result"));
+    }
+
+    @Test
+    void autoRouteFallsBackToProviderOnlyWhenStepMcpIsUnavailable() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setCurrentModel("step", "step-3.7-flash");
+        registry.setSearchProvider(stubSearchProvider("fallback-result"));
+
+        ToolOutput output = registry.executeToolOutput("web_search", "{\"query\":\"routing\"}");
+
+        assertTrue(output.successful());
+        assertTrue(output.text().contains("fallback-result"));
+    }
+
+    @Test
+    void hidesReservedMcpWebToolsButKeepsThemInternallyExecutable() throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.registerMcpTool(stepSearchDescriptor("web_search", """
+                {"type":"object","properties":{"query":{"type":"string"}}}
+                """), args -> "step-result:" + args);
+
+        assertFalse(registry.getToolDefinitions().stream()
+                .anyMatch(tool -> tool.name().equals("mcp__step_search__web_search")));
+        assertTrue(registry.hasTool("mcp__step_search__web_search"));
+        assertTrue(registry.executeTool("mcp__step_search__web_search", "{\"query\":\"x\"}")
+                .contains("step-result"));
     }
 
     @Test
@@ -469,6 +564,50 @@ class ToolRegistryTest {
                 "mcp__step_search__" + name,
                 "StepSearch " + name,
                 inputSchema);
+    }
+
+    private static SearchProvider stubSearchProvider(String title) {
+        return new SearchProvider() {
+            @Override
+            public String name() {
+                return "stub";
+            }
+
+            @Override
+            public boolean isReady() {
+                return true;
+            }
+
+            @Override
+            public String unavailableHint() {
+                return "";
+            }
+
+            @Override
+            public List<SearchResult> search(String query, int topK) {
+                return List.of(SearchResult.of(1, title, "https://example.com", "ok"));
+            }
+        };
+    }
+
+    private static CodeAgentConfig.WebToolsConfig mcpWebTools(String searchTool, String fetchTool,
+                                                               String onUnavailable) {
+        CodeAgentConfig.WebToolsConfig config = new CodeAgentConfig.WebToolsConfig();
+        if (searchTool != null) {
+            CodeAgentConfig.WebToolRouteConfig search = new CodeAgentConfig.WebToolRouteConfig();
+            search.setBackend("mcp");
+            search.setTool(searchTool);
+            search.setOnUnavailable(onUnavailable);
+            config.setSearch(search);
+        }
+        if (fetchTool != null) {
+            CodeAgentConfig.WebToolRouteConfig fetch = new CodeAgentConfig.WebToolRouteConfig();
+            fetch.setBackend("mcp");
+            fetch.setTool(fetchTool);
+            fetch.setOnUnavailable(onUnavailable);
+            config.setFetch(fetch);
+        }
+        return config;
     }
 
     @Test

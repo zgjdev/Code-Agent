@@ -38,7 +38,7 @@ flowchart LR
 
 1. 先读相关文档，再读源码；源码是真相。不得仅凭 README 或旧计划猜测行为。
 2. 先定义目标、非目标、影响面和验收标准；需求含糊时先澄清，不得自行扩大范围。
-3. 涉及新增能力、跨模块协作、协议/命令/数据格式、持久化、并发或安全策略时，默认创建 docs/dev/{需求名}.md，并在实现前完成方案评审。
+3. 涉及新增能力、跨模块协作、协议/命令/数据格式、持久化、并发或安全策略时，默认创建 `docs/dev/{需求名}.md`，并在实现前完成方案评审。一个实现任务最多新建这一份开发文档；设计、实施计划、任务拆分、测试矩阵、实施记录和验收清单必须合并在同一文件中。
 4. 实现遵循“测试先行、最小改动、依赖方向单向”。每完成一个边界就运行对应测试。
 5. 完成前必须执行验证命令、检查 git diff/git diff --check，并在回复中给出真实命令和结果；未经验证不得声称“已修复/已完成”。
 
@@ -60,6 +60,8 @@ flowchart LR
 ```
 
 方案至少包含一张适合问题的 Mermaid 图：模块关系用 graph，事件交互用 sequenceDiagram，状态变化用 stateDiagram-v2，步骤决策用 flowchart。图必须和文字、代码保持一致；不画装饰性图。
+
+本文档同时是该任务唯一的设计与实施文档。执行任何 skill、Plan Mode 或其他工作流时，都只能更新这份文档中的对应章节，不得再创建独立的 implementation plan、execution plan、task plan 或同义文档。若已有 `docs/dev` 文档能够承载本次任务，应直接更新已有文档，不得为了编号、阶段或工具流程重复建文档。只有用户明确要求拆分文档时，才允许例外。
 
 ## 3. 系统架构与依赖铁律
 
@@ -148,9 +150,10 @@ sequenceDiagram
 - ReAct 与 PlanExecuteAgent 共享同一个 ParentConversationContext，但只共享 Session 级顶层语义连续性；Planner 只读取 Top-level Conversation View，不读取 tool result、synthetic user、Skill/Memory 注入或 Task child transcript。Task Worker 仍使用独立 task-local messages；历史对话只用于语义理解，绝不能成为当前 Turn 的权限来源。
 - 工具授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard；策略拒绝不能通过换工具、provider 或分支绕过。
 - URL 只能来自顶层用户原文或成功 web_search 的结构化 discoveredUrls；搜索正文、reasoning、普通工具输出和回复文本都不能产生新授权。计划分支默认隔离 URL 凭据，只有声明的 DAG 后继可继承；步骤自动评审（stepReview）不改变这一步的授权继承。
+- 模型只暴露统一 `web_search` / `web_fetch`；底层 MCP 搜索/抓取工具仅保留在内部 Registry。`webTools.backend=auto` 默认继续按当前 LLM 选择：Step 3.7 Flash 使用 StepSearch MCP，其他模型使用 SearchProvider/direct；显式 provider/direct/MCP 配置优先。只有 `BACKEND_UNAVAILABLE` 且路由允许时才能回退，策略/HITL 拒绝、取消和执行错误不得换通道。
 - @path/MCP resource 展开在进入 Agent 前完成；项目外绝对路径和符号链接逃逸保持原文。
 - 写文件后按配置运行 LSP 诊断；诊断作为下一轮 user message 注入。CODEAGENT_LSP_ENABLED=false 可关闭。
-- MCP 启动默认最多等待 8 秒，超时 server 保持 STARTING 并后台继续；用 /mcp 查看状态。
+- 交互式 CLI 会同时启动已启用的 stdio/HTTP MCP Server；启动默认最多等待 8 秒，超时 server 保持 STARTING 并后台继续，用 /mcp 查看状态。Runtime API/后台 headless 路径不创建 McpServerManager。
 - /clear 只清空当前发送视图、session memory 预计算状态和 Skill buffer，长期记忆及 raw ledger 保留；/compact 手动执行完整摘要压缩。
 - RAG 只保留三类召回：SQLite FTS5 + BM25 词法检索、BGE + cosine 语义检索、代码关系图检索；Symbol Index 仅作为 Graph seed 基础设施，不独立参与融合。实时精确定位继续由 `grep_code` / `glob_files` / `read_file` 承担，不进入 RAG。远程 Embedding 仅在当前项目/provider/model/endpoint/policy-version 匹配的显式授权后启用，拒绝或故障必须降级而不能中止 FTS / Graph 检索。
 - 长期记忆的事实源仍是 `~/.codeagent/memory/long_term_memory.json`；普通检索只读取当前 scope 可见的 active 记忆，使用词法 + 进程内 BGE 混合相关度，并按 `lastConfirmedAt` 应用下限 0.6、30 天半衰期的乘法衰减；legacy 缺失确认时间时回退 creation timestamp。embedding 只做进程内派生缓存且不得发送到远端。显式 `save_memory` / `/save` 写入统一解析 CREATE / DUPLICATE / SUPERSEDE；DUPLICATE 只刷新已有记忆的确认时间、不重复创建，普通 retrieval 不得自动确认；写入候选不应用时间衰减。embedding 只召回候选，SUPERSEDE 必须由无工具关系分类器返回当前 `submittedUserInput` 的原文 evidence，失败时不得让旧记忆失效。
@@ -198,6 +201,7 @@ TUI：mvn test -Pphase16-smoke
 - 正常情况下实现功能时，应从最新的 `main` 创建新的功能分支并在该分支开发；默认不使用 Git worktree。只有用户明确要求，或已说明必要性并获得用户同意后，才可创建 worktree。
 - 未经用户明确允许，不得代替用户执行 `git commit`、`git push`、创建 Pull Request 或合并分支。完成改动后应保留为未提交状态，并向用户报告变更与验证结果。
 - 编写项目开发文档时，必须遵守本文件规定的流程、模板、证据和图示要求；开发方案及实现说明统一放在 `docs/dev/` 目录，不得自行放置到其他目录。
+- 每个实现任务最多维护一份对应的 `docs/dev` 文档，方案与实施内容不得拆成两个文件。其他 skill、系统化工作流或工具模板如建议额外创建计划文档，以本条为准：将所需内容合并进现有任务文档，不得新增重复文档。用户明确要求多个文档时除外。
 
 ### 独立判断与证据纪律
 

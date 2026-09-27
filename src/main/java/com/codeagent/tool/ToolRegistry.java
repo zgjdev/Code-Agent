@@ -8,6 +8,7 @@ import com.codeagent.browser.BrowserAuditMetadata;
 import com.codeagent.browser.BrowserCheckResult;
 import com.codeagent.browser.BrowserConnector;
 import com.codeagent.browser.BrowserGuard;
+import com.codeagent.config.CodeAgentConfig;
 import com.codeagent.context.ContextProfile;
 import com.codeagent.lsp.LspDiagnosticReport;
 import com.codeagent.lsp.LspManager;
@@ -43,6 +44,7 @@ import com.codeagent.web.SearchProvider;
 import com.codeagent.web.SearchProviderFactory;
 import com.codeagent.web.SearchResult;
 import com.codeagent.web.WebFetcher;
+import com.codeagent.web.WebToolBackendRouter;
 
 import java.io.File;
 import java.io.InputStreamReader;
@@ -79,9 +81,6 @@ public class ToolRegistry {
     private static final int DEFAULT_GREP_MAX_CHARS = 24_000;
     private static final int MAX_GREP_MAX_CHARS = 60_000;
     private static final int DEFAULT_GREP_HEAD_LIMIT = 20;
-    private static final String STEP_SEARCH_SERVER = "step_search";
-    private static final String STEP_SEARCH_TOOL = "mcp__" + STEP_SEARCH_SERVER + "__web_search";
-    private static final String STEP_FETCH_TOOL = "mcp__" + STEP_SEARCH_SERVER + "__web_fetch";
     private static final Set<String> SEARCH_EXCLUDED_DIRS = Set.of(
             ".git", ".codeagent", "target", "node_modules", "dist", "build", "coverage", ".idea", ".gradle"
     );
@@ -117,6 +116,8 @@ public class ToolRegistry {
     private volatile String currentModel = "";
     private volatile CodeSearchService codeSearchService;
     private volatile CodeRetrievalService codeRetrievalService;
+    private volatile CodeAgentConfig.WebToolsConfig webToolsConfig = new CodeAgentConfig.WebToolsConfig();
+    private volatile WebToolBackendRouter webToolBackendRouter = new WebToolBackendRouter(webToolsConfig);
 
     public ToolRegistry() {
         this(DEFAULT_COMMAND_TIMEOUT_SECONDS, DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS);
@@ -214,6 +215,16 @@ public class ToolRegistry {
     public void setCurrentModel(String provider, String model) {
         this.currentProvider = provider == null ? "" : provider.trim().toLowerCase(Locale.ROOT);
         this.currentModel = model == null ? "" : model.trim().toLowerCase(Locale.ROOT);
+    }
+
+    public synchronized void setWebToolsConfig(CodeAgentConfig.WebToolsConfig config) {
+        this.webToolsConfig = config == null ? new CodeAgentConfig.WebToolsConfig() : config;
+        this.webToolBackendRouter = new WebToolBackendRouter(this.webToolsConfig);
+        this.searchProvider = null;
+    }
+
+    public CodeAgentConfig.WebToolsConfig getWebToolsConfig() {
+        return webToolsConfig;
     }
 
     public void setBrowserGuard(BrowserGuard browserGuard) {
@@ -684,14 +695,12 @@ public class ToolRegistry {
         ));
     }
 
-    /**
-     * 注册联网工具：web_search（多 provider 抽象）+ web_fetch（HTTP + readability）
-     */
+    /** Registers stable Web facades whose backends are selected internally. */
     private void registerWebTools() {
         tools.put("web_search", new Tool(
                 "web_search",
                 "搜索互联网，获取实时信息（最新版本、官方文档、技术资讯等）。" +
-                        "支持 SerpAPI（默认）和 SearXNG（自托管）两种 provider，由 SEARCH_PROVIDER 环境变量切换。",
+                        "具体搜索后端由 CodeAgent 根据 webTools 配置和当前模型选择。",
                 createParameters(
                         new Param("query", "string", "搜索关键词，例如'Java 21 新特性'、'Spring Boot 3.3 release notes'", true),
                         new Param("top_k", "integer", "返回结果数量（默认5）", false)
@@ -702,7 +711,7 @@ public class ToolRegistry {
         tools.put("web_fetch", new Tool(
                 "web_fetch",
                 "抓取当前顶层用户原文提供或本执行分支成功 web_search 结果发现的 URL，提取正文转 Markdown；不得使用模型猜测的 URL。" +
-                        "适用静态 / SSR 页面（博客、文档、官网）；JS 渲染或防爬站会返回空正文，本期不重试。",
+                        "具体抓取后端由 CodeAgent 根据 webTools 配置和当前模型选择。",
                 createParameters(
                         new Param("url", "string", "有可信来源的完整 URL，需 http 或 https 协议", true),
                         new Param("max_chars", "integer", "返回 Markdown 最大字符数（默认 8000，超出截断）", false)
@@ -892,7 +901,8 @@ public class ToolRegistry {
 
     private synchronized SearchProvider searchProvider() {
         if (searchProvider == null) {
-            searchProvider = SearchProviderFactory.create();
+            searchProvider = SearchProviderFactory.create(
+                    webToolBackendRouter.searchRoute(currentProvider, currentModel).provider());
         }
         return searchProvider;
     }
@@ -930,19 +940,33 @@ public class ToolRegistry {
         if (query == null || query.isBlank()) {
             return ToolOutput.failure("搜索关键词不能为空");
         }
-        if (shouldPreferStepSearch() && tools.containsKey(STEP_SEARCH_TOOL)) {
-            ObjectNode args = mapper.createObjectNode();
-            args.put("query", query.trim());
-            putIfStepToolAccepts(STEP_SEARCH_TOOL, args, topK,
-                    "top_k", "topK", "max_results", "num_results", "limit", "count");
-            ToolOutput output = executeToolOutput(STEP_SEARCH_TOOL, args.toString());
-            if (isUsableMcpOutput(output)) {
-                // StepSearch currently returns unstructured MCP prose. Keep it
-                // useful as search text, but do not mint URL authority from it.
-                return ToolOutput.text(
-                        "🔍 [StepSearch] " + query.trim() + "\n\n" + output.text().trim());
+        WebToolBackendRouter.Route route = webToolBackendRouter.searchRoute(currentProvider, currentModel);
+        if (!route.valid()) {
+            return ToolOutput.failure(ToolOutput.FailureKind.INVALID_CONFIGURATION,
+                    "Web Tool 配置无效: " + route.validationError());
+        }
+        if (route.usesMcp()) {
+            ToolOutput output = executeConfiguredMcpSearch(route, query, topK);
+            if (output.successful()) {
+                return new ToolOutput("🔍 [MCP] " + query.trim() + "\n\n" + output.text().trim(),
+                        output.imageParts(), true, List.of(), ToolOutput.FailureKind.NONE);
+            }
+            if (!webToolBackendRouter.mayFallback(route, output)) {
+                return output;
             }
         }
+        return providerWebSearch(query, topK);
+    }
+
+    private ToolOutput executeConfiguredMcpSearch(WebToolBackendRouter.Route route, String query, int topK) {
+        ObjectNode args = mapper.createObjectNode();
+        args.put("query", query.trim());
+        putIfMcpToolAccepts(route.tool(), args, topK,
+                "top_k", "topK", "max_results", "num_results", "limit", "count");
+        return executeConfiguredMcpBackend(route.tool(), args.toString());
+    }
+
+    private ToolOutput providerWebSearch(String query, int topK) {
         SearchProvider provider = searchProvider();
         if (!provider.isReady()) {
             return ToolOutput.failure("⚠️ " + provider.unavailableHint());
@@ -960,6 +984,27 @@ public class ToolRegistry {
                     formatSearchResults(provider.name(), query, results), discoveredUrls);
         } catch (Exception e) {
             return ToolOutput.failure("搜索失败 (" + provider.name() + "): " + e.getMessage());
+        }
+    }
+
+    /*
+     * Keep MCP argument adaptation schema-aware because external servers use
+     * different optional limit names.
+     */
+    private void putIfMcpToolAccepts(String toolName, ObjectNode args, int value, String... names) {
+        if (value <= 0 || names == null || names.length == 0) {
+            return;
+        }
+        McpRegisteredTool tool = mcpTools.get(toolName);
+        JsonNode properties = tool == null ? null : tool.descriptor().inputSchema().path("properties");
+        if (properties == null || !properties.isObject()) {
+            return;
+        }
+        for (String name : names) {
+            if (properties.has(name)) {
+                args.put(name, value);
+                return;
+            }
         }
     }
 
@@ -1015,29 +1060,59 @@ public class ToolRegistry {
     }
 
     String webFetch(String url, int maxChars) {
+        return webFetchOutput(url, maxChars).text();
+    }
+
+    private ToolOutput webFetchOutput(String url, int maxChars) {
         if (url == null || url.isBlank()) {
-            return "URL 不能为空";
+            return ToolOutput.failure("URL 不能为空");
+        }
+        WebToolBackendRouter.Route route = webToolBackendRouter.fetchRoute(currentProvider, currentModel);
+        if (!route.valid()) {
+            return ToolOutput.failure(ToolOutput.FailureKind.INVALID_CONFIGURATION,
+                    "Web Tool 配置无效: " + route.validationError());
         }
         NetworkPolicy policy = networkPolicy();
         String denyReason = policy.checkUrl(url);
         if (denyReason != null) {
-            return "❌ 网络访问被拒绝: " + denyReason;
+            return ToolOutput.failure(ToolOutput.FailureKind.POLICY_DENIED,
+                    "❌ 网络访问被拒绝: " + denyReason);
         }
         String rateReason = policy.acquire();
         if (rateReason != null) {
-            return "❌ " + rateReason;
+            return ToolOutput.failure("❌ " + rateReason);
         }
-        if (shouldPreferStepSearch() && tools.containsKey(STEP_FETCH_TOOL)) {
-            ObjectNode args = mapper.createObjectNode();
-            args.put("url", url.trim());
-            putIfStepToolAccepts(STEP_FETCH_TOOL, args, maxChars,
-                    "max_chars", "maxChars", "limit", "max_length", "maxLength");
-            ToolOutput output = executeToolOutput(STEP_FETCH_TOOL, args.toString());
-            if (isUsableMcpOutput(output)) {
-                return "🌐 [StepSearch] 抓取: " + url.trim() + "\n\n" + output.text().trim();
+        if (route.usesMcp()) {
+            ToolOutput output = executeConfiguredMcpFetch(route, url, maxChars);
+            if (output.successful()) {
+                return new ToolOutput("🌐 [MCP] 抓取: " + url.trim() + "\n\n" + output.text().trim(),
+                        output.imageParts(), true, List.of(), ToolOutput.FailureKind.NONE);
+            }
+            if (!webToolBackendRouter.mayFallback(route, output)) {
+                return output;
             }
         }
+        return directWebFetch(url, maxChars);
+    }
 
+    private ToolOutput executeConfiguredMcpFetch(WebToolBackendRouter.Route route, String url, int maxChars) {
+        ObjectNode args = mapper.createObjectNode();
+        args.put("url", url.trim());
+        putIfMcpToolAccepts(route.tool(), args, maxChars,
+                "max_chars", "maxChars", "limit", "max_length", "maxLength");
+        return executeConfiguredMcpBackend(route.tool(), args.toString());
+    }
+
+    private ToolOutput executeConfiguredMcpBackend(String toolName, String argumentsJson) {
+        ToolOutput output = executeToolOutput(toolName, argumentsJson);
+        if (output.failureKind() == ToolOutput.FailureKind.TOOL_NOT_FOUND) {
+            return ToolOutput.failure(ToolOutput.FailureKind.BACKEND_UNAVAILABLE,
+                    "配置的 MCP 后端尚未就绪: " + toolName);
+        }
+        return output;
+    }
+
+    private ToolOutput directWebFetch(String url, int maxChars) {
         try {
             WebFetcher.RawResponse raw = webFetcher().fetch(url.trim());
             HtmlExtractor.Extracted extracted = htmlExtractor().extract(raw.body(), raw.url());
@@ -1049,44 +1124,10 @@ public class ToolRegistry {
                 truncated = true;
             }
             FetchResult result = FetchResult.ok(raw.url(), extracted.title(), markdown, originalLength, truncated);
-            return formatFetchResult(result);
+            return ToolOutput.text(formatFetchResult(result));
         } catch (Exception e) {
-            return "抓取失败: " + e.getMessage();
+            return ToolOutput.failure("抓取失败: " + e.getMessage());
         }
-    }
-
-    private boolean shouldPreferStepSearch() {
-        return "step".equals(currentProvider) && currentModel.startsWith("step-3.7-flash");
-    }
-
-    private void putIfStepToolAccepts(String toolName, ObjectNode args, int value, String... names) {
-        if (value <= 0 || names == null || names.length == 0) {
-            return;
-        }
-        McpRegisteredTool tool = mcpTools.get(toolName);
-        JsonNode properties = tool == null ? null : tool.descriptor().inputSchema().path("properties");
-        if (properties == null || !properties.isObject()) {
-            return;
-        }
-        for (String name : names) {
-            if (properties.has(name)) {
-                args.put(name, value);
-                return;
-            }
-        }
-    }
-
-    private boolean isUsableMcpOutput(ToolOutput output) {
-        if (output == null || !output.successful()
-                || output.text() == null || output.text().isBlank()) {
-            return false;
-        }
-        String text = output.text().trim();
-        return !text.startsWith("[HITL]")
-                && !text.startsWith("🛡️")
-                && !text.startsWith("工具执行失败")
-                && !text.startsWith("未知工具")
-                && !text.startsWith("MCP 工具返回错误");
     }
 
     private String formatFetchResult(FetchResult result) {
@@ -1134,6 +1175,11 @@ public class ToolRegistry {
      */
     public List<com.codeagent.llm.LlmClient.Tool> getToolDefinitions() {
         return tools.values().stream()
+                .filter(tool -> {
+                    McpRegisteredTool registered = mcpTools.get(tool.name());
+                    return webToolBackendRouter.isModelVisible(tool.name(),
+                            registered == null ? null : registered.descriptor());
+                })
                 .sorted(Comparator.comparing(Tool::name))
                 .map(t -> new com.codeagent.llm.LlmClient.Tool(t.name(), t.description(), t.parameters()))
                 .toList();
@@ -1219,11 +1265,11 @@ public class ToolRegistry {
 
     protected ToolOutput doExecuteTool(String name, String argumentsJson) {
         if (CancellationContext.isCancelled()) {
-            return ToolOutput.failure("用户取消了此次工具调用");
+            return ToolOutput.failure(ToolOutput.FailureKind.CANCELLED, "用户取消了此次工具调用");
         }
         Tool tool = tools.get(name);
         if (tool == null) {
-            return ToolOutput.failure("未知工具: " + name);
+            return ToolOutput.failure(ToolOutput.FailureKind.TOOL_NOT_FOUND, "未知工具: " + name);
         }
 
         boolean shouldAudit = shouldAudit(name);
@@ -1254,7 +1300,8 @@ public class ToolRegistry {
                                 safeText,
                                 output.imageParts(),
                                 output.successful(),
-                                output.discoveredUrls());
+                                output.discoveredUrls(),
+                                output.failureKind());
                     }
                 }
                 if (shouldAudit) {
@@ -1267,9 +1314,13 @@ public class ToolRegistry {
             Map<String, String> argMap = new HashMap<>();
             args.fields().forEachRemaining(entry ->
                     argMap.put(entry.getKey(), entry.getValue().asText()));
-            ToolOutput output = "web_search".equals(name)
-                    ? webSearchOutput(argMap.get("query"), parseInt(argMap.get("top_k"), 5))
-                    : classifyTextOutput(tool.executor().execute(argMap));
+            ToolOutput output = switch (name) {
+                case "web_search" -> webSearchOutput(
+                        argMap.get("query"), parseInt(argMap.get("top_k"), 5));
+                case "web_fetch" -> webFetchOutput(
+                        argMap.get("url"), parseInt(argMap.get("max_chars"), DEFAULT_FETCH_MAX_CHARS));
+                default -> classifyTextOutput(tool.executor().execute(argMap));
+            };
             if (shouldAudit) {
                 auditLog.record(AuditLog.AuditEntry.allow(name, argumentsJson, elapsedMillis(start), auditMetadata));
             }
@@ -1279,13 +1330,15 @@ public class ToolRegistry {
                 auditLog.record(AuditLog.AuditEntry.denyByPolicy(
                         name, argumentsJson, e.getMessage(), elapsedMillis(start), auditMetadata));
             }
-            return ToolOutput.failure("🛡️ 策略拒绝: " + e.getMessage());
+            return ToolOutput.failure(ToolOutput.FailureKind.POLICY_DENIED,
+                    "🛡️ 策略拒绝: " + e.getMessage());
         } catch (Exception e) {
             if (shouldAudit) {
                 auditLog.record(AuditLog.AuditEntry.error(
                         name, argumentsJson, e.getMessage(), elapsedMillis(start), auditMetadata));
             }
-            return ToolOutput.failure("工具执行失败: " + e.getMessage());
+            return ToolOutput.failure(ToolOutput.FailureKind.EXECUTION_ERROR,
+                    "工具执行失败: " + e.getMessage());
         }
     }
 
@@ -1300,7 +1353,7 @@ public class ToolRegistry {
         if (!output.successful() || !looksLikeFailureText(output.text())) {
             return output;
         }
-        return ToolOutput.failure(output.text(), output.imageParts());
+        return ToolOutput.failure(output.failureKind(), output.text(), output.imageParts());
     }
 
     private static boolean looksLikeFailureText(String text) {

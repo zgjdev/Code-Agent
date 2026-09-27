@@ -2,6 +2,7 @@ package com.codeagent.mcp;
 
 import com.codeagent.mcp.config.McpConfigLoader;
 import com.codeagent.mcp.config.McpServerConfig;
+import com.codeagent.mcp.jsonrpc.JsonRpcException;
 import com.codeagent.mcp.notifications.NotificationRouter;
 import com.codeagent.mcp.protocol.McpToolDescriptor;
 import com.codeagent.mcp.resources.McpResourceCache;
@@ -488,9 +489,18 @@ public class McpServerManager implements AutoCloseable {
     private static ToolOutput invokeMcpToolOutput(McpClient client, McpToolDescriptor descriptor, String argumentsJson) {
         try {
             return client.callToolOutput(descriptor.name(), argumentsJson);
+        } catch (JsonRpcException e) {
+            return ToolOutput.failure(ToolOutput.FailureKind.EXECUTION_ERROR,
+                    "MCP 工具返回错误 (" + descriptor.serverName() + "/" + descriptor.name() + "): "
+                            + e.getMessage());
+        } catch (IOException e) {
+            return ToolOutput.failure(ToolOutput.FailureKind.BACKEND_UNAVAILABLE,
+                    "MCP 后端不可用 (" + descriptor.serverName() + "/" + descriptor.name() + "): "
+                            + e.getMessage());
         } catch (Exception e) {
-            return ToolOutput.failure("MCP 工具调用失败 (" + descriptor.serverName() + "/" + descriptor.name() + "): "
-                    + e.getMessage());
+            return ToolOutput.failure(ToolOutput.FailureKind.EXECUTION_ERROR,
+                    "MCP 工具调用失败 (" + descriptor.serverName() + "/" + descriptor.name() + "): "
+                            + e.getMessage());
         }
     }
 

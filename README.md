@@ -247,6 +247,8 @@ CodeAgent 支持 MCP stdio 和 Streamable HTTP：
 
 支持 `${PROJECT_DIR}`、`${HOME}` 和 `${VAR}` 展开。MCP 工具统一命名为 `mcp__{server}__{tool}`，并经过与内置工具相同的策略、审批和审计链。
 
+交互式 CLI 启动时会同时启动已启用的 stdio/HTTP MCP Server。首屏默认最多等待 8 秒；尚未完成的 Server 保持 `starting` 并在后台继续初始化，可通过 `/mcp` 和 `/mcp logs <name>` 查看。Runtime API/后台 headless 任务不会单独创建 MCP Server Manager，因此不能依赖只存在于 MCP 的后端。
+
 ```text
 /mcp
 /mcp restart <name>
@@ -267,7 +269,28 @@ shared 模式不会自动取得任意标签页的操作权限；敏感页面上�
 
 ### Web 访问
 
-内置搜索 Provider 包括智谱 Web Search、SerpAPI 和 SearXNG。`web_fetch` 适合静态或 SSR 页面，遇到 SPA、登录墙或强反爬页面时可转到 Chrome DevTools MCP。
+模型只会看到稳定的 `web_search` 和 `web_fetch`，不会看到底层 `mcp__*__web_search`、`mcp__*__web_fetch` 或被路由引用的其他 MCP 实现。默认 `backend=auto`：Step 3.7 Flash 使用内部 StepSearch MCP，MCP 未就绪时回退；其他模型使用 SearchProvider 和直接 HTTP。显式配置始终优先于模型自动选择。
+
+在 `~/.codeagent/config.json` 中可固定后端：
+
+```json
+{
+  "webTools": {
+    "search": {
+      "backend": "mcp",
+      "tool": "mcp__step_search__web_search",
+      "onUnavailable": "default"
+    },
+    "fetch": {
+      "backend": "direct"
+    }
+  }
+}
+```
+
+`web_search.backend` 支持 `auto|provider|mcp`，`web_fetch.backend` 支持 `auto|direct|mcp`。`provider` 可指定 `zhipu|serpapi|searxng`；省略时继续使用 `SEARCH_PROVIDER` 和密钥自动检测。显式 MCP 路由默认 `onUnavailable=fail`，只有设为 `default` 且后端尚未就绪时才回退。策略拒绝、人工拒绝、取消和执行错误都不会换通道。
+
+内置 SearchProvider 都需要外部服务：智谱 Web Search、SerpAPI 或可访问的 SearXNG；它们不是离线本地搜索引擎。`web_fetch` 的 direct 后端由 CodeAgent 直接发起 HTTP 请求并提取正文，适合静态或 SSR 页面。Chrome DevTools MCP 是浏览器自动化工具，适用于 JS 页面和交互，不等同于搜索 Provider。
 
 URL 授权只来自：
 
@@ -367,7 +390,7 @@ TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard / CommandGuar
 
 | 路径 | 内容 |
 |---|---|
-| `~/.codeagent/config.json` | Provider 和模型配置 |
+| `~/.codeagent/config.json` | Provider、模型与 Web Tool 路由配置 |
 | `~/.codeagent/history/` | 持久化会话与事件日志 |
 | `~/.codeagent/plans/plans.db` | Plan DAG checkpoint |
 | `~/.codeagent/tasks/tasks.db` | 后台任务队列 |

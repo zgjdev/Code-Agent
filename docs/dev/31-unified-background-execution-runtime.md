@@ -32,22 +32,20 @@
 
 本次重构必须达到：
 
-1. `/task add <input>` 仍表示“后台提交”，但 Worker 领取后进入与前台普通任务一致的顶层模式选择：
-   - Auto Router → ReAct；
-   - Auto Router → Plan；
-   - Router 非取消性失败继续按现有规则回退 ReAct。
-2. 抽出一个 CLI 与后台执行都能复用的**顶层执行协调器**，消除 `Main` 与 Headless 路径对模式选择/分发的重复或旁路。
-3. 后台 Job 使用**独立 durable Parent Session**，不与当前前台交互式 `ParentConversationContext` 共享可变上下文。
-4. 后台 Job 如果被 Router 选为 Plan：
-   - 创建/绑定自己的 durable Session；
-   - 使用现有 `PlanStateStore`；
-   - 崩溃恢复时优先恢复同一 Session 下的 active Plan，而不是重新规划一个新 Plan。
-5. 保留 `runtime_tasks` 与 `plan_tasks` 的职责分离，并在代码/文档中明确：
-   - Runtime Job = 顶层执行实体；
-   - Plan Task = Plan 内部 workflow node。
-6. 后台 Job 的取消必须能传播到 Router、ReAct、Plan 及 Plan Task，而不依赖“只中断最外层 Worker Thread”。
-7. 兼容现有 `/task list|add|cancel|log` 命令和已存在的 `tasks.db` 数据。
-8. 保持当前 Tool Policy、安全边界和“原始 submitted input 决定授权”的规则，不因后台执行扩大权限。
+1. `/task add <input>` 继续表示“后台提交”，但不再固定走 Headless ReAct；Worker 领取后进入与前台普通任务一致的顶层模式选择：Auto Router → ReAct / Plan，Router 非取消性失败仍按现有规则回退 ReAct。
+2. 抽出 CLI 与后台执行都能复用的顶层执行协调器，统一“模式选择 → 记录路由 → Snapshot → ReAct/Plan 分发”，消除 `Main` 与后台路径的旁路。
+3. `/task add` **继承提交时刻已有会话上下文**，但采用 fork-at-submit 语义：后台 Job 获得当前 Parent Session 的一个固定快照基线，之后前台与后台分别演进，不共享同一个可变 `ParentConversationContext`。
+4. 上下文继承必须同时满足两种消费视图：
+   - ReAct 使用 fork 时刻的 Provider Surface / conversation messages；
+   - Router 与 Planner 使用 fork 时刻的 Top-level Conversation View；
+   - 继承上下文只用于语义理解，**绝不能成为当前 `/task add` 这一轮的权限来源**。
+5. 每个后台 Job 拥有独立 durable Parent Session，并以 Job identity 可幂等地创建/恢复；后台 Session 不参与前台“最近未结束会话”自动恢复。
+6. 后台 Job 如果选择 Plan，继续复用现有 `PlanStateStore`；崩溃恢复必须区分 active Plan、terminal Plan 和尚未创建 Plan 三种状态，避免重复 Router/Planner。
+7. Runtime Job 与 Plan Task 保持不同实体：Runtime Job 负责顶层后台执行生命周期；Plan Task 负责 Plan 内部 DAG 节点、资源声明和 Evidence。
+8. 后台执行返回结构化 `ExecutionOutcome`，Runtime Job 终态不得再通过字符串前缀或“有没有异常抛出”猜测。
+9. 后台 Job 的取消必须能传播到 Router、ReAct、Plan 及 Plan child Task，且多个并发 Job 的 token 互不覆盖。
+10. 兼容现有 `/task list|add|cancel|log` 和既有 `tasks.db`；旧库用 additive migration 升级，不做破坏性 table rename。
+11. 保持当前 Tool Policy、安全边界和“原始 submitted input 决定授权”的规则；历史上下文中的路径、URL、tool result、reasoning 都不能扩展当前 Job 权限。
 
 ### 1.3 非目标
 
@@ -55,12 +53,14 @@
 
 - 不把 `runtime_tasks` 与 `plan_tasks` 合并成一张表；
 - 不删除 `/task` 命令；
-- 不把 Runtime HTTP API 同步改造成 durable queue；HTTP 入口后续可以复用本次抽出的顶层执行协调器，但不纳入本次实施范围；
+- 不把 Runtime HTTP API 同步改造成 durable queue；HTTP 仍保留当前 `TaskRunner` 契约，后续再单独接统一 Coordinator；
 - 不实现分布式队列、多进程 lease、heartbeat、优先级、延迟任务、死信队列或 exactly-once；
-- 不让后台 Job 继承正在变化的前台对话历史；
+- 不让后台 Job 与前台继续共享实时可变上下文；继承只发生在 `/task add` 提交时刻，此后是 fork；
+- 不让后台 Job 的执行结果自动合并回原前台 Parent Session；用户可通过 `/task log` 查看结果，未来若要 merge-back 必须单独设计；
 - 不在本次引入后台 HITL 交互协议；
 - 不改变现有 Plan DAG 的 ResourceClaims、Evidence Gate、Reviewer 和 Task 并发策略；
-- 不为了命名整洁立即重命名 SQLite 表。第一阶段继续保留 `runtime_tasks` 作为兼容表名，避免把行为重构与破坏性数据迁移绑在一起。
+- 不为了命名整洁立即重命名 SQLite 表；第一阶段保留 `runtime_tasks` 表名；
+- 不要求后台路径复刻 CLI 特有的 MCP resource / `@path` mention expansion；本次统一的是顶层执行模式与生命周期，而不是终端输入增强能力。
 
 ---
 
@@ -276,25 +276,71 @@ InheritableThreadLocal<CancellationToken>
 
 所以本次如果让后台 Job 支持 Plan，必须先把取消语义改成**Execution-scoped**，不能简单把现有 `CancellationContext.startRun()` 搬进多个 Worker。
 
-### 2.5 后台上下文不能直接复用前台 Parent Session
+### 2.5 后台上下文：必须继承，但不能共享
 
-前台 ReAct / Plan 共享同一个 `ParentConversationContext` 是为了保持交互式多轮连续性。
+前台 ReAct / Plan 共享一个 `ParentConversationContext` 是为了保持交互式多轮连续性。用户通过 `/task add` 提交后台任务时也需要理解“继续刚才的修改”“基于上面的方案”等指代，因此后台 Job **必须继承已有上下文**。
 
-后台 Worker 则可能同时执行多个 Job。若后台 Job 直接复用当前前台：
+但继承不能实现为直接引用当前前台：
 
-```text
-reactAgent.getParentConversationContext()
-```
+~~~text
+backgroundJob.parentConversationContext = reactAgent.getParentConversationContext()  // 禁止
+~~~
 
-会产生：
+原因是 Worker 可能延迟执行或并发执行多个 Job；如果共享同一个可变对象，会造成 Provider Surface、Top-level Conversation、active Plan、Router history 和结果消息相互串写。
 
-- 多个 Job 同时 append Provider Surface；
-- 后台结果进入当前用户对话；
-- Router 历史在 Job 执行期间发生竞争；
-- 一个后台 Plan 的 active Plan 约束污染前台 Session；
-- 恢复身份无法稳定绑定。
+本次采用 **fork-at-submit**：
 
-因此后台 Job 必须拥有**独立 durable Parent Session + ParentConversationContext**。第一阶段后台任务默认是隔离执行，不继承当前交互历史；未来若需要“基于当前会话后台继续”，必须设计显式 snapshot/fork，而不能共享可变对象。
+~~~text
+前台 Parent Session S0
+        │
+        │ /task add，记录 fork point = source sequence N
+        ▼
+Background Job J1
+source_session_id = S0
+source_sequence   = N
+        │
+        └── 第一次执行时创建/恢复独立 Background Session B1
+              初始上下文 = replay(S0, <= N)
+
+S0 后续继续变化 ──────×──────> B1
+B1 后台继续变化 ──────×──────> S0
+~~~
+
+因此后台看到的是**提交那一刻**的上下文，而不是 Worker 真正开始执行时的最新前台上下文。
+
+继承范围：
+
+- Provider Surface / conversation messages：供后台 ReAct 使用；
+- Top-level Conversation View：供 Mode Router 与 Planner 使用；
+- compaction 后的 durable projection 语义按 source sequence 重放；
+- 不继承当前 Turn 的 Tool Policy、trusted URL capability、HITL approval、临时浏览器授权或其它权限状态。
+
+授权仍只来自新的 `/task add` payload。历史上下文即使包含某个绝对路径或 URL，也只能帮助模型理解语义，不能让本轮工具访问获得授权。
+
+### 2.6 Background Session 不能参与前台自动恢复
+
+`SessionStore.latestUnclosed(workspace)` 当前按 workspace 查找未关闭 Session，没有区分交互式 Session 与未来的 Background Job Session。如果后台 Job 崩溃后保持 Session 未关闭，下一次 CLI 启动可能错误地把它当作前台会话恢复。
+
+因此本次必须增加明确过滤：
+
+- 交互式 Parent Session 保持现有 actor，例如 `agent`；
+- Background Parent Session 使用明确 actor，例如 `background-job`，并带 Job ID；
+- 前台自动恢复改为 `latestUnclosedInteractive(workspace)`，只返回交互式 Parent Session；
+- Background Worker 只能通过 Job 记录的 identity 打开自己的 Session，不能使用 `latestUnclosed` 猜测。
+
+Job 进入 terminal 后必须 best-effort `markClosed(...)` 并释放 Session lock。即使 crash 发生在 Job 已 terminal、Session 尚未 close 的窗口，前台过滤也必须保证不会误恢复。
+
+### 2.7 字符串返回值不能作为 Runtime 终态依据
+
+当前 `Agent.run()` 与 `PlanExecuteAgent.run()` 都存在捕获内部异常后返回错误文本的路径，例如 LLM/Session 错误可能返回 `❌ ...` 而不是继续抛异常。若后台 Worker 只看 `String result`，就可能把“错误字符串”写成 `COMPLETED`。
+
+因此 Runtime 接线前必须提供 typed outcome。现有 CLI `run(): String` 可以保留为显示适配层，但后台 Coordinator 不能通过文本判断成功、失败或取消。
+
+### 2.8 workspace 是 Job identity 的一部分
+
+`tasks.db` 位于用户级目录，而一个 CodeAgent 进程只针对当前 workspace 工作。新 Job 必须在 enqueue 时写入规范化 workspace；claim 与 crash recovery 都只能处理当前 workspace 的记录。
+
+旧版 `runtime_tasks` 没有 workspace。迁移后这些 legacy row 仍允许 list/log/cancel，但 **不得自动 claim/执行**，因为系统无法证明它们原本属于哪个项目。用户需要重新提交，不能把 NULL workspace 猜成当前目录。
 
 ---
 
@@ -304,102 +350,94 @@ reactAgent.getParentConversationContext()
 
 重构后的职责分层：
 
-```mermaid
+~~~mermaid
 flowchart TB
-    U[用户输入] --> S{提交方式}
-    S -->|前台普通输入| FG[Foreground Submission]
-    S -->|/task add| Q[(runtime_tasks)]
+    U[当前前台会话] -->|/task add| CAP[Capture fork point]
+    CAP --> Q[(runtime_tasks)]
+    CAP --> SRC[Source Session + sequence]
 
-    Q --> WP[Durable Worker Pool]
+    Q --> WP[BackgroundJobManager / fixed workers]
     WP --> BG[Background Execution Context]
-    FG --> FC[Foreground Execution Context]
+    SRC -->|replay <= sequence| BG
 
-    BG --> C[TopLevelExecutionCoordinator]
-    FC --> C
+    FG[Foreground Execution Context] --> C[TopLevelExecutionCoordinator]
+    BG --> C
 
     C --> MR[ExecutionModeRouter]
     MR -->|REACT| RA[Agent]
     MR -->|PLAN| PA[PlanExecuteAgent]
 
-    PA --> PS[(plans.db / plan_runs + plan_tasks)]
-    RA --> SS[Parent Session / JSONL]
-    PA --> SS
-
-    Q -.Job lifecycle.-> C
-    PS -.Plan workflow state.-> PA
-```
+    PA --> PS[(plans.db)]
+    RA --> BS[Background/Foreground Parent Session]
+    PA --> BS
+~~~
 
 核心原则：
 
-> **Submission 与 Execution Mode 正交。**
+> **Submission、Context Lineage 与 Execution Mode 是三个正交维度。**
 
-提交方式决定：
+- Submission：前台同步还是 durable background；
+- Context Lineage：后台从哪个 Parent Session 的哪个 sequence fork；
+- Execution Mode：ReAct 还是 Plan。
 
-- 前台同步等待；
-- 后台持久排队。
-
-Execution Mode 决定：
-
-- ReAct；
-- Plan。
-
-后台 Job 不再等价于“固定 ReAct”。
+`/task add` 只改变 Submission，并从当前会话建立一个固定 Context fork；它不再暗含“固定 ReAct”。
 
 ### 3.2 新增顶层执行协调器
 
-建议新增：
+新增：
 
-```text
+~~~text
 src/main/java/com/codeagent/agent/TopLevelExecutionCoordinator.java
-```
+~~~
 
-职责仅限于一轮顶层执行：
+职责仅限一轮顶层执行：
 
-1. 接收原始 `submittedInput`；
-2. 接收当前 Execution Context 的 Top-level Conversation；
-3. 执行 explicit override（如果有）或 Auto Router；
-4. 记录 `execution_mode_selected`；
-5. 在 `SnapshotService.runTurn` 内分发 ReAct / Plan；
-6. 返回结构化结果。
+1. 接收 raw `submittedInput` 与执行用 `taskInput`；
+2. 从当前 Execution Context 取得 Top-level Conversation；
+3. 执行 explicit override 或 Auto Router；
+4. **先 durable 写入 RoutingDecision，再开始对应模式执行**；若该写入失败，不允许开始产生工具副作用；
+5. 记录 `execution_mode_selected`；
+6. 在 `SnapshotService.runTurn` 中分发 ReAct / Plan；
+7. 返回 typed `TopLevelExecutionResult`。
 
-建议输入：
+建议：
 
-```java
-record TopLevelExecutionRequest(
-    String submittedInput,
-    String taskInput,
-    ExecutionMode explicitMode,
-    ExecutionSurface surface
-) {}
-```
-
-其中：
-
-```java
-enum ExecutionSurface {
-    INTERACTIVE,
-    BACKGROUND
+~~~java
+enum ExecutionOutcome {
+    SUCCEEDED,
+    FAILED,
+    CANCELED,
+    REJECTED
 }
-```
 
-建议输出：
-
-```java
 record TopLevelExecutionResult(
     ExecutionMode mode,
     RoutingSource routingSource,
+    ExecutionOutcome outcome,
     String result,
+    String error,
     String sessionId
 ) {}
-```
+~~~
 
-协调器不能依赖 JLine、`Main`、`TaskCommandFormatter` 或 Renderer 具体实现。
+Runtime Job 映射：
 
-### 3.3 Execution Context：前台复用，后台隔离
+~~~text
+SUCCEEDED -> COMPLETED
+FAILED    -> FAILED
+CANCELED  -> CANCELED
+REJECTED  -> FAILED + reason   // 第一阶段不扩 Runtime 状态枚举
+~~~
 
-协调器需要一个运行上下文，建议抽象：
+现有 `Agent.run(): String` / `PlanExecuteAgent.run(): String` 保持 CLI 兼容，但内部应抽出 typed 结果入口，CLI 再把 typed outcome 转成显示字符串。禁止通过 `startsWith("❌")` 等文本规则推断状态。
 
-```java
+Coordinator 不能依赖 JLine、`Main`、`TaskCommandFormatter` 或具体 Renderer。
+
+### 3.3 Execution Context：前台复用，后台 fork
+
+协调器通过统一 Context 访问运行依赖：
+
+~~~java
 interface TopLevelExecutionContext {
     Agent reactAgent();
     ParentConversationContext parentConversationContext();
@@ -407,84 +445,104 @@ interface TopLevelExecutionContext {
     PlanExecuteAgent createPlanAgent(PlanReviewHandler reviewHandler);
     SnapshotService snapshotService();
 }
-```
+~~~
 
 #### 前台
 
-前台 Context 继续包装现有长期存在的：
-
-```text
-reactAgent
-ParentConversationContext
-SessionHandle
-MemoryManager
-ToolRegistry
-```
-
-因此现有多轮行为不变。
+继续包装现有长期存在的 `reactAgent + ParentConversationContext + SessionHandle + MemoryManager + ToolRegistry`，行为不变。
 
 #### 后台
 
-每个 Runtime Job 创建独立：
+每个 Runtime Job 使用独立 BackgroundExecutionContext：
 
-```text
+~~~text
 BackgroundExecutionContext
 ├── own Agent
 ├── own ToolRegistry
 ├── own ParentConversationContext
-├── own durable SessionHandle
-└── own ConversationLedger
-```
+├── own durable Background Session
+├── own ConversationLedger
+└── fork metadata(sourceSessionId, sourceSequence)
+~~~
 
-后台 Context 不引用当前 CLI 的 `reactAgent`。
+它的**初始上下文不是空白**，而是从 enqueue 时记录的 source Session fork point 重放得到。
 
-### 3.4 后台 Session 生命周期
+为避免在 `tasks.db` 复制整段对话正文，Runtime Job 只保存 `source_session_id + source_sequence`。`SessionStore` 增加只读的 as-of replay 能力，例如：
 
-`/task add` 只负责持久化 raw submitted input，不在提交线程创建 Agent。
+~~~java
+SessionProjection readProjectionAt(String sessionId, long maxSequence)
+~~~
 
-Worker 第一次真正开始执行 Job 时：
+Raw session JSONL 本来就是 append-only，因此 sequence 是稳定 fork point；后续 source Session 即使继续追加，也不会改变该 Job 的上下文基线。
 
-1. claim Job；
-2. 若 `session_id IS NULL`：
-   - 创建 durable Parent Session；
-   - 将 `session_id` 写回 Runtime Job；
-3. 构造 BackgroundExecutionContext；
-4. Router 选择模式；
-5. 将 `selected_mode` 与 `routing_source` 写回 Runtime Job；
-6. 执行对应模式；
-7. 写 completed / failed / canceled。
+如果当前前台没有 durable Session，则 `/task add` 必须 fail-closed：提示无法保证可恢复的上下文继承，而不是偷偷退化成空上下文后台执行。
 
-后台 Session 默认独立，不复制前台 Conversation View。
+### 3.4 后台 Session 生命周期与幂等创建
 
-### 3.5 Runtime Job 需要增加的持久字段
+`/task add` 的提交阶段执行：
 
-第一阶段继续使用现有表名 `runtime_tasks`，但通过 additive migration 增加：
+1. 生成 Job ID；
+2. 读取当前前台 durable Session ID 与 `lastAppliedSequence`，形成 fork point；
+3. 在同一个 SQLite enqueue 中写入 Job、workspace、source session/sequence；
+4. 返回 Job ID。
 
-```text
-workspace          TEXT
-session_id         TEXT
-selected_mode      TEXT
-routing_source     TEXT
-attempt            INTEGER DEFAULT 0
-```
+提交阶段**不创建新的 Background Session**，因此不存在“Session 已创建但 Job row 尚未写入”的跨存储 orphan 窗口。
+
+Worker 第一次 claim 后，通过 Job ID 派生稳定 Background Session identity，例如：
+
+~~~text
+background-job-<job-id>
+~~~
+
+`SessionStore` 增加专用幂等 API，例如：
+
+~~~java
+openOrCreateBackgroundFork(jobId, workspace, provider, model, sourceSessionId, sourceSequence)
+~~~
 
 语义：
 
-- `workspace`：恢复时校验 Job 是否仍在同一 workspace；
-- `session_id`：绑定该 Job 自己的 Parent Session；
-- `selected_mode`：Router 成功后写入 `react|plan`；
-- `routing_source`：记录 `auto_model|auto_fallback|explicit`；
-- `attempt`：每次 RUNNING → ENQUEUED 恢复后再次领取时递增，用于审计 at-least-once。
+- Session 不存在：读取 source projection at sequence，用该 projection 初始化独立 Background Parent Session；
+- Session 已存在：按同一 Job ID 恢复 writable handle；
+- Session 存在但 fork metadata 不一致：fail closed；
+- 创建/恢复成功后把实际 `background_session_id` 写回 Runtime Job 作为审计字段；
+- crash 发生在 Session 创建后、Job row 回写前也没有歧义，因为 identity 可由 Job ID 再次确定。
 
-不在 Runtime 表复制：
+Job terminal 后顺序：
 
-- Plan DAG；
-- dependencies；
-- ResourceClaims；
-- Evidence；
-- DIFF baseline。
+1. 将 typed outcome append 为 durable `BACKGROUND_JOB_OUTCOME` Session event；
+2. 更新 `runtime_tasks` terminal status/result/error；
+3. `markClosed("background-job-...")`；
+4. release handle。
 
-这些仍属于 `PlanStateStore`。
+若 crash 发生在 1 与 2 之间，恢复时以 Session 中已提交的 `BACKGROUND_JOB_OUTCOME` 收敛 Job，不重新执行。
+
+### 3.5 Runtime Job 需要增加的持久字段
+
+第一阶段保留表名 `runtime_tasks`，通过 additive migration 增加：
+
+~~~text
+workspace                TEXT
+source_session_id        TEXT
+source_sequence          INTEGER
+background_session_id    TEXT
+selected_mode            TEXT
+routing_source           TEXT
+attempt                  INTEGER DEFAULT 0
+~~~
+
+语义：
+
+- `workspace`：enqueue 时的规范化项目根；
+- `source_session_id/source_sequence`：`/task add` 提交时刻的上下文 fork point；
+- `background_session_id`：Job 专属 Parent Session，首次 Worker 执行后写入；
+- `selected_mode`：Router durable 决策 `react|plan`；
+- `routing_source`：`auto_model|auto_fallback|explicit`；
+- `attempt`：每次重新领取递增，用于审计 at-least-once。
+
+Runtime 表不复制 Plan DAG、dependencies、ResourceClaims、Evidence、DIFF baseline；这些继续只属于 `PlanStateStore`。
+
+新 Job 的 `workspace/source_session_id/source_sequence` 必须非空；legacy row 允许 NULL 以兼容旧 schema，但不能自动 claim。
 
 ### 3.6 为什么仍然不合并 Runtime Job 与 Plan Task 表
 
@@ -514,106 +572,85 @@ Runtime Job 是“外层 execution envelope”；Plan Task 是“内层 workflow
 
 因此本次明确保留分层。
 
-### 3.7 Background Plan 的首次执行
+### 3.7 Background Job 首次执行
 
-首次 Job：
-
-```mermaid
+~~~mermaid
 sequenceDiagram
-    participant Q as DurableExecutionManager
-    participant S as Runtime Job Store
-    participant X as BackgroundExecutionContext
-    participant C as TopLevelExecutionCoordinator
+    participant M as BackgroundJobManager
+    participant DB as runtime_tasks
+    participant SS as SessionStore
+    participant C as Coordinator
     participant R as Mode Router
-    participant P as PlanExecuteAgent
-    participant PS as PlanStateStore
+    participant P as Plan/ReAct
 
-    Q->>S: claim enqueued -> running
-    Q->>X: open/create durable Session
-    X->>S: persist session_id
-    Q->>C: execute(request, context)
-    C->>R: route(submittedInput, topLevelHistory)
-    R-->>C: PLAN
-    C->>S: persist selected_mode=plan
-    C->>P: run(taskInput, submittedInput)
-    P->>PS: save plan bound to session_id
-    P->>P: execute DAG
-    P-->>C: result
-    C-->>Q: result
-    Q->>S: running -> completed
-```
+    M->>DB: claim(workspace) enqueued -> running
+    M->>SS: openOrCreateBackgroundFork(jobId, sourceSession, sourceSequence)
+    SS-->>M: backgroundSession
+    M->>DB: persist background_session_id
+    M->>C: execute(job input, forked context)
+    C->>R: route(raw input, forked Top-level View)
+    R-->>C: RoutingDecision
+    C->>DB: persist selected_mode + routing_source
+    DB-->>C: durable ack
+    C->>P: execute selected mode
+    P-->>C: typed ExecutionOutcome
+    C->>SS: append BACKGROUND_JOB_OUTCOME
+    C-->>M: typed result
+    M->>DB: write terminal status
+    M->>SS: markClosed
+~~~
 
-### 3.8 Background Plan 的崩溃恢复
+关键门禁：**mode 必须先写入 Runtime Job，再开始 ReAct/Plan 执行。** 这样 crash 后不会出现“已经产生工具副作用，但数据库仍不知道当时选了什么模式”的状态。
 
-Runtime 启动仍可把遗留 `running` Job 重新变成 `enqueued`，但 Worker 再次领取后不能无条件重新 Router。
+### 3.8 崩溃恢复状态机
 
-规则：
+Runtime 启动只把**当前 workspace** 的遗留 RUNNING Job 重新置为 ENQUEUED。重新 claim 后按以下顺序恢复：
 
-#### 未完成 Router
+#### 0. Session 已存在 terminal Job outcome
 
-如果：
+若 Background Session 已存在 `BACKGROUND_JOB_OUTCOME`：
 
-```text
-selected_mode IS NULL
-```
+- 直接把 typed outcome 收敛到 `runtime_tasks`；
+- 不 Router、不 ReAct、不 Plan；
+- best-effort close Session。
 
-说明崩溃发生在 Router 完成并持久化之前：
+这是“Execution 已完成但 Runtime Job terminal update 尚未提交”窗口的统一解法。
 
-```text
-重新执行 Router
-```
+#### 1. `selected_mode IS NULL`
 
-该语义仍是 at-least-once，但 Router 不产生工具副作用。
+说明尚没有 durable mode decision。重新 Router 是安全的，因为设计要求任何模式执行都必须发生在 selected_mode 持久化之后。
 
-#### 已选择 ReAct
+#### 2. `selected_mode = react`
 
-如果：
+- 不重新 Router；
+- 恢复 Job 专属 Background Session；
+- 若没有 `BACKGROUND_JOB_OUTCOME`，当前实现无法证明 ReAct 已完整结束，因此从 Job boundary 重跑 raw submitted input；
+- 保持 at-least-once，不宣称工具级断点续跑。
 
-```text
-selected_mode = react
-```
+#### 3. `selected_mode = plan`
 
-则：
+先 `PlanConversationReconciler`，再按 `workspace + background_session_id` 查询该专属 Session 的 Plan lineage（Background Session 一 Job 一用，不会混入其它顶层 Plan）：
 
-- 恢复该 Job 的 Session；
-- 调用 Session interrupted-state reconciliation；
-- 从顶层 Job 边界重新执行该 submitted input；
-- 不再次 Router。
+~~~text
+find latest plan for session INCLUDING terminal
+        │
+        ├─ active CREATED/RUNNING
+        │      -> resumeActivePlan()
+        │         不 reroute、不 replan，completed Task 不重跑
+        │
+        ├─ terminal COMPLETED/FAILED/CANCELLED
+        │      -> 从 PlanStateStore + reconciled Session 构造 typed outcome
+        │         append BACKGROUND_JOB_OUTCOME
+        │         收敛 Runtime Job，绝不重新 Planner
+        │
+        └─ no plan record
+               -> crash 位于 mode durable ack 与首次 savePlanDurably 之间
+                  允许第一次 planner.run()
+~~~
 
-当前 ReAct 不承诺工具级 exactly-once，因此仍是 at-least-once；文档与简历不得把它描述成“断点续跑”。
+因此 `PlanStateStore` 需要新增按 `workspace + session_id` 查询**最新 Plan（包含终态）**的只读 API；只调用现有 `findActive()` 不足以区分“尚未创建”和“已经完成”。
 
-#### 已选择 Plan
-
-如果：
-
-```text
-selected_mode = plan
-```
-
-则：
-
-1. 恢复 Job 的 durable Session；
-2. 用 `PlanStateStore.findActive(workspace, session_id)` 检查 active Plan；
-3. 若存在 active Plan：
-   - **直接 `resumeActivePlan()`**；
-   - 不重新 Router；
-   - 不重新 Planner；
-4. 若不存在 active Plan：
-   - 检查 Session / Plan reconciliation 状态；
-   - 只有确认第一次 Plan 尚未 durable 创建时，才允许重新进入 `run(...)`；
-   - 若状态矛盾，fail closed，Job 标记 failed 并记录恢复错误，不能猜测性重建。
-
-这使两层恢复语义形成组合：
-
-```text
-Runtime Job recovery
-        ↓
-selected_mode = PLAN
-        ↓
-PlanStateStore recovery
-        ↓
-DAG Task boundary resume
-```
+若 Session 与 PlanStore 互相矛盾且 reconciler 无法确定唯一状态，fail closed：Job 标记 FAILED，记录恢复错误，不猜测性重建。
 
 ### 3.9 Headless Plan Review 策略
 
@@ -637,31 +674,28 @@ PlanReviewDecision.execute()
 
 ### 3.10 Execution-scoped Cancellation
 
-建议不直接让多个后台 Job 调用当前全局 `CancellationContext.startRun()`。
+不新增一套与现有 `CancellationContext` 并存的第二真相源；本次直接把现有 Context 重构为 execution-scoped，同时保留调用方统一使用的：
 
-新增或重构为：
+~~~java
+CancellationContext.isCancelled()
+~~~
 
-```text
-ExecutionCancellationToken
-ExecutionCancellationScope
-```
+建议模型：
 
-要求：
+~~~text
+CancellationToken token = ...
+CancellationContext.withToken(token, () -> execution)
+~~~
 
-1. 每个 Runtime Job 一个 token；
-2. `DurableExecutionManager` 维护：
-   ```text
-   executionId -> token
-   ```
-3. `cancel(id)`：
-   - 先设置 token.cancel；
-   - 再 best-effort interrupt 当前 Worker；
-   - 数据库写 `canceled`；
-4. 所有异步子任务提交到 Executor 时显式包装 token scope；
-5. ReAct、Router、Plan、Plan Task、Tool wait 点读取的是当前 Execution token，不读取会被其它 Job 覆盖的全局 token；
-6. Job A 取消不能影响 Job B。
+- 去除/弃用会被并发 Job 覆盖的全局 `CURRENT`；
+- `runWithCancelSupport` 持有前台 token 的显式引用并 cancel；
+- BackgroundJobManager 维护 `jobId -> RunningExecution(token, workerThread)`；
+- Plan 创建 child worker / executor task 时显式 capture 并安装当前 token scope；不能依赖 InheritableThreadLocal 对线程池复用进行传播；
+- cancel Job：先 `token.cancel()`，再 best-effort `workerThread.interrupt()` 以唤醒阻塞调用；
+- Worker 在结束当前 Job 后必须清理 interrupt 状态，不能因为取消一个 Job 永久损失池线程；
+- Job A 的 token 绝不能被 Job B 观察到。
 
-如果实现过程中无法在不扩大范围的情况下完全消除现有全局 `CURRENT`，至少必须让 Background Execution 使用独立显式 token 路径，并增加并发隔离测试。
+Router、Agent、PlanExecuteAgent、Tool wait 点继续只调用统一 `CancellationContext.isCancelled()`，不各自引入新的取消判断协议。
 
 ### 3.11 Worker Pool 与 Plan 内部并发
 
@@ -682,267 +716,225 @@ background_job_workers × per_plan_task_parallelism
 - 文档中明确这是嵌套并发；
 - 测试至少覆盖两个后台 Job 并发执行时状态与取消互不串扰。
 
-### 3.12 输入与授权边界
+### 3.12 输入、上下文继承与授权边界
 
-后台 Runtime Job 必须持久化：
+后台 Runtime Job 保存的 raw input 是：
 
-```text
-submittedInput = 用户原始 /task add payload
-```
+~~~text
+submittedInput = /task add 后面的原始 payload
+~~~
 
-Router、Memory 写入判断、`TurnToolPolicy` 的授权边界都基于 raw submitted input。
+第一阶段明确：
 
-`taskInput` 可以包含执行前的非授权性展开，但不能反向扩大 `submittedInput` 的授权范围。
+~~~text
+taskInput = submittedInput
+~~~
 
-由于当前后台路径不创建 `McpServerManager`，本次不要求 Background 与 CLI 拥有完全相同的 MCP resource expansion 能力。统一的是**顶层 Router + ReAct/Plan dispatch**，不是伪造不存在的 headless 外部资源。
+即后台不复制 CLI 专属 `mentionExpander` / MCP resource expansion。这样实现语义唯一，不会出现“文档说统一、代码却各自猜一套预处理”的问题。
+
+上下文继承与当前权限严格分离：
+
+- Router：读取 fork 后的 Top-level Conversation + 当前 raw submittedInput；
+- Planner：读取 fork 后的 Top-level Conversation；
+- ReAct：读取 fork 后的 Provider Surface；
+- `TurnToolPolicy`：**只**读取当前 raw submittedInput；
+- inherited tool result / URL / path / reasoning 不得产生 trusted capability；
+- source Session 中曾经的 HITL approval 不继承到 Background Job。
+
+因此“继承已有任务上下文”解决的是语义连续性，不是权限连续性。
 
 ### 3.13 数据迁移与兼容性
 
-`DurableTaskManager.initTables()` 当前只有 `CREATE TABLE IF NOT EXISTS`，无法给既有数据库补新列。
-
-本次必须增加最小 schema migration：
+`DurableTaskManager.initTables()` 当前只有 `CREATE TABLE IF NOT EXISTS`。本次必须增加最小 schema migration：
 
 1. `PRAGMA table_info(runtime_tasks)`；
-2. 缺列时依次执行 `ALTER TABLE ... ADD COLUMN`；
+2. 缺列时逐个 `ALTER TABLE ... ADD COLUMN`；
 3. migration 在 Worker 启动前完成；
-4. 旧记录：
-   - `selected_mode = NULL`；
-   - `session_id = NULL`；
-   - 第一次被重新执行时按新规则创建 Session 并 Router；
-5. 不删除旧列、不重写用户历史结果。
+4. 新 Job 写完整 workspace/fork metadata；
+5. legacy row：新增列保持 NULL，可 list/log/cancel，但 claim 查询必须排除 `workspace IS NULL`；
+6. 不删除旧列，不改旧 task ID，不重写历史 result/error；
+7. 第一阶段不重命名 SQL 表。
 
-第一阶段**不重命名** `runtime_tasks`，避免同时做 table rename/copy migration。
+### 3.14 内部命名与 HTTP 兼容
+
+为消除“Runtime Task”和“Plan Task”长期混淆，本次代码层建议重命名：
+
+~~~text
+DurableTaskManager -> BackgroundJobManager
+DurableTask        -> BackgroundJob
+TaskStatus         -> BackgroundJobStatus
+~~~
+
+CLI `/task` 与 SQL 表 `runtime_tasks` 为兼容性保持不变。
+
+当前 Runtime HTTP API 仍使用 `TaskRunner(String prompt)`；本次**不修改该契约**。后台 durable queue 改接新的 Coordinator/BackgroundExecutionRunner，避免为了本次重构顺手破坏 HTTP 路径。
+
+### 3.15 Job-level durable outcome event
+
+新增 Session event type（名称可在实现时按现有命名规范确定）：
+
+~~~text
+BACKGROUND_JOB_OUTCOME
+jobId
+mode
+routingSource
+outcome
+result
+error
+attempt
+~~~
+
+它是 Background Session 对“这一顶层 Job 已经产生确定终态”的 durable 证明，用来覆盖 Session 与 SQLite 之间的 terminal crash window。它不替代 `runtime_tasks`：Job 是否在队列中、是否可 claim 仍以 tasks.db 为权威；它只用于恢复时证明执行结果已经生成。
 
 ---
 
 ## 4. 实现任务与测试矩阵
 
-### 4.1 建议实现顺序
+### 4.1 实现顺序
 
-#### Task A：先锁定当前行为
+#### Task A：测试锁定现状与新增恢复契约
 
-补充/扩展：
+先补失败测试覆盖：
 
-- `DurableTaskManagerTest`
-- `ExecutionModeRouterTest`
-- `MainInputNormalizationTest` 或新的 coordinator test
+- `/task add` 当前绕过 Router；
+- 旧 FIFO claim / cancel / crash recovery；
+- background context fork 的 sequence 语义；
+- terminal Plan 但 Job 未 terminal；
+- background Session 不得被前台 latest-unclosed 恢复；
+- Agent/Plan 错误字符串不能被后台标成 COMPLETED。
 
-证明当前：
+#### Task B：typed execution outcome
 
-- `/task add` 只 enqueue；
-- Worker FIFO claim；
-- crash running → enqueued；
-- cancel 终态不被 Worker 覆盖。
+为 ReAct / Plan 提供 typed internal result；保留现有 `run(): String` 作为 CLI adapter。新增 `TopLevelExecutionCoordinatorTest`。
 
-#### Task B：抽出 TopLevelExecutionCoordinator
+#### Task C：抽 TopLevelExecutionCoordinator
 
-先把当前 `Main` 的：
+把当前 Main 的 select mode / record / snapshot / dispatch 移入协调器，先只替换前台接线并证明行为等价。
 
-```text
-select mode
-record mode
-SnapshotService.runTurn
-ReAct/Plan dispatch
-```
+#### Task D：Session as-of replay 与 background fork
 
-迁移到可复用协调器。
+- `readProjectionAt(sessionId, sequence)`；
+- `openOrCreateBackgroundFork(jobId, ...)`；
+- actor/background filter；
+- `latestUnclosedInteractive(workspace)`；
+- Background Session 初始化为 fork projection，而不是空 Session。
 
-前台行为必须保持完全等价。
+#### Task E：扩展 Runtime Job schema 与 workspace-bound claim
 
-建议新增：
+- additive migration；
+- enqueue 保存 source session/sequence/workspace；
+- `claimNext(workspace)`；
+- `recoverRunningTasks(workspace)`；
+- legacy unscoped row 不自动执行。
 
-```text
-TopLevelExecutionCoordinatorTest
-```
+#### Task F：后台 Worker 接 Coordinator
 
-覆盖：
+后台 Job 第一次 claim 后创建/恢复 fork Session，执行 Router，先 durable mode，再启动 ReAct/Plan。
 
-- explicit REACT；
-- explicit PLAN；
-- AUTO_MODEL REACT；
-- AUTO_MODEL PLAN；
-- Router failure → AUTO_FALLBACK REACT；
-- cancellation 不被 fallback 吞掉。
+#### Task G：Plan terminal/active/no-plan 恢复
 
-#### Task C：后台独立 Execution Context
+新增 `PlanStateStore` session-level latest lookup；覆盖 active、terminal、尚未 save 三类 crash window。
 
-新增后台 Context factory：
+#### Task H：统一 CancellationContext
 
-- 创建 ToolRegistry；
-- 创建 Agent；
-- 创建 durable Session；
-- attach `ParentConversationContext`；
-- 需要 Plan 时创建共享同一 Parent Context 的 `PlanExecuteAgent`；
-- background review policy = execute。
+移除后台并发会互相覆盖的全局 token 语义；前台、后台和 Plan child worker 统一显式 scope propagation。
 
-测试：
+#### Task I：文档同步
 
-- 两个后台 Job 的 session_id 不同；
-- 后台 Job 不写入前台 ParentConversationContext；
-- Plan 可通过 durable-session gate。
-
-#### Task D：扩展 runtime_tasks schema
-
-增加 additive migration 与字段读写。
-
-测试：
-
-- 全新 DB schema；
-- legacy DB 自动补列；
-- legacy row 可读取；
-- mode/session metadata 可 durable round-trip。
-
-#### Task E：后台 Worker 接统一 Coordinator
-
-替换当前：
-
-```text
-TaskRunner<String prompt> -> runHeadlessTask -> Agent
-```
-
-旁路。
-
-Worker 流程改为：
-
-```text
-claim
-→ prepare/resume background context
-→ coordinator / recovery dispatcher
-→ persist terminal result
-```
-
-建议把“SQLite Store”和“Worker lifecycle”适度拆开，避免 Coordinator 直接依赖 JDBC Connection。
-
-#### Task F：Plan 恢复接线
-
-覆盖三种 crash window：
-
-1. mode 未持久化；
-2. mode=PLAN，但 Plan 尚未 durable save；
-3. mode=PLAN，active Plan 已存在且部分 Task 完成。
-
-第三种必须证明：
-
-- Planner 不重新调用；
-- completed Task 不重跑；
-- interrupted Task 按现有 Plan recovery 规则恢复；
-- Runtime Job 最终完成后写 terminal 状态。
-
-#### Task G：取消隔离
-
-引入 Execution-scoped token，并补：
-
-- 同时运行 Job A / Job B；
-- cancel A；
-- A 最终 CANCELED；
-- B 不受影响并可 COMPLETED；
-- Plan child execution 可观察取消；
-- 被取消 Job 后续返回不能覆盖 CANCELED。
-
-#### Task H：文档与命令同步
-
-实现后同步：
-
-- 本文实施记录；
-- `AGENTS.md` 对 Runtime headless 的描述；
-- `docs/dev/05-runtime-api-tasks.md` 当前行为章节；
-- README 中 `/task` 描述（若存在）。
-
-不得另建 implementation-plan 文档。
+实现完成后更新本文实施记录、`AGENTS.md`、`docs/dev/05-runtime-api-tasks.md` 和 README `/task` 描述；不得新增第二份 implementation-plan。
 
 ### 4.2 测试矩阵
 
 | 场景 | 预期 |
 |---|---|
-| `/task add` + Router=REACT | Job mode=react，执行 ReAct，COMPLETED |
-| `/task add` + Router=PLAN | Job mode=plan，创建 durable Plan，DAG 完成 |
-| Router 抛普通异常 | mode=react，routing_source=auto_fallback |
-| Router cancellation | Job CANCELED，不回退 ReAct |
-| 两个后台 Job 并发 | session/context/取消互相隔离 |
-| background Plan | 不要求终端人工 review，自动 Step Review/Evidence 仍工作 |
-| ReAct Job crash | RUNNING → ENQUEUED，按 Job boundary at-least-once |
-| Plan Job crash，active Plan 存在 | 不 reroute、不 replan，`resumeActivePlan` |
-| Plan 已完成 Task | resume 后不重跑 |
-| Plan interrupted Task | 按现有 Task boundary 恢复 |
-| legacy tasks.db | 自动迁移新增列，旧任务仍可 list/log |
-| cancel ENQUEUED | 直接 CANCELED，Worker 不领取 |
-| cancel RUNNING ReAct | token + interrupt，终态保持 CANCELED |
-| cancel RUNNING Plan | Plan/child worker 观察同一 execution token |
-| foreground ordinary input | Auto Router 行为与当前完全一致 |
-| `/react` / `/plan` | one-turn override 行为不回归 |
+| `/task add` 在已有多轮会话中提交 | Job 记录 source session + exact sequence |
+| 提交后前台继续对话、Job 延迟执行 | Background 只看到提交时刻 fork，不看到之后新增前台消息 |
+| Background ReAct | Provider Surface 继承 fork 上下文 |
+| Background Router/Plan | 只看 fork 的 Top-level Conversation |
+| inherited history 含 URL/path | 不自动获得当前 Job 工具授权 |
+| 当前前台无 durable Session | `/task add` fail-closed，不创建不可恢复 Job |
+| Router=REACT | mode durable 后执行 ReAct，typed success -> COMPLETED |
+| Router=PLAN | mode durable 后创建 durable Plan |
+| Router 普通异常 | AUTO_FALLBACK REACT |
+| Router cancellation | CANCELED，不 fallback |
+| crash: mode durable 前 | 可重新 Router；尚未执行工具 |
+| crash: ReAct result event 后、Job terminal 前 | 从 `BACKGROUND_JOB_OUTCOME` 收敛，不重跑 |
+| crash: ReAct 中途 | 无 outcome，Job-boundary at-least-once 重跑 |
+| crash: PLAN active | `resumeActivePlan()`，不 reroute/replan |
+| crash: PLAN terminal、Job 未 terminal | 从 terminal Plan 收敛，不重新 Planner |
+| crash: selected PLAN、尚无 Plan row | 允许首次 Planner |
+| completed Plan Task | resume 后不重跑 |
+| Background Session unclosed | 前台 `latestUnclosedInteractive` 不返回它 |
+| terminal Background Job | Session markClosed |
+| 两个 Background Job 并发 | fork/session/token 相互隔离 |
+| cancel Job A | A CANCELED，B 不受影响，Worker pool 不永久减员 |
+| legacy tasks.db | 自动补列；旧 row 可读但不自动 claim |
+| 在 workspace B 启动 | 不 claim workspace A 的 Job |
+| ReAct/Plan typed FAILED | Runtime status=FAILED，不因错误文本误标 COMPLETED |
+| foreground ordinary input | Auto Router 行为与当前一致 |
+| `/react` / `/plan` | one-turn override 不回归 |
 
 ### 4.3 验证命令
 
-实现完成后至少执行：
+实现完成后至少运行：
 
-```bash
-mvn test -DskipTests=false -Dtest=ExecutionModeRouterTest,DurableTaskManagerTest,PlanExecuteRecoveryTest
+~~~bash
+mvn test -DskipTests=false -Dtest=ExecutionModeRouterTest,DurableTaskManagerTest,PlanExecuteRecoveryTest,SessionStoreTest
 mvn test -DskipTests=false -Dtest=TopLevelExecutionCoordinatorTest,BackgroundExecutionIntegrationTest
 mvn test -Pquick
 mvn test -DskipTests=false
 mvn clean package
 git diff --check
-```
+~~~
 
-若最终测试类名不同，以实际实现为准，并回填本文。
-
----
+最终类名如果因本次 rename 变化，以实际类名回填本文，不允许写未执行的验证结果。
 
 ## 5. 风险、失败路径与回滚
 
-### 5.1 双重持久化不是重复，而是层级组合
+### 5.1 三个持久化层的权威边界
 
-重构后仍存在：
+~~~text
+tasks.db  -> Background Job queue/lifecycle + durable mode/fork identity
+history   -> Background/Foreground Parent Session context + job outcome proof
+plans.db  -> Plan Run / DAG node state
+~~~
 
-```text
-tasks.db  → 顶层 Background Job 生命周期
-plans.db  → Plan Run / DAG Node 生命周期
-history   → Parent Session 事件
-```
+权威规则：
 
-这是有意分层。
+- Job 是否可 claim、当前 Runtime status：tasks.db；
+- source context fork point：tasks.db 中 source session + sequence；
+- Job 专属对话与 `BACKGROUND_JOB_OUTCOME`：Background Session；
+- Execution Mode：tasks.db 中首次 durable `selected_mode`；
+- Plan workflow：plans.db；
+- 不从 assistant 文本猜终态，不从 Session 文本猜 Tool Policy。
 
-真正需要避免的是“同一事实在多处都自称权威”：
+### 5.2 必测崩溃窗口
 
-- Job 是否被领取：`tasks.db` 权威；
-- 当前 Execution Mode：Job 首次 route 后的 `selected_mode` 权威；
-- Plan DAG 状态：`plans.db` 权威；
-- Parent Conversation：Session Event Log 权威。
+1. enqueue 已提交、Worker 尚未运行；
+2. Background Session 创建后、`background_session_id` 回写前；
+3. Router 返回后、selected_mode durable ack 前——此时不得开始 Agent；
+4. selected_mode=PLAN 后、`savePlanDurably` 前；
+5. active Plan Task 中途；
+6. Plan 已 terminal、`BACKGROUND_JOB_OUTCOME` 前；
+7. `BACKGROUND_JOB_OUTCOME` 已提交、tasks.db terminal update 前；
+8. tasks.db 已 terminal、Session markClosed 前；
+9. ReAct 外部副作用已发生但尚无 job outcome event。
 
-恢复代码必须按这个边界判断，不得从 assistant 文本猜状态。
+### 5.3 上下文 fork 的存储成本与一致性
 
-### 5.2 崩溃窗口
+本次不把完整上下文复制进 tasks.db，而是保存 source session + sequence，并依赖 append-only Session replay。代价是 source Session 文件不能在 Job 执行前被物理删除；当前项目没有自动删除 raw session 的流程，因此满足该前提。未来若加入清理策略，必须把仍被 ENQUEUED/RUNNING Job 引用的 source Session 视为 pinned。
 
-重点窗口：
+### 5.4 多实例限制
 
-1. claim 后、session_id 写入前崩溃；
-2. session_id 写入后、mode 写入前崩溃；
-3. mode=PLAN 写入后、Plan save 前崩溃；
-4. Plan save 后、Runtime Job terminal 前崩溃；
-5. ReAct 产生外部副作用后、terminal 前崩溃。
+仍维持单进程独占 tasks.db；没有 lease/owner/heartbeat，不宣称多实例安全。
 
-每个窗口都必须有 deterministic recovery test。
+### 5.5 回滚
 
-### 5.3 多实例限制
-
-当前 `recoverRunningTasks` 会无条件把所有 RUNNING 重置为 ENQUEUED，没有 owner/lease。
-
-因此本次仍维持：
-
-> 单进程独占 `tasks.db`。
-
-不能把本重构描述成多实例任务队列。
-
-### 5.4 回滚
-
-行为回滚优先：
-
-1. Coordinator 保留前台 path；
-2. 后台出现严重问题时可临时让 Worker 显式 `REACT`，但必须通过 Coordinator，而不是恢复 `runHeadlessTask` 旁路；
+1. Coordinator 前台适配层独立，出现后台问题时前台可继续使用统一 Coordinator；
+2. Background queue 如需临时降级，可显式固定 `REACT` 作为 Coordinator override，但不得恢复旧 `runHeadlessTask` 旁路；
 3. additive schema 不需要删除新列；
-4. 旧 `runtime_tasks` 数据保持可读。
-
----
+4. Session fork event/API 为增量能力，不修改旧 raw event；
+5. legacy row 保持只读可见。
 
 ## 6. 实施记录
 
@@ -963,10 +955,12 @@ main@33c6a24caf3835835c62b2cd36c9c710afb7bdc8
 当前仅完成：
 
 - 现状源码勘探；
-- 架构边界确认；
-- 本设计文档。
+- 第一版设计；
+- 设计 review；
+- 根据 review 收敛 Plan terminal crash window、typed outcome、workspace 隔离、Session 自动恢复隔离；
+- 根据用户要求将 `/task add` 改为 **继承提交时刻上下文的 fork-at-submit** 设计。
 
-尚未开始源码实现或测试修改。
+尚未开始 Java 源码实现或测试修改。
 
 ### 6.3 当前已确认源码事实
 
@@ -989,23 +983,37 @@ main@33c6a24caf3835835c62b2cd36c9c710afb7bdc8
 
 - [ ] 前台普通输入仍通过 Auto Router 在 ReAct / Plan 间选择。
 - [ ] `/react` 与 `/plan` one-turn override 不回归。
-- [ ] `/task add` 只改变“前台/后台提交方式”，不再固定改变 Execution Mode。
-- [ ] 后台 Job 可由 Auto Router 选择 ReAct。
-- [ ] 后台 Job 可由 Auto Router 选择 Plan。
-- [ ] 后台 Job 使用独立 durable Parent Session。
-- [ ] 后台 Job 不污染前台 ParentConversationContext。
-- [ ] Runtime Job 与 Plan Task 保持不同实体与不同持久化职责。
-- [ ] Plan Job 崩溃后存在 active Plan 时直接恢复，不重新 Planner。
+- [ ] `/task add` 只改变前台/后台提交方式，不再固定改变 Execution Mode。
+- [ ] `/task add` 记录当前 durable Parent Session + exact source sequence。
+- [ ] Background Job 的初始 Provider Surface / Top-level View 来自提交时刻 fork。
+- [ ] 提交后前台新增消息不会出现在该 Background Job 中。
+- [ ] Background Job 的后续消息不会写回原前台 Session。
+- [ ] inherited context 只提供语义，不继承 URL/path/HITL/tool permission。
+- [ ] 当前无 durable Parent Session 时 `/task add` fail-closed。
+- [ ] Background Session identity 可由 Job ID 幂等创建/恢复。
+- [ ] Background Session 不会被前台 latest-unclosed 自动恢复。
+- [ ] terminal Background Job 会 best-effort markClosed Session。
+- [ ] Runtime Job 与 Plan Task 保持不同实体和持久化职责。
+- [ ] mode decision durable ack 发生在任何 ReAct/Plan 工具副作用之前。
+- [ ] Background ReAct 可执行，失败/取消通过 typed outcome 正确映射 Runtime status。
+- [ ] Background Plan 可执行并通过 durable Parent Session gate。
+- [ ] active Plan 恢复时不 reroute、不 replan。
+- [ ] terminal Plan 但 Job 未 terminal 时能直接收敛，绝不重新 Planner。
+- [ ] selected PLAN 但从未建立 Plan 时才允许首次 Planner。
 - [ ] completed Plan Task 恢复后不重跑。
-- [ ] ReAct Job 的恢复语义明确保持 at-least-once，不宣传 exactly-once/工具级断点续跑。
-- [ ] cancel 对 Router / ReAct / Plan / Plan child execution 生效。
-- [ ] 并发 Job 的 cancellation token 不串扰。
-- [ ] legacy `tasks.db` 能自动迁移并继续读取。
-- [ ] 原始 submitted input 仍是授权边界，后台执行不扩大 Tool Policy。
-- [ ] headless Plan review 策略明确且有测试。
+- [ ] ReAct 中途 crash 仍明确是 Job-boundary at-least-once，不宣传 exactly-once。
+- [ ] `BACKGROUND_JOB_OUTCOME` 可覆盖“执行已结束、tasks.db 尚未 terminal”的 crash window。
+- [ ] CancellationContext 成为唯一 execution-scoped 取消读取入口。
+- [ ] 并发 Job 的 cancellation token、Session、Context fork 不串扰。
+- [ ] cancel 一个 Job 不导致 Worker Pool 永久减员。
+- [ ] claim/recover 只处理当前 workspace。
+- [ ] legacy NULL-workspace row 可 list/log/cancel，但不会自动执行。
+- [ ] 第一阶段 Background `taskInput == submittedInput`，不存在未定义的 CLI expansion 行为。
+- [ ] Runtime HTTP API 的旧 `TaskRunner` 契约不因本次重构回归。
 - [ ] 针对性测试通过。
 - [ ] `mvn test -Pquick` 通过。
 - [ ] 全量测试通过。
 - [ ] 构建通过。
 - [ ] `git diff --check` 通过。
 - [ ] 最终实现与本文同步，无第二份重复实施文档。
+

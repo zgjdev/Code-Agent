@@ -112,8 +112,8 @@ public class StreamableHttpTransport implements McpTransport {
                 .readTimeout(5, TimeUnit.SECONDS)
                 .connectTimeout(2, TimeUnit.SECONDS)
                 .build();
-        try (Response ignored = closeClient.newCall(builder.build()).execute()) {
-            // best effort
+        try (Response response = closeClient.newCall(builder.build()).execute()) {
+            response.code(); // Force response acquisition before the best-effort close.
         } catch (IOException ignored) {
         }
     }

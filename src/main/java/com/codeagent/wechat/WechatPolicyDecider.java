@@ -3,7 +3,6 @@ package com.codeagent.wechat;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.util.Locale;
 
 public class WechatPolicyDecider {
     private static final ObjectMapper MAPPER = new ObjectMapper();

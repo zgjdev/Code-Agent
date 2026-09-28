@@ -3,6 +3,8 @@ package com.codeagent.rag.embedding;
 import java.util.Objects;
 
 public final class EmbeddingException extends Exception {
+    private static final long serialVersionUID = 1L;
+
     private final String reasonCode;
 
     public EmbeddingException(String reasonCode, String safeMessage) {

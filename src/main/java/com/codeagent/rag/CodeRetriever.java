@@ -13,6 +13,7 @@ import java.util.Set;
 /**
  * 代码检索器：语义检索 + 图谱检索的统一入口
  */
+@SuppressWarnings("deprecation") // This class is the compatibility facade for the legacy embedding client.
 public class CodeRetriever implements AutoCloseable {
     private final EmbeddingClient embeddingClient;
     private final VectorStore vectorStore;
@@ -159,7 +160,7 @@ public class CodeRetriever implements AutoCloseable {
     }
 
     @Override
-    public void close() throws Exception {
+    public void close() throws SQLException {
         vectorStore.close();
     }
 }

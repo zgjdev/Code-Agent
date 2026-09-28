@@ -11,6 +11,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@SuppressWarnings("resource") // In-memory transports are method-scoped fixtures with no external handles.
 class McpClientTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

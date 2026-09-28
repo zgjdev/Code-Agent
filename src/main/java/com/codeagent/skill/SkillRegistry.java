@@ -157,7 +157,6 @@ public final class SkillRegistry {
         return v instanceof String s ? s : null;
     }
 
-    @SuppressWarnings("unchecked")
     private static List<String> listField(Map<String, Object> fm, String key) {
         Object v = fm.get(key);
         if (v instanceof List<?> list) {

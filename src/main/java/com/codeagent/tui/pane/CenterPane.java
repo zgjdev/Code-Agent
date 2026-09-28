@@ -7,7 +7,6 @@ import com.codeagent.llm.LlmClient;
 import com.codeagent.tui.highlight.CodeHighlighter;
 import com.codeagent.util.AnsiStyle;
 
-import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -24,7 +23,6 @@ import java.util.regex.Pattern;
  */
 public class CenterPane extends Panel {
 
-    private final LlmClient llmClient;
     private final TextBox chatArea;
     private final StringBuilder assistantBuffer;  // Assistant 流式缓冲
 
@@ -36,7 +34,6 @@ public class CenterPane extends Panel {
      */
     public CenterPane(com.codeagent.config.CodeAgentConfig config, LlmClient llmClient) {
         super();
-        this.llmClient = llmClient;
         this.assistantBuffer = new StringBuilder();
 
         setLayoutManager(new LinearLayout(Direction.VERTICAL));

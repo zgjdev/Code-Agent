@@ -11,8 +11,8 @@ import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -22,7 +22,8 @@ class SqliteRetrievalIndexTest {
     void createsV2SchemaAndSingleSchemaRow(@TempDir Path tempDir) throws Exception {
         Path database = tempDir.resolve("codebase-v2.db");
 
-        try (SqliteRetrievalIndex ignored = new SqliteRetrievalIndex(database)) {
+        try (SqliteRetrievalIndex index = new SqliteRetrievalIndex(database)) {
+            assertNotNull(index);
             try (var connection = DriverManager.getConnection("jdbc:sqlite:" + database);
                  var statement = connection.createStatement()) {
                 assertEquals(1, scalarInt(statement, "SELECT COUNT(*) FROM rag_schema"));

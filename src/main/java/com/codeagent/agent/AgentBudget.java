@@ -1,7 +1,6 @@
 package com.codeagent.agent;
 
 import com.codeagent.llm.LlmClient;
-import com.codeagent.context.ContextProfile;
 
 import java.util.ArrayDeque;
 import java.util.Deque;

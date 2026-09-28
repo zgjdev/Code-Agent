@@ -116,6 +116,8 @@ public final class LegacySessionMigrator {
     }
 
     private static final class LegacyReadException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
         private final IOException cause;
         private LegacyReadException(IOException cause) { this.cause = cause; }
     }

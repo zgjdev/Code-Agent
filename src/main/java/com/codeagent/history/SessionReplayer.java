@@ -463,6 +463,8 @@ public final class SessionReplayer {
     }
 
     public static class CorruptSessionException extends IllegalArgumentException {
+        private static final long serialVersionUID = 1L;
+
         public CorruptSessionException(String message) {
             super(message);
         }
@@ -473,6 +475,8 @@ public final class SessionReplayer {
     }
 
     public static final class UnsupportedSessionEventException extends CorruptSessionException {
+        private static final long serialVersionUID = 1L;
+
         public UnsupportedSessionEventException(String message) {
             super(message);
         }

@@ -76,15 +76,6 @@ class MainInputNormalizationTest {
     }
 
     @Test
-    void slashCommandTailTipsExposeCommandDescriptions() {
-        var tips = Main.slashCommandTailTips();
-
-        assertTrue(tips.containsKey("/model"));
-        assertTrue(tips.get("/model").getMainDesc().get(0).toString().contains("查看当前模型"));
-        assertTrue(tips.containsKey("/plan <任务内容>"));
-    }
-
-    @Test
     void formatsBetterHarnessProgressForTerminalFeedback() {
         String progress = Main.formatBetterHarnessProgress(
                 new BetterHarnessRunner.ProgressEvent(

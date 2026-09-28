@@ -9,6 +9,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
+@SuppressWarnings("deprecation") // Exercises the legacy CodeRetriever compatibility facade.
 class CodeRetrieverTest {
 
     private static final String TEST_PROJECT = "/tmp/codeagent-code-retriever";

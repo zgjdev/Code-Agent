@@ -81,6 +81,7 @@ public class CodeIndex {
 
     public record IndexResult(int chunkCount, int relationCount, String message) {}
 
+    @SuppressWarnings("deprecation") // Bridges the intentionally retained legacy EmbeddingClient API.
     private static final class ClientAdapter implements EmbeddingProvider {
         private final EmbeddingClient client;
         private final EmbeddingSpaceDescriptor space;
@@ -108,6 +109,6 @@ public class CodeIndex {
             }
         }
 
-        @Override public void close() throws Exception { client.close(); }
+        @Override public void close() { client.close(); }
     }
 }

@@ -25,7 +25,6 @@ public final class ContextTokenTracker {
 
     private final long safetyMarginTokens;
     private ContextAnchor anchor;
-    private InvalidationReason lastInvalidation = InvalidationReason.INITIAL;
 
     public ContextTokenTracker() {
         this(256L);
@@ -63,12 +62,10 @@ public final class ContextTokenTracker {
         long surface = saturatingAdd(request.estimatedSurfaceTokens(),
                 Math.max(0, assistantSurfaceEstimateTokens));
         this.anchor = new ContextAnchor(request, surface, usage, true, Instant.now());
-        this.lastInvalidation = null;
     }
 
     public void invalidate(InvalidationReason reason) {
         anchor = null;
-        lastInvalidation = reason == null ? InvalidationReason.USAGE_UNTRUSTED : reason;
     }
 
     public boolean hasUsableAnchor(RequestSnapshot current) {

@@ -1288,6 +1288,8 @@ public class Agent {
     }
 
     private static final class SessionPersistenceException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
         private SessionPersistenceException(String message, Throwable cause) {
             super(message, cause);
         }
@@ -1373,11 +1375,13 @@ public class Agent {
         private boolean thinkingQuotePrinted;
         private boolean streamedOutput;
 
+        @SuppressWarnings("unused") // Invoked reflectively by AgentStreamRendererTest.
         StreamRenderer() {
             this.renderer = null;
             this.boundOut = null;
         }
 
+        @SuppressWarnings("unused") // Retained for reflective compatibility tests.
         StreamRenderer(PrintStream out) {
             this.renderer = null;
             this.boundOut = out;

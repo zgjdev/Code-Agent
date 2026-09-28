@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@SuppressWarnings("resource") // Tests inspect the renderer before its normal channel shutdown boundary.
 class WechatRendererTest {
     @Test
     void filtersMarkdownHeadingsAndBold() {

@@ -7,6 +7,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@SuppressWarnings("resource") // Providers and caches are in-memory method-scoped fixtures.
 class MemoryEmbeddingCacheTest {
 
     @Test

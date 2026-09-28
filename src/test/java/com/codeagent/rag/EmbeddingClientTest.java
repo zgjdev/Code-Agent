@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@SuppressWarnings({"deprecation", "resource"}) // This class is the compatibility API contract test.
 class EmbeddingClientTest {
 
     @Test

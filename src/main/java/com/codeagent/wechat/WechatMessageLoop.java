@@ -229,9 +229,10 @@ public class WechatMessageLoop {
 
     private void send(String text, String contextToken) throws IOException {
         String token = safeContextToken(contextToken);
-        WechatRenderer renderer = new WechatRenderer(chunk -> client.sendText(account, account.boundUserId(), token, chunk));
-        renderer.append(text);
-        renderer.flushBuffer();
+        try (WechatRenderer renderer = new WechatRenderer(
+                chunk -> client.sendText(account, account.boundUserId(), token, chunk))) {
+            renderer.append(text);
+        }
     }
 
     private void startTyping() {

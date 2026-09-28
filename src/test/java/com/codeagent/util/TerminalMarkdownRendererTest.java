@@ -11,15 +11,15 @@ class TerminalMarkdownRendererTest {
     void rendersHeadingListTableAndCodeBlockToTerminalFriendlyText() {
         String markdown = """
                 # 规划思考
-                                
+
                 1. **分析请求**
                 - 列出当前目录
-                                
+
                 | 名称 | 说明 |
                 | --- | --- |
                 | src | 源码 |
                 | pom.xml | Maven 配置 |
-                                
+
                 ```java
                 System.out.println("hello");
                 ```

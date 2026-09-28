@@ -113,10 +113,6 @@ final class WechatTextFormatter {
         return line.replaceAll("\\*\\*\\s*([^*\\n]*?)\\s*\\*\\*", "**$1**");
     }
 
-    private static String trimBoldContent(String text) {
-        return text.replaceAll("\\*\\*\\s*([^*\\n]*?)\\s*\\*\\*", "**$1**");
-    }
-
     private static String normalizeLongFlowLine(String line) {
         if (line.length() < 28 || !line.contains("→")) {
             return line;

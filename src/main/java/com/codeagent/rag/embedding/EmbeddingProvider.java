@@ -14,6 +14,6 @@ public interface EmbeddingProvider extends AutoCloseable {
     List<float[]> embedAll(List<String> inputs) throws EmbeddingException;
 
     @Override
-    default void close() throws Exception {
+    default void close() {
     }
 }

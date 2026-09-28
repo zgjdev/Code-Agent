@@ -5,7 +5,6 @@ import com.codeagent.history.SessionEvent;
 import com.codeagent.history.SessionEventDraft;
 import com.codeagent.history.SessionProjection;
 import com.codeagent.llm.LlmClient;
-import com.codeagent.plan.ExecutionPlan;
 import com.codeagent.plan.PlanConversationResultBuilder;
 import com.codeagent.plan.PlanStateStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -180,7 +179,7 @@ public final class PlanConversationReconciler {
                 : LlmClient.Message.user(content);
         ObjectNode payload = JSON.createObjectNode();
         payload.set("message", JSON.valueToTree(message));
-        ObjectNode conversation = payload.putObject("conversation")
+        payload.putObject("conversation")
                 .put("turnId", turnId)
                 .put("planId", planId)
                 .put("mode", "plan")

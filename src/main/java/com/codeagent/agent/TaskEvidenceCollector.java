@@ -36,12 +36,6 @@ public final class TaskEvidenceCollector {
                 continue;
             }
             EvidenceStatus status = result.successful() ? EvidenceStatus.PASSED : EvidenceStatus.FAILED;
-            if ("write_file".equals(invocation.name())) {
-                String path = jsonText(invocation.argumentsJson(), "path");
-                evidence.add(new TaskEvidence(EvidenceType.DIFF, status,
-                        "write_file " + (status == EvidenceStatus.PASSED ? "completed" : "failed"),
-                        path.isBlank() ? List.of() : List.of(path), "write_file", System.currentTimeMillis()));
-            }
             if ("execute_command".equals(invocation.name())) {
                 String command = jsonText(invocation.argumentsJson(), "command");
                 EvidenceType type = TEST_COMMAND.matcher(command).find() ? EvidenceType.TEST
@@ -53,6 +47,35 @@ public final class TaskEvidenceCollector {
                         invocation.name() + " completed", List.of(), invocation.name(), System.currentTimeMillis()));
             }
         }
+    }
+
+    public void observeDiff(TaskWorkspaceDiffTracker.DiffSummary summary) {
+        evidence.removeIf(item -> item.type() == EvidenceType.DIFF);
+        if (summary == null) {
+            return;
+        }
+        EvidenceStatus status = summary.changed() ? EvidenceStatus.PASSED : EvidenceStatus.FAILED;
+        String digest = summary.digest().isBlank()
+                ? ""
+                : summary.digest().substring(0, Math.min(12, summary.digest().length()));
+        String detail = summary.changed()
+                ? "files=" + summary.changedFiles()
+                + ", +" + summary.additions()
+                + ", -" + summary.deletions()
+                + (summary.nonTextFiles() > 0 ? ", nonText=" + summary.nonTextFiles() : "")
+                + (digest.isBlank() ? "" : ", hash=" + digest)
+                : "no workspace changes detected";
+        evidence.add(new TaskEvidence(EvidenceType.DIFF, status, detail,
+                summary.changedPaths(), "workspace_diff", System.currentTimeMillis()));
+    }
+
+    public void observeDiffFailure(String reason) {
+        evidence.removeIf(item -> item.type() == EvidenceType.DIFF);
+        String detail = reason == null || reason.isBlank()
+                ? "workspace diff unavailable"
+                : "workspace diff unavailable: " + summarizeCommand(reason);
+        evidence.add(new TaskEvidence(EvidenceType.DIFF, EvidenceStatus.FAILED, detail,
+                List.of(), "workspace_diff", System.currentTimeMillis()));
     }
 
     public void observeLsp(LspDiagnosticReport report) {

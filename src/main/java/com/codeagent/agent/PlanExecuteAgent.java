@@ -1123,6 +1123,7 @@ public class PlanExecuteAgent {
         TurnToolPolicy taskToolPolicy = turnToolPolicy.forkWithTrustedUrls(dependencyUrls)
                 .restrictTo(toResourceScope(task));
         TaskEvidenceCollector evidenceCollector = new TaskEvidenceCollector();
+        TaskWorkspaceDiffTracker diffTracker = startDiffTracker(task, evidenceCollector);
         SessionStore.SessionHandle child = null;
         try {
             if (parentSession != null) {
@@ -1136,7 +1137,7 @@ public class PlanExecuteAgent {
             TaskRunResult result = executeTaskWithPolicy(
                     goal, plan, task, streamState, out, dependencyUrls, recoveryFeedback,
                     taskToolPolicy, evidenceCollector);
-            result = result.withReport(DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot()));
+            result = result.withReport(evaluateEvidence(task, evidenceCollector, diffTracker));
             int evidenceRetries = 0;
             while (result.verificationReport().outcome() == VerificationOutcome.REJECTED
                     && evidenceRetries < MAX_RETRIES_PER_STEP) {
@@ -1144,14 +1145,14 @@ public class PlanExecuteAgent {
                 result = executeTaskWithPolicy(goal, plan, task, streamState, out, dependencyUrls,
                         String.join("; ", result.verificationReport().blockingReasons()),
                         taskToolPolicy, evidenceCollector);
-                result = result.withReport(DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot()));
+                result = result.withReport(evaluateEvidence(task, evidenceCollector, diffTracker));
             }
             if (pipelineOptions.stepReview()) {
                 task.markReviewing();
                 checkpointTaskSafely(plan.getId(), task);
                 result = applyStepReview(
                         goal, plan, task, streamState, out, dependencyUrls, taskToolPolicy,
-                        evidenceCollector, result);
+                        evidenceCollector, diffTracker, result);
             }
             if (child != null) {
                 parentSession.recordChildResult(child, result.result(), "completed");
@@ -1163,6 +1164,37 @@ public class PlanExecuteAgent {
             if (child != null) child.close();
             taskToolPolicy.releaseBrowserLease();
         }
+    }
+
+    private TaskWorkspaceDiffTracker startDiffTracker(Task task,
+                                                         TaskEvidenceCollector evidenceCollector) {
+        if (task == null || !task.getRequiredEvidence().contains(EvidenceType.DIFF)) {
+            return null;
+        }
+        try {
+            return TaskWorkspaceDiffTracker.start(
+                    Path.of(toolRegistry.getProjectPath()),
+                    task.getResourceClaims());
+        } catch (IOException e) {
+            evidenceCollector.observeDiffFailure("baseline capture failed: " + e.getMessage());
+            log.warn("Unable to capture task diff baseline: {}", task.getId(), e);
+            return null;
+        }
+    }
+
+    private TaskVerificationReport evaluateEvidence(Task task,
+                                                    TaskEvidenceCollector evidenceCollector,
+                                                    TaskWorkspaceDiffTracker diffTracker) {
+        if (task != null && task.getRequiredEvidence().contains(EvidenceType.DIFF)
+                && diffTracker != null) {
+            try {
+                evidenceCollector.observeDiff(diffTracker.diff());
+            } catch (IOException e) {
+                evidenceCollector.observeDiffFailure("diff capture failed: " + e.getMessage());
+                log.warn("Unable to collect task diff evidence: {}", task.getId(), e);
+            }
+        }
+        return DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot());
     }
 
     private ToolResourceScope toResourceScope(Task task) {
@@ -1180,6 +1212,7 @@ public class PlanExecuteAgent {
                                           List<TurnToolPolicy.TrustedUrlContext> dependencyUrls,
                                           TurnToolPolicy taskToolPolicy,
                                           TaskEvidenceCollector evidenceCollector,
+                                          TaskWorkspaceDiffTracker diffTracker,
                                           TaskRunResult initial) throws IOException {
         // 每个任务独占一个 Reviewer：并行批次最多 4 个任务同时进来，
         // 共享实例会让多条线程写同一份 SubAgent 会话历史。
@@ -1208,7 +1241,7 @@ public class PlanExecuteAgent {
             out.println("   反馈: " + decision.feedback() + "\n");
             result = executeTaskWithPolicy(goal, plan, task, streamState, out, dependencyUrls,
                     decision.feedback(), taskToolPolicy, evidenceCollector);
-            result = result.withReport(DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot()));
+            result = result.withReport(evaluateEvidence(task, evidenceCollector, diffTracker));
         }
     }
 

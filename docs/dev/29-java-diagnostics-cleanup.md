@@ -109,4 +109,5 @@ flowchart LR
 - `EmbeddingProvider.close()` 收窄为不抛受检异常，`CodeRetriever.close()` 收窄为 `SQLException`；原有兼容 API 仍保留。
 - JLine `CmdDesc` 仅服务于未接线的 tail-tip helper，已连同对应死测试删除；现有斜杠命令提示与 palette 行为不变。
 - 三个 LLM retry 包级异常拆为独立源文件，避免 Javac auxiliary-class 诊断，不改变可见性或构造契约。
-- `mvn package -DskipTests` 构建成功；`mvn clean package -DskipTests` 因 Windows 进程占用 `target` 而在 clean 删除阶段失败，未进入编译阶段。
+- `mvn clean package -DskipTests` 首次执行时，VS Code Red Hat Java Language Server 在 Maven 清理期间重新生成 `target/test-classes`，导致 clean 删除阶段失败；关闭相关 VS Code 窗口后重新执行成功，335 个主源码与 203 个测试源码编译通过并生成 shaded JAR。
+- Maven Shade Plugin 仍报告依赖 JAR 中 `module-info.class`、许可证及服务描述文件等元数据重叠；这些是既有打包诊断，与本次 Java 源码 warning 清理无关。该命令使用 `-DskipTests`，测试通过结论来自前述 `mvn test -Pquick` 回归。

@@ -97,6 +97,18 @@ public class PlanExecuteAgent {
             return new TaskExecutionResult(task, null, false, null, null, error);
         }
 
+        static TaskExecutionResult baselineFailure(Task task, Exception error) {
+            String message = error == null || error.getMessage() == null
+                    ? "unknown baseline error"
+                    : error.getMessage();
+            TaskVerificationReport report = new TaskVerificationReport(
+                    VerificationOutcome.REJECTED,
+                    task == null ? List.of() : task.getAcceptanceCriteria(),
+                    List.of(),
+                    List.of("DIFF evidence failed: baseline capture failed: " + message));
+            return new TaskExecutionResult(task, null, false, null, report, null);
+        }
+
         boolean failed() {
             return error != null;
         }
@@ -935,6 +947,9 @@ public class PlanExecuteAgent {
                     task.markUnverified(reason);
                     checkpointTaskSafely(plan.getId(), task);
                     interruptedRecoveryTaskIds.remove(task.getId());
+                    if (!finalResult.isEmpty()) {
+                        finalResult.append("\n");
+                    }
                     finalResult.append("任务 ").append(task.getId()).append(" 未验证: ").append(reason);
                     out.println("⚠️ 未验证 [" + task.getId() + "]: " + reason + "\n");
                     continue;
@@ -982,6 +997,21 @@ public class PlanExecuteAgent {
                             true);
                 }
             }
+        }
+
+        boolean hasUnverified = plan.getAllTasks().stream()
+                .anyMatch(task -> task.getStatus() == Task.TaskStatus.UNVERIFIED);
+        if (hasUnverified) {
+            plan.markFailed();
+            checkpointPlanDurably(plan);
+            String conversationResult = conversationResultBuilder.build(plan);
+            finishPlanTurnIfNeeded(turnId, plan, conversationResult);
+            String detail = finalResult.isEmpty()
+                    ? "存在未验证任务"
+                    : finalResult.toString();
+            return PlanRunOutcome.terminal(
+                    "⚠️ 计划包含未验证任务。\n" + detail,
+                    conversationResult);
         }
 
         if (!plan.isAllCompleted() && !plan.hasFailed()) {
@@ -1037,12 +1067,18 @@ public class PlanExecuteAgent {
             Task task = executableTasks.get(0);
             log.info("Executing single task: {} type={}", task.getId(), task.getType());
             out.println("▶️ 执行任务 [" + task.getId() + "]: " + task.getDescription());
+
+            TaskWorkspaceDiffTracker diffTracker;
+            try {
+                diffTracker = startDiffTracker(plan.getId(), task);
+            } catch (Exception e) {
+                return List.of(TaskExecutionResult.baselineFailure(task, e));
+            }
             task.markStarted();
             checkpointTaskSafely(plan.getId(), task);
-
             try {
                 return List.of(TaskExecutionResult.success(task, executeTask(
-                        plan.getGoal(), plan, task, streamState, out, taskTrustedUrls)));
+                        plan.getGoal(), plan, task, streamState, out, taskTrustedUrls, diffTracker)));
             } catch (Exception e) {
                 return List.of(TaskExecutionResult.failure(task, e));
             }
@@ -1064,6 +1100,13 @@ public class PlanExecuteAgent {
             List<Future<TaskExecutionResult>> futures = new ArrayList<>();
             for (Task task : executableTasks) {
                 out.println("▶️ 并行任务 [" + task.getId() + "]: " + task.getDescription());
+                TaskWorkspaceDiffTracker diffTracker;
+                try {
+                    diffTracker = startDiffTracker(plan.getId(), task);
+                } catch (Exception e) {
+                    futures.add(CompletableFuture.completedFuture(TaskExecutionResult.baselineFailure(task, e)));
+                    continue;
+                }
                 task.markStarted();
                 checkpointTaskSafely(plan.getId(), task);
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -1072,7 +1115,7 @@ public class PlanExecuteAgent {
                 futures.add(executor.submit(() -> {
                     try {
                         return TaskExecutionResult.success(task, executeTask(
-                                plan.getGoal(), plan, task, streamState, taskOut, taskTrustedUrls));
+                                plan.getGoal(), plan, task, streamState, taskOut, taskTrustedUrls, diffTracker));
                     } catch (Exception e) {
                         return TaskExecutionResult.failure(task, e);
                     }
@@ -1115,7 +1158,8 @@ public class PlanExecuteAgent {
      */
     private TaskRunResult executeTask(String goal, ExecutionPlan plan, Task task,
                                       StreamState streamState, PrintStream out,
-                                      Map<String, TurnToolPolicy.TrustedUrlContext> taskTrustedUrls) throws IOException {
+                                      Map<String, TurnToolPolicy.TrustedUrlContext> taskTrustedUrls,
+                                      TaskWorkspaceDiffTracker diffTracker) throws IOException {
         List<TurnToolPolicy.TrustedUrlContext> dependencyUrls = task.getDependencies().stream()
                 .map(taskTrustedUrls::get)
                 .filter(Objects::nonNull)
@@ -1136,7 +1180,7 @@ public class PlanExecuteAgent {
             TaskRunResult result = executeTaskWithPolicy(
                     goal, plan, task, streamState, out, dependencyUrls, recoveryFeedback,
                     taskToolPolicy, evidenceCollector);
-            result = result.withReport(DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot()));
+            result = result.withReport(evaluateEvidence(task, evidenceCollector, diffTracker));
             int evidenceRetries = 0;
             while (result.verificationReport().outcome() == VerificationOutcome.REJECTED
                     && evidenceRetries < MAX_RETRIES_PER_STEP) {
@@ -1144,14 +1188,14 @@ public class PlanExecuteAgent {
                 result = executeTaskWithPolicy(goal, plan, task, streamState, out, dependencyUrls,
                         String.join("; ", result.verificationReport().blockingReasons()),
                         taskToolPolicy, evidenceCollector);
-                result = result.withReport(DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot()));
+                result = result.withReport(evaluateEvidence(task, evidenceCollector, diffTracker));
             }
             if (pipelineOptions.stepReview()) {
                 task.markReviewing();
                 checkpointTaskSafely(plan.getId(), task);
                 result = applyStepReview(
                         goal, plan, task, streamState, out, dependencyUrls, taskToolPolicy,
-                        evidenceCollector, result);
+                        evidenceCollector, diffTracker, result);
             }
             if (child != null) {
                 parentSession.recordChildResult(child, result.result(), "completed");
@@ -1163,6 +1207,57 @@ public class PlanExecuteAgent {
             if (child != null) child.close();
             taskToolPolicy.releaseBrowserLease();
         }
+    }
+
+    private TaskWorkspaceDiffTracker startDiffTracker(String planId, Task task) throws IOException {
+        if (task == null || !task.getRequiredEvidence().contains(EvidenceType.DIFF)) {
+            return null;
+        }
+        try {
+            Path projectRoot = Path.of(toolRegistry.getProjectPath());
+            if (planStateStore != null) {
+                Optional<String> persisted = planStateStore.findTaskDiffBaseline(planId, task.getId());
+                if (persisted.isPresent()) {
+                    String json = persisted.get();
+                    TaskWorkspaceDiffTracker.Baseline baseline = JSON_MAPPER.readValue(
+                            json, TaskWorkspaceDiffTracker.Baseline.class);
+                    return TaskWorkspaceDiffTracker.resume(
+                            projectRoot, task.getResourceClaims(), baseline);
+                }
+                if (interruptedRecoveryTaskIds.contains(task.getId())) {
+                    throw new IOException("persisted diff baseline missing during recovery");
+                }
+
+                TaskWorkspaceDiffTracker tracker = TaskWorkspaceDiffTracker.start(
+                        projectRoot, task.getResourceClaims());
+                planStateStore.saveTaskDiffBaseline(
+                        planId,
+                        task.getId(),
+                        JSON_MAPPER.writeValueAsString(tracker.baseline()));
+                return tracker;
+            }
+            if (interruptedRecoveryTaskIds.contains(task.getId())) {
+                throw new IOException("durable diff baseline unavailable during recovery");
+            }
+            return TaskWorkspaceDiffTracker.start(projectRoot, task.getResourceClaims());
+        } catch (SQLException e) {
+            throw new IOException("durable diff baseline unavailable: " + e.getMessage(), e);
+        }
+    }
+
+    private TaskVerificationReport evaluateEvidence(Task task,
+                                                    TaskEvidenceCollector evidenceCollector,
+                                                    TaskWorkspaceDiffTracker diffTracker) {
+        if (task != null && task.getRequiredEvidence().contains(EvidenceType.DIFF)
+                && diffTracker != null) {
+            try {
+                evidenceCollector.observeDiff(diffTracker.diff());
+            } catch (IOException e) {
+                evidenceCollector.observeDiffFailure("diff capture failed: " + e.getMessage());
+                log.warn("Unable to collect task diff evidence: {}", task.getId(), e);
+            }
+        }
+        return DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot());
     }
 
     private ToolResourceScope toResourceScope(Task task) {
@@ -1180,6 +1275,7 @@ public class PlanExecuteAgent {
                                           List<TurnToolPolicy.TrustedUrlContext> dependencyUrls,
                                           TurnToolPolicy taskToolPolicy,
                                           TaskEvidenceCollector evidenceCollector,
+                                          TaskWorkspaceDiffTracker diffTracker,
                                           TaskRunResult initial) throws IOException {
         // 每个任务独占一个 Reviewer：并行批次最多 4 个任务同时进来，
         // 共享实例会让多条线程写同一份 SubAgent 会话历史。
@@ -1208,7 +1304,7 @@ public class PlanExecuteAgent {
             out.println("   反馈: " + decision.feedback() + "\n");
             result = executeTaskWithPolicy(goal, plan, task, streamState, out, dependencyUrls,
                     decision.feedback(), taskToolPolicy, evidenceCollector);
-            result = result.withReport(DeterministicEvidenceGate.evaluate(task, evidenceCollector.snapshot()));
+            result = result.withReport(evaluateEvidence(task, evidenceCollector, diffTracker));
         }
     }
 

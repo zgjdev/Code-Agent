@@ -181,6 +181,26 @@ class PlanStateStoreTest {
     }
 
     @Test
+    void roundTripsTaskDiffBaselineWithoutStoringSourceContent() throws Exception {
+        PlanStateStore store = new PlanStateStore(tempDir.resolve("diff-baseline.db"));
+        ExecutionPlan plan = singleTaskPlan("plan-diff-baseline", "恢复 DIFF baseline");
+        store.savePlan(tempDir, "session-a", plan);
+        String baselineJson = "{\"hashes\":{\"src/App.java\":\"" + "a".repeat(64) + "\"}}";
+
+        store.saveTaskDiffBaseline(plan.getId(), "task_1", baselineJson);
+
+        assertEquals(baselineJson,
+                store.findTaskDiffBaseline(plan.getId(), "task_1").orElseThrow());
+        store.saveTaskDiffBaseline(
+                plan.getId(), "task_1",
+                "{\"hashes\":{\"src/App.java\":\"" + "b".repeat(64) + "\"}}");
+        assertEquals(baselineJson,
+                store.findTaskDiffBaseline(plan.getId(), "task_1").orElseThrow(),
+                "retry 必须复用首次 baseline，不能覆盖");
+        assertTrue(store.findTaskDiffBaseline(plan.getId(), "missing").isEmpty());
+    }
+
+    @Test
     void abandonRemovesPlanFromActiveLookupAndAllowsReplacement() throws Exception {
         PlanStateStore store = new PlanStateStore(tempDir.resolve("plans.db"));
         ExecutionPlan first = singleTaskPlan("plan-a", "原任务");

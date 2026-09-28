@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
 
 /** Observes bounded execution facts; it never parses assistant prose as evidence. */
 public final class TaskEvidenceCollector {
+    private static final int MAX_RELATED_DIFF_PATHS = 50;
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Pattern TEST_COMMAND = Pattern.compile(
             "(?i)(^|[;&|\\s])(mvn|gradle|gradlew|npm|pnpm|yarn|pytest|cargo|go)\\s+[^;&|]*\\b(test|check)\\b");
@@ -36,12 +37,6 @@ public final class TaskEvidenceCollector {
                 continue;
             }
             EvidenceStatus status = result.successful() ? EvidenceStatus.PASSED : EvidenceStatus.FAILED;
-            if ("write_file".equals(invocation.name())) {
-                String path = jsonText(invocation.argumentsJson(), "path");
-                evidence.add(new TaskEvidence(EvidenceType.DIFF, status,
-                        "write_file " + (status == EvidenceStatus.PASSED ? "completed" : "failed"),
-                        path.isBlank() ? List.of() : List.of(path), "write_file", System.currentTimeMillis()));
-            }
             if ("execute_command".equals(invocation.name())) {
                 String command = jsonText(invocation.argumentsJson(), "command");
                 EvidenceType type = TEST_COMMAND.matcher(command).find() ? EvidenceType.TEST
@@ -53,6 +48,41 @@ public final class TaskEvidenceCollector {
                         invocation.name() + " completed", List.of(), invocation.name(), System.currentTimeMillis()));
             }
         }
+    }
+
+    public void observeDiff(TaskWorkspaceDiffTracker.DiffSummary summary) {
+        evidence.removeIf(item -> item.type() == EvidenceType.DIFF);
+        if (summary == null) {
+            return;
+        }
+        EvidenceStatus status = summary.changed() ? EvidenceStatus.PASSED : EvidenceStatus.FAILED;
+        String digest = summary.digest().isBlank()
+                ? ""
+                : summary.digest().substring(0, Math.min(12, summary.digest().length()));
+        List<String> relatedPaths = summary.changedPaths().stream()
+                .limit(MAX_RELATED_DIFF_PATHS)
+                .toList();
+        int omittedPaths = Math.max(0, summary.changedPaths().size() - relatedPaths.size());
+        String detail = summary.changed()
+                ? "files=" + summary.changedFiles()
+                + ", +" + summary.additions()
+                + ", -" + summary.deletions()
+                + (summary.lineStatsUnavailableFiles() > 0
+                ? ", lineStatsUnavailable=" + summary.lineStatsUnavailableFiles() : "")
+                + (omittedPaths > 0 ? ", omittedPaths=" + omittedPaths : "")
+                + (digest.isBlank() ? "" : ", hash=" + digest)
+                : "no workspace changes detected";
+        evidence.add(new TaskEvidence(EvidenceType.DIFF, status, detail,
+                relatedPaths, "workspace_diff", System.currentTimeMillis()));
+    }
+
+    public void observeDiffFailure(String reason) {
+        evidence.removeIf(item -> item.type() == EvidenceType.DIFF);
+        String detail = reason == null || reason.isBlank()
+                ? "workspace diff unavailable"
+                : "workspace diff unavailable: " + summarizeCommand(reason);
+        evidence.add(new TaskEvidence(EvidenceType.DIFF, EvidenceStatus.FAILED, detail,
+                List.of(), "workspace_diff", System.currentTimeMillis()));
     }
 
     public void observeLsp(LspDiagnosticReport report) {

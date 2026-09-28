@@ -1,8 +1,8 @@
 # Plan-and-Execute 证据审核与冲突感知调度方案
 
-> 状态：设计评审稿，尚未实现。
+> 状态：核心方案已实现，本文同时记录后续加固。
 >
-> 本文只描述拟议改造，不代表当前代码已经具备这些能力。当前已交付行为仍以 `03-multi-agent-collaboration.md` 和源码为准；实现完成后必须把最终行为回填文档 03。
+> 2026-09-28：DIFF 证据从“成功执行过 write_file”升级为任务级真实 before/after workspace diff；当前已交付行为以源码与 `03-multi-agent-collaboration.md` 为准。
 
 ## 1. 背景、目标与非目标
 
@@ -310,13 +310,22 @@ public enum VerificationOutcome {
 
 | 证据 | 来源 | 最小可信内容 |
 |---|---|---|
-| `DIFF` | `SnapshotService` 或 `write_file` observer | 变更文件相对路径、是否存在变更、摘要哈希；不写正文到 ledger |
+| `DIFF` | `TaskWorkspaceDiffTracker` + JGit `HistogramDiff` | Task 初始基线到当前 workspace 的真实变更路径、增删行计数、摘要哈希；不写正文到 ledger |
 | `BUILD` | 经现有工具链执行并分类为 build 的命令结果 | 命令类别、成功/失败、退出状态摘要 |
 | `TEST` | 经现有工具链执行并分类为 test 的命令结果 | 测试命令类别、通过/失败、可解析计数或摘要 |
 | `LSP` | 现有写后 LSP 诊断 | error/warning 计数、相关相对路径 |
 | `TOOL_RESULT` | `ToolExecutionResult` | 工具名、成功标志、结果摘要，不保存敏感正文 |
 
 Planner 只能声明 `requiredEvidence` 的枚举类型，不能提供绕过策略的自由 shell 命令。Worker 为满足证据要求，仍需通过正常工具调用选择命令；命令继续经过 `TurnToolPolicy`、HITL 和 `CommandGuard`。未实际执行就不能产生 `PASSED` 证据。
+
+DIFF 证据的实现约束：
+
+- 只在任务要求 `DIFF` 时创建 `TaskWorkspaceDiffTracker`，基线固定在该 Task 首次执行前；证据重试和 Reviewer 反馈重试都继续相对同一基线计算累计变化。
+- 普通写任务只扫描声明的 `writePaths`，因此并行批次中不会把其他无冲突任务的修改计入本任务证据；`workspaceWrite=true` 的任务本身由冲突调度独占工作区，可扫描整个项目并复用 `SnapshotConfig` 的排除规则。
+- 文本文件通过 JGit `HistogramDiff` 统计新增/删除行；大文件或二进制文件仍通过 SHA-256 判断是否变化，但不伪造行级统计。
+- `TaskEvidenceCollector` 不再把 `write_file successful` 直接视为 `DIFF/PASSED`。每次重新计算会替换旧 DIFF 证据，避免“先改动、后回滚”仍被历史 PASSED 误放行。
+- Evidence 最多保存 50 个相对路径，并保留总文件数、省略数、增删行计数、非文本文件计数和摘要哈希，不保存源码正文或完整 diff。
+- durable Plan 在 Task 首次执行前把仅含相对路径与 SHA-256 的 baseline 持久化到 `plans.db`；中断恢复复用原 baseline，不以恢复后的 workspace 重新建基线。进程内 baseline 文本缓存总量限制为 16 MiB，恢复 baseline 不包含源码正文，因此恢复时已有变化只做 hash 证明，不伪造行级统计。
 
 #### 3.2.3 任务状态
 
@@ -651,6 +660,9 @@ public record PlanExecutionSafetyOptions(
 | Evidence | 测试工具成功 | 生成 `TEST/PASSED` |
 | Evidence | LSP 有 error | 门禁拒绝，Reviewer 不运行 |
 | Evidence | 文件写任务没有 diff | 门禁拒绝 |
+| Evidence | `write_file` 成功但 before/after 相同 | `DIFF/FAILED`，不得用工具成功状态伪造 diff |
+| Evidence | 声明写路径发生文本变更 | JGit diff 记录 changedPaths 与增删行计数 |
+| Evidence | 并行任务修改未声明路径 | 不计入当前 Task 的 DIFF evidence |
 | Review | 确定性门禁通过、Reviewer 通过 | `COMPLETED` |
 | Review | Reviewer 文本拒绝 | 携带反馈重试 |
 | Review | Reviewer 输出无法解析 | fail-closed 拒绝 |
@@ -667,7 +679,7 @@ public record PlanExecutionSafetyOptions(
 实现阶段至少执行：
 
 ```text
-mvn test -DskipTests=false -Dtest=TaskTest,PlannerTest,ExecutionPlanTest,ConflictAwareBatchSelectorTest,TaskResourcePolicyTest,TaskEvidenceCollectorTest,DeterministicEvidenceGateTest,SubAgentStepReviewerTest,PlanExecuteAgentTest
+mvn test -DskipTests=false -Dtest=TaskTest,PlannerTest,ExecutionPlanTest,ConflictAwareBatchSelectorTest,TaskResourcePolicyTest,TaskWorkspaceDiffTrackerTest,TaskEvidenceCollectorTest,PlanDiffEvidenceIntegrationTest,DeterministicEvidenceGateTest,SubAgentStepReviewerTest,PlanExecuteAgentTest
 mvn test -DskipTests=false -Dtest=ToolRegistryTest,TurnToolPolicyTest,ApprovalPolicyTest,PathGuardTest,CommandGuardTest
 mvn test -Pquick -DskipTests=false
 mvn test -DskipTests=false

@@ -7,9 +7,11 @@ import com.codeagent.history.SessionStore;
 import com.codeagent.llm.GLMClient;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.plan.ExecutionPlan;
+import com.codeagent.plan.EvidenceType;
 import com.codeagent.plan.PlanStateStore;
 import com.codeagent.plan.Planner;
 import com.codeagent.plan.Task;
+import com.codeagent.plan.TaskResourceClaims;
 import com.codeagent.tool.ToolRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -20,8 +22,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -117,6 +121,95 @@ class PlanExecuteRecoveryTest {
             String prompt = joinedPrompt(client.snapshots.get(0));
             assertTrue(prompt.contains("进程中断恢复"), prompt);
             assertTrue(prompt.contains("不要假设上次副作用未发生"), prompt);
+        }
+    }
+
+    @Test
+    void interruptedDiffTaskUsesPersistedPreCrashBaseline() throws Exception {
+        Path source = tempDir.resolve("src/App.java");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, "before\n");
+        RecordingClient client = new RecordingClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history-diff-resume"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            PlanStateStore store = new PlanStateStore(tempDir.resolve("diff-resume.db"));
+            ExecutionPlan persisted = new ExecutionPlan("plan-diff-resume", "恢复文件修改");
+            Task interrupted = new Task(
+                    "task_1", "修改 src/App.java", Task.TaskType.FILE_WRITE, List.of(),
+                    new TaskResourceClaims(List.of("src/App.java"), List.of("src/App.java"), false),
+                    List.of("文件已修改"), Set.of(EvidenceType.DIFF));
+            persisted.addTask(interrupted);
+            persisted.computeExecutionOrder();
+            store.savePlan(tempDir, session.sessionId(), persisted);
+            TaskWorkspaceDiffTracker baseline = TaskWorkspaceDiffTracker.start(
+                    tempDir, interrupted.getResourceClaims());
+            store.saveTaskDiffBaseline(
+                    persisted.getId(), interrupted.getId(),
+                    JSON.writeValueAsString(baseline.baseline()));
+            persisted.markStarted();
+            store.checkpointPlan(persisted);
+            interrupted.markStarted();
+            store.checkpointTask(persisted.getId(), interrupted);
+            Files.writeString(source, "after crash\n");
+
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    client, registry, new FailingIfCalledPlanner(client), null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()), PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(store);
+            agent.setParentConversationContext(parentContext(session));
+
+            String result = agent.resumeActivePlan();
+
+            assertTrue(result.contains("计划执行完成"), result);
+            assertEquals("after crash\n", Files.readString(source));
+            assertEquals(1, client.snapshots.size(), "恢复时不应为了制造 DIFF 重写文件");
+        }
+    }
+
+    @Test
+    void interruptedDiffTaskWithoutBaselineStopsBeforeWorkerCall() throws Exception {
+        Path source = tempDir.resolve("src/App.java");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, "after crash\n");
+        RecordingClient client = new RecordingClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history-missing-diff-baseline"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            PlanStateStore store = new PlanStateStore(tempDir.resolve("missing-diff-baseline.db"));
+            ExecutionPlan persisted = new ExecutionPlan("plan-missing-diff-baseline", "恢复文件修改");
+            Task interrupted = new Task(
+                    "task_1", "修改 src/App.java", Task.TaskType.FILE_WRITE, List.of(),
+                    new TaskResourceClaims(List.of("src/App.java"), List.of("src/App.java"), false),
+                    List.of("文件已修改"), Set.of(EvidenceType.DIFF));
+            persisted.addTask(interrupted);
+            persisted.computeExecutionOrder();
+            store.savePlan(tempDir, session.sessionId(), persisted);
+            persisted.markStarted();
+            store.checkpointPlan(persisted);
+            interrupted.markStarted();
+            store.checkpointTask(persisted.getId(), interrupted);
+
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    client, registry, new FailingIfCalledPlanner(client), null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()), PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(store);
+            agent.setParentConversationContext(parentContext(session));
+
+            String result = agent.resumeActivePlan();
+
+            assertTrue(result.contains("persisted diff baseline missing"), result);
+            assertEquals(0, client.snapshots.size(),
+                    "缺少恢复 baseline 时不得调用 Worker/LLM 或产生新的工具副作用");
+            assertEquals("after crash\n", Files.readString(source));
         }
     }
 

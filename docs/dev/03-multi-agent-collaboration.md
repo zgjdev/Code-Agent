@@ -38,7 +38,7 @@
 
 - Planner 任务可声明项目相对的 `readPaths`、`writePaths`、`workspaceWrite`、验收标准和所需证据。缺失或无法界定的写集按工作区独占处理；资源声明只收紧工具暴露和调度，不扩大原有 PathGuard、CommandGuard、URL 或 HITL 权限。
 - 就绪任务先经 `ConflictAwareBatchSelector` 稳定组批：读读可并行，写写/写读/目录祖先重叠会拆批，工作区独占任务单独成批，单批最多 4 个；工具结果仍按输入顺序归并。
-- 任务执行期间 `TaskEvidenceCollector` 只观察真实 `write_file`、构建/测试命令和 LSP 诊断，`DeterministicEvidenceGate` 在 Reviewer 前检查必需证据。执行器最终文本不能伪造 BUILD、TEST、DIFF 或 LSP 证据。
+- 任务执行期间 `TaskEvidenceCollector` 只接收系统观察事实：BUILD/TEST 来自真实命令结果，LSP 来自写后诊断；DIFF 由 `TaskWorkspaceDiffTracker` 在 Task 初始基线与当前 workspace 之间使用 JGit `HistogramDiff` 计算，普通任务仅覆盖声明的 `writePaths`，工作区独占任务才扫描全项目。成功调用 `write_file` 本身不再等价于 DIFF 通过，`DeterministicEvidenceGate` 在 Reviewer 前检查这些证据。
 - `StepReviewDecision` 现在是 `APPROVED`、`REJECTED`、`UNAVAILABLE` 三态。Reviewer 调用不可用、证据门禁失败重试耗尽或审核重试耗尽均进入 `TaskStatus.UNVERIFIED`，不会调用 `markCompleted`，也不会解锁 DAG 后继。
 
 # 第 0 部分　前置知识

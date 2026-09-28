@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,9 +32,10 @@ import java.util.UUID;
 /** Durable append-only storage for resumable conversation sessions. */
 public final class SessionStore implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(SessionStore.class);
-    private static final ObjectMapper JSON = new ObjectMapper()
+    private static final ObjectMapper JSON = JsonMapper.builder()
             .disable(MapperFeature.AUTO_DETECT_IS_GETTERS)
-            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .build();
     private static final Set<PosixFilePermission> DIRECTORY_PERMISSIONS =
             PosixFilePermissions.fromString("rwx------");
     private static final Set<PosixFilePermission> FILE_PERMISSIONS =
@@ -595,6 +597,8 @@ public final class SessionStore implements AutoCloseable {
     }
 
     public static class SessionLockedException extends IOException {
+        private static final long serialVersionUID = 1L;
+
         public SessionLockedException(String message) {
             super(message);
         }
@@ -605,18 +609,24 @@ public final class SessionStore implements AutoCloseable {
     }
 
     public static class WorkspaceMismatchException extends IOException {
+        private static final long serialVersionUID = 1L;
+
         public WorkspaceMismatchException(String message) {
             super(message);
         }
     }
 
     public static class ResumeUnsafeException extends IOException {
+        private static final long serialVersionUID = 1L;
+
         public ResumeUnsafeException(String message) {
             super(message);
         }
     }
 
     public static class CorruptSessionLogException extends IOException {
+        private static final long serialVersionUID = 1L;
+
         public CorruptSessionLogException(String message) {
             super(message);
         }

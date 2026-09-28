@@ -25,7 +25,6 @@ import java.util.function.Consumer;
  */
 public class InputBar extends Panel {
 
-    private final LlmClient llmClient;
     private final Consumer<String> onMessage;
     private final TextBox inputBox;
 
@@ -38,7 +37,6 @@ public class InputBar extends Panel {
      */
     public InputBar(com.codeagent.config.CodeAgentConfig config, LlmClient llmClient, Consumer<String> onMessage) {
         super();
-        this.llmClient = llmClient;
         this.onMessage = onMessage;
 
         setLayoutManager(new LinearLayout(Direction.HORIZONTAL));

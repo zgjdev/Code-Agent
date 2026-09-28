@@ -11,6 +11,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@SuppressWarnings("resource") // Providers are method-scoped deterministic fixtures without external handles.
 class MemoryWriteResolverTest {
     private static final Clock CLOCK = Clock.fixed(
             Instant.parse("2026-09-25T00:00:00Z"), ZoneOffset.UTC);

@@ -8,7 +8,6 @@ import com.codeagent.plan.ExecutionPlan;
 import com.codeagent.plan.Planner;
 import com.codeagent.plan.Task;
 import com.codeagent.tool.ToolRegistry;
-import com.codeagent.tool.ToolRegistry.ToolExecutionResult;
 import com.codeagent.tool.ToolRegistry.ToolInvocation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Disabled;

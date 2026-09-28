@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@SuppressWarnings("deprecation") // Covers the documented legacy constructor overload.
 class DefaultCodeRetrievalServiceTest {
     @Test
     void executesOnlyTermGraphAndSemanticStagesWithoutLiveFallback(@TempDir Path temp) throws Exception {

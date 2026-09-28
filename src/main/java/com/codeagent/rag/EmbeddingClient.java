@@ -22,12 +22,14 @@ public class EmbeddingClient implements AutoCloseable {
     private final String modelName;
     private final EmbeddingProvider delegate;
 
+    @Deprecated
     public EmbeddingClient() {
         this.providerName = InProcessBgeEmbeddingProvider.PROVIDER_ID;
         this.modelName = InProcessBgeEmbeddingProvider.MODEL_ID;
         this.delegate = new InProcessBgeEmbeddingProvider();
     }
 
+    @Deprecated
     public EmbeddingClient(String provider, String model, String baseUrl, String apiKey) {
         String normalized = requireText(provider, "provider").toLowerCase(Locale.ROOT);
         if (!REMOTE_PROVIDERS.contains(normalized)) {
@@ -43,6 +45,7 @@ public class EmbeddingClient implements AutoCloseable {
                 dimension, client, 3);
     }
 
+    @Deprecated
     public float[] embed(String text) throws IOException {
         if (text == null || text.isEmpty()) return new float[0];
         try {
@@ -52,11 +55,15 @@ public class EmbeddingClient implements AutoCloseable {
         }
     }
 
+    @Deprecated
     public String getProvider() { return providerName; }
+
+    @Deprecated
     public String getModel() { return modelName; }
 
     @Override
-    public void close() throws Exception {
+    @Deprecated
+    public void close() {
         delegate.close();
     }
 

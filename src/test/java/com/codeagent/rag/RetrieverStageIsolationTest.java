@@ -11,6 +11,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@SuppressWarnings("deprecation") // Covers the documented legacy RetrievalContext overload.
 class RetrieverStageIsolationTest {
     @Test
     void oneFailedStageDoesNotDiscardSuccessfulRankings(@TempDir Path root) {

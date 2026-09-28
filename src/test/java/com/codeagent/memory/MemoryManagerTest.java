@@ -10,6 +10,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@SuppressWarnings("resource") // Managers own only method-scoped in-memory embedding fixtures in this class.
 class MemoryManagerTest {
     @TempDir Path tempDir;
 

@@ -19,7 +19,6 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class StatusPane extends Panel {
 
-    private final LlmClient llmClient;
     private final Label modelLabel;
     private final Label tokenLabel;
     private final Label modeLabel;
@@ -34,7 +33,6 @@ public class StatusPane extends Panel {
      */
     public StatusPane(com.codeagent.config.CodeAgentConfig config, LlmClient llmClient) {
         super();
-        this.llmClient = llmClient;
 
         setLayoutManager(new LinearLayout(Direction.VERTICAL));
 

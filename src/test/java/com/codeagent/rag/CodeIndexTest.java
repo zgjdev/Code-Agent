@@ -11,6 +11,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@SuppressWarnings("deprecation") // Verifies the intentionally retained EmbeddingClient compatibility adapter.
 class CodeIndexTest {
 
     @TempDir

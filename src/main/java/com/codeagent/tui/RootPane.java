@@ -2,8 +2,6 @@ package com.codeagent.tui;
 
 import com.googlecode.lanterna.TerminalSize;
 import com.googlecode.lanterna.gui2.*;
-import com.googlecode.lanterna.gui2.LinearLayout.Alignment;
-import com.googlecode.lanterna.gui2.LinearLayout.GrowPolicy;
 import com.googlecode.lanterna.input.KeyStroke;
 import com.googlecode.lanterna.input.KeyType;
 import com.codeagent.config.CodeAgentConfig;
@@ -36,8 +34,6 @@ public class RootPane extends Panel {
     private final CenterPane centerPane;
     private final StatusPane statusPane;
     private final InputBar inputBar;
-    private final LlmClient llmClient;
-    private final CodeAgentConfig config;
     private Consumer<String> messageHandler;
 
     // 宽度比例（百分比）
@@ -55,8 +51,8 @@ public class RootPane extends Panel {
      */
     public RootPane(CodeAgentConfig config, LlmClient llmClient) {
         super();
-        this.config = Objects.requireNonNull(config);
-        this.llmClient = Objects.requireNonNull(llmClient);
+        Objects.requireNonNull(config);
+        Objects.requireNonNull(llmClient);
 
         // 创建子面板
         this.fileTreePane = new FileTreePane(config);

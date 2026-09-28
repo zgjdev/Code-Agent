@@ -41,13 +41,10 @@ import com.codeagent.mcp.McpServerStatus;
 import com.codeagent.mcp.mention.AtMentionExpander;
 import com.codeagent.plan.ExecutionPlan;
 import com.codeagent.plan.PlanStateStore;
-import com.codeagent.rag.CodeIndex;
 import com.codeagent.hitl.ApprovalPolicy;
 import com.codeagent.policy.AuditLog;
 import com.codeagent.prompt.ModeRouterPromptBuilder;
 import com.codeagent.prompt.PromptRepository;
-import com.codeagent.rag.CodeRetriever;
-import com.codeagent.rag.CodeRelation;
 import com.codeagent.rag.SearchResultFormatter;
 import com.codeagent.rag.embedding.EmbeddingProviderFactory;
 import com.codeagent.rag.embedding.RemoteEmbeddingConsentCoordinator;
@@ -84,10 +81,8 @@ import org.jline.reader.History;
 import org.jline.reader.UserInterruptException;
 import org.jline.reader.Reference;
 import org.jline.utils.NonBlockingReader;
-import org.jline.utils.AttributedString;
 import org.jline.widget.AutosuggestionWidgets;
 import org.jline.widget.AutopairWidgets;
-import org.jline.console.CmdDesc;
 import org.jline.keymap.KeyMap;
 
 import java.io.BufferedReader;
@@ -2009,10 +2004,6 @@ public class Main {
         );
     }
 
-    private static void printSlashCommandHelp() {
-        printSlashCommandHelp(System.out);
-    }
-
     private static void printSlashCommandHelp(PrintStream out) {
         out.println("可用命令：");
         for (SlashCommandHint hint : slashCommandHints()) {
@@ -2044,17 +2035,6 @@ public class Main {
         // JLine TailTipWidgets 会通过 Status 预留多行底部区域；如果在首屏前 enable，
         // banner 前会出现大段空白，输入行下方也会长期空出一块。命令说明后续用
         // 不预留布局的方式展示，避免破坏 Claude Code / Qoder 风格的 inline 体验。
-    }
-
-    static LinkedHashMap<String, CmdDesc> slashCommandTailTips() {
-        LinkedHashMap<String, CmdDesc> tips = new LinkedHashMap<>();
-        for (SlashCommandHint hint : slashCommandHints()) {
-            tips.computeIfAbsent(hint.insertText(), key ->
-                    new CmdDesc().mainDesc(List.of(new AttributedString(hint.description()))));
-            tips.computeIfAbsent(hint.display(), key ->
-                    new CmdDesc().mainDesc(List.of(new AttributedString(hint.description()))));
-        }
-        return tips;
     }
 
     private static void bindSlashWidget(LineReader lineReader, String keyMapName, Reference slashHint) {
@@ -2893,6 +2873,7 @@ public class Main {
         }
     }
 
+    @SuppressWarnings("unused") // Retained for startup-output compatibility.
     private static void printStartupHints(PrintStream out) {
         out.println("💡 提示:");
         for (String hint : startupHints()) {
@@ -3150,6 +3131,7 @@ public class Main {
     /**
      * 从 .env 文件加载 API Key
      */
+    @SuppressWarnings("unused") // Retained for legacy reflective callers.
     private static String loadApiKey() {
         return loadConfigValue("GLM_API_KEY", null);
     }

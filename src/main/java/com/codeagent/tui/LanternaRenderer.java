@@ -10,7 +10,6 @@ import com.codeagent.llm.LlmClient;
 import com.codeagent.render.Renderer;
 import com.codeagent.render.StatusInfo;
 import com.codeagent.tui.pane.CenterPane;
-import com.codeagent.tui.pane.StatusPane;
 
 import java.io.OutputStream;
 import java.io.PrintStream;
@@ -34,7 +33,6 @@ public final class LanternaRenderer implements Renderer {
 
     private final LanternaWindow window;
     private final CenterPane centerPane;
-    private final StatusPane statusPane;
     private final WindowBasedTextGUI gui;
     private final PrintStream stream;
     private volatile boolean closed;
@@ -42,7 +40,6 @@ public final class LanternaRenderer implements Renderer {
     public LanternaRenderer(LanternaWindow window) {
         this.window = Objects.requireNonNull(window);
         this.centerPane = window.getRootPane().getCenterPane();
-        this.statusPane = window.getRootPane().getStatusPane();
         this.gui = window.getGui();
         this.stream = new PrintStream(new CenterPaneSink(), true, StandardCharsets.UTF_8);
     }

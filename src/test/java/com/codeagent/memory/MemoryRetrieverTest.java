@@ -12,6 +12,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@SuppressWarnings("resource") // Retrievers and providers are method-scoped deterministic fixtures.
 class MemoryRetrieverTest {
     private static final Instant NOW = Instant.parse("2026-09-25T00:00:00Z");
 

@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 
+@SuppressWarnings("resource") // The fake model factory has no native session to release.
 class InProcessBgeEmbeddingProviderTest {
 
     @Test

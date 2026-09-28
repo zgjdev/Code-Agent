@@ -389,10 +389,6 @@ public final class TerminalMarkdownRenderer {
         needsLineBreakBeforeNextBlock = false;
     }
 
-    private void writeLine(String line) {
-        writeLine(line, BlockType.PARAGRAPH);
-    }
-
     private void writeLine(String line, BlockType blockType) {
         out.println(line);
         lastOutputBlank = line.isBlank();
@@ -427,13 +423,6 @@ public final class TerminalMarkdownRenderer {
 
         sanitized = sanitized.replaceAll("\\[(.+?)]\\((.+?)\\)", "$1");
         return sanitized.stripTrailing();
-    }
-
-    private String padRight(String value, int width) {
-        if (value.length() >= width) {
-            return value;
-        }
-        return value + " ".repeat(width - value.length());
     }
 
     private String padRightDisplay(String value, int width) {

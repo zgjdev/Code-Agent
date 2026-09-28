@@ -10,6 +10,7 @@ import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@SuppressWarnings("resource") // Clients wrap in-memory transports and remain open for the asserted interaction.
 class JsonRpcClientTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

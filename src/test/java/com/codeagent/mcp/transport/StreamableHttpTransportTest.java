@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@SuppressWarnings("resource") // Each transport is bound to the method-scoped mock HTTP client.
 class StreamableHttpTransportTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

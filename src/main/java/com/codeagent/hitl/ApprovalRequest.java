@@ -24,7 +24,6 @@ public record ApprovalRequest(
 ) {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BOX_INNER_WIDTH = 58;
-    private static final int FIELD_WIDTH = BOX_INNER_WIDTH - 8;  // 为"│  xxx: "留出
     private static final int ARG_LINE_WIDTH = BOX_INNER_WIDTH - 6;
     private static final int MAX_LONG_VALUE_PREVIEW = 120;
 

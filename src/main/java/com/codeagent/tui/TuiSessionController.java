@@ -34,7 +34,6 @@ public final class TuiSessionController implements AutoCloseable {
 
     private static final Object STDOUT_CAPTURE_LOCK = new Object();
 
-    private final CodeAgentConfig config;
     private final LlmClient llmClient;
     private final Agent reactAgent;
     private final HitlHandler hitlHandler;
@@ -58,7 +57,7 @@ public final class TuiSessionController implements AutoCloseable {
                                 Runnable closeWindow,
                                 Runnable showConfigPanel,
                                 Consumer<Runnable> uiExecutor) {
-        this.config = Objects.requireNonNull(config);
+        Objects.requireNonNull(config);
         this.llmClient = Objects.requireNonNull(llmClient);
         this.reactAgent = Objects.requireNonNull(reactAgent);
         this.hitlHandler = Objects.requireNonNull(hitlHandler);

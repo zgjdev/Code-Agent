@@ -98,7 +98,8 @@ public class McpServerManager implements AutoCloseable {
             List<CompletableFuture<Void>> futures = targets.stream()
                     .map(server -> CompletableFuture.runAsync(() -> start(server), executor))
                     .toList();
-            CompletableFuture<Void> all = CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+            CompletableFuture<Void> all = CompletableFuture.allOf(
+                    futures.toArray(new CompletableFuture<?>[0]));
             if (maxWait == null || maxWait.isZero() || maxWait.isNegative()) {
                 all.join();
             } else {

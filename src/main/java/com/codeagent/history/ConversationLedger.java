@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.codeagent.llm.LlmClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,9 +40,10 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class ConversationLedger {
     private static final Logger log = LoggerFactory.getLogger(ConversationLedger.class);
-    private static final ObjectMapper MAPPER = new ObjectMapper()
+    private static final ObjectMapper MAPPER = JsonMapper.builder()
             .disable(MapperFeature.AUTO_DETECT_IS_GETTERS)
-            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .build();
     private static final int SCHEMA_VERSION = 1;
     private static final Set<PosixFilePermission> DIRECTORY_PERMISSIONS =
             PosixFilePermissions.fromString("rwx------");
@@ -273,6 +275,8 @@ public final class ConversationLedger {
     }
 
     private static final class LedgerReadException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
         private final IOException ioException;
 
         private LedgerReadException(IOException ioException) {

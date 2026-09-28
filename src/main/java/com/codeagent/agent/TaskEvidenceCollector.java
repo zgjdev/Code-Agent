@@ -10,7 +10,6 @@ import com.codeagent.tool.ToolRegistry.ToolInvocation;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.regex.Pattern;
 
 /** Observes bounded execution facts; it never parses assistant prose as evidence. */

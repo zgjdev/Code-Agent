@@ -1,14 +1,11 @@
 package com.codeagent.tui.pane;
 
 import com.googlecode.lanterna.gui2.*;
-import com.googlecode.lanterna.gui2.LinearLayout.Alignment;
-import com.googlecode.lanterna.gui2.LinearLayout.GrowPolicy;
 import com.codeagent.config.CodeAgentConfig;
 
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.*;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**

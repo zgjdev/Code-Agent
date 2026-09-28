@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
 
 /** Observes bounded execution facts; it never parses assistant prose as evidence. */
 public final class TaskEvidenceCollector {
+    private static final int MAX_RELATED_DIFF_PATHS = 50;
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Pattern TEST_COMMAND = Pattern.compile(
             "(?i)(^|[;&|\\s])(mvn|gradle|gradlew|npm|pnpm|yarn|pytest|cargo|go)\\s+[^;&|]*\\b(test|check)\\b");
@@ -58,15 +59,21 @@ public final class TaskEvidenceCollector {
         String digest = summary.digest().isBlank()
                 ? ""
                 : summary.digest().substring(0, Math.min(12, summary.digest().length()));
+        List<String> relatedPaths = summary.changedPaths().stream()
+                .limit(MAX_RELATED_DIFF_PATHS)
+                .toList();
+        int omittedPaths = Math.max(0, summary.changedPaths().size() - relatedPaths.size());
         String detail = summary.changed()
                 ? "files=" + summary.changedFiles()
                 + ", +" + summary.additions()
                 + ", -" + summary.deletions()
-                + (summary.nonTextFiles() > 0 ? ", nonText=" + summary.nonTextFiles() : "")
+                + (summary.lineStatsUnavailableFiles() > 0
+                ? ", lineStatsUnavailable=" + summary.lineStatsUnavailableFiles() : "")
+                + (omittedPaths > 0 ? ", omittedPaths=" + omittedPaths : "")
                 + (digest.isBlank() ? "" : ", hash=" + digest)
                 : "no workspace changes detected";
         evidence.add(new TaskEvidence(EvidenceType.DIFF, status, detail,
-                summary.changedPaths(), "workspace_diff", System.currentTimeMillis()));
+                relatedPaths, "workspace_diff", System.currentTimeMillis()));
     }
 
     public void observeDiffFailure(String reason) {

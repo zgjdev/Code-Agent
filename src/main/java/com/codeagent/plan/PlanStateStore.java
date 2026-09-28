@@ -180,6 +180,57 @@ public final class PlanStateStore {
         }
     }
 
+    /** Persists the first task diff baseline. Existing baselines are immutable across retries/resume. */
+    public synchronized void saveTaskDiffBaseline(String planId,
+                                                  String taskId,
+                                                  String baselineJson) throws SQLException {
+        Objects.requireNonNull(planId, "planId");
+        Objects.requireNonNull(taskId, "taskId");
+        if (baselineJson == null || baselineJson.isBlank()) {
+            throw new SQLException("DIFF baseline 不能为空");
+        }
+        try (Connection connection = openConnection();
+             PreparedStatement ps = connection.prepareStatement("""
+                     UPDATE plan_tasks
+                     SET diff_baseline_json = CASE
+                             WHEN diff_baseline_json IS NULL OR diff_baseline_json = '' THEN ?
+                             ELSE diff_baseline_json
+                         END,
+                         updated_at = ?
+                     WHERE plan_id = ? AND task_id = ?
+                     """)) {
+            ps.setString(1, baselineJson);
+            ps.setString(2, Instant.now().toString());
+            ps.setString(3, planId);
+            ps.setString(4, taskId);
+            if (ps.executeUpdate() != 1) {
+                throw new SQLException("Task 不存在，无法保存 DIFF baseline: " + taskId);
+            }
+        }
+    }
+
+    public synchronized Optional<String> findTaskDiffBaseline(String planId,
+                                                              String taskId) throws SQLException {
+        Objects.requireNonNull(planId, "planId");
+        Objects.requireNonNull(taskId, "taskId");
+        try (Connection connection = openConnection();
+             PreparedStatement ps = connection.prepareStatement("""
+                     SELECT diff_baseline_json
+                     FROM plan_tasks
+                     WHERE plan_id = ? AND task_id = ?
+                     """)) {
+            ps.setString(1, planId);
+            ps.setString(2, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return Optional.empty();
+                }
+                String value = rs.getString("diff_baseline_json");
+                return value == null || value.isBlank() ? Optional.empty() : Optional.of(value);
+            }
+        }
+    }
+
     /**
      * Read-only lookup used for status prompts and duplicate-plan prevention.
      * It must not reinterpret RUNNING tasks as interrupted.
@@ -558,6 +609,7 @@ public final class PlanStateStore {
                         workspace_write INTEGER NOT NULL,
                         acceptance_criteria_json TEXT NOT NULL,
                         required_evidence_json TEXT NOT NULL,
+                        diff_baseline_json TEXT,
                         result TEXT,
                         error TEXT,
                         updated_at TEXT NOT NULL,
@@ -578,6 +630,11 @@ public final class PlanStateStore {
             if (!hasColumn(connection, "plan_runs", "policy_input")) {
                 try (Statement stmt = connection.createStatement()) {
                     stmt.execute("ALTER TABLE plan_runs ADD COLUMN policy_input TEXT NOT NULL DEFAULT ''");
+                }
+            }
+            if (!hasColumn(connection, "plan_tasks", "diff_baseline_json")) {
+                try (Statement stmt = connection.createStatement()) {
+                    stmt.execute("ALTER TABLE plan_tasks ADD COLUMN diff_baseline_json TEXT");
                 }
             }
             try (Statement stmt = connection.createStatement()) {

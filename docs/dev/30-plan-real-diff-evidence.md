@@ -1,6 +1,6 @@
 # Plan DIFF Evidence 真实工作区差异校验
 
-> 状态：实现中，核心代码已落到 `feat/plan-diff-evidence-jgit`，完整 Maven 验证尚未执行。
+> 状态：实现与审查问题修复完成；针对性、quick、全量测试、package 和 diff check 均已验证。
 >
 > 本文是本次“将 Plan 的 DIFF evidence 从 write_file 成功标记升级为真实 before/after 工作区差异”改造的独立设计、实施与审计文档。后续审查本次修改时，应以本文结合源码和提交记录为准。
 >
@@ -189,7 +189,7 @@ public record DiffSummary(
     int changedFiles,
     int additions,
     int deletions,
-    int nonTextFiles,
+    int lineStatsUnavailableFiles,
     List<String> changedPaths,
     String digest
 ) {}
@@ -245,7 +245,7 @@ tracker 捕获整个 project root。
 
 ### 3.4 文件快照模型
 
-tracker 不保存到数据库，也不创建额外 Git commit。
+tracker 不创建额外 Git commit；durable Plan 仅把 source-free 的 path/hash baseline 保存到状态库。
 
 每个观察文件只在 Task 内存中保存：
 
@@ -260,6 +260,8 @@ textComparable
 
 - 所有文件都通过 SHA-256 判断内容是否真正变化；
 - 小于等于 2 MiB 且不含 NUL 字节的文件可进行行级文本 diff；
+- 进程内 baseline 文本缓存设置 16 MiB 总上限，超过预算的文件仍保留 hash，但不提供行级统计；
+- durable Plan 把 path/hash baseline 写入 `plan_tasks.diff_baseline_json`，不持久化源码 bytes；恢复后可证明内容变化，但由于没有原文，恢复任务的既有变化计入 `lineStatsUnavailableFiles` 而不伪造行数；
 - 大文件仍计算流式 SHA-256，但不保留全文；
 - 二进制文件只记录 changed file，不计算行数；
 - symlink 本身不按普通文件递归跟随，避免 scope 逃逸。
@@ -435,6 +437,37 @@ DeterministicEvidenceGate.evaluate(...)
 
 DIFF 计算错误必须 fail-closed，不能回退到旧的 `write_file successful` 语义。
 
+### 3.10 审查后加固设计
+
+代码审查确认原实现还需要以下收敛：
+
+1. **终态优先级**：存在 `UNVERIFIED` Task 时，Plan 最终展示必须保留“未验证”及其 blocking reason，不能落入通用“依赖未满足”提示。
+2. **目录级排除**：`workspaceWrite` 使用 `walkFileTree`，在进入 `.git`、`target`、`node_modules` 等目录前直接 `SKIP_SUBTREE`，禁止先遍历再过滤。
+3. **内存上限**：baseline 始终保留内容哈希，但进程内文本正文缓存设置 16 MiB 总上限；current 文本只在 hash 变化后按 2 MiB 单文件阈值临时读取，避免 baseline/current 同时无界常驻源码。持久化 baseline 只包含 path/hash。
+4. **有界路径证据**：DIFF 保存完整 changed file 数量和 digest，但 `relatedPaths` 最多保留固定数量的稳定排序路径，并在摘要中标明省略数量。
+5. **异常归一化**：文件树惰性遍历产生的 `UncheckedIOException` 必须在 tracker 边界转回 `IOException`，由 evidence collector 记录为 `DIFF/FAILED`。
+6. **恢复基线**：durable Plan 在 Task 首次执行前将仅含相对路径和 SHA-256 的 baseline JSON 写入 `plans.db`；中断恢复必须读取该 baseline，不能以恢复后的 workspace 重新建基线。baseline 不保存源码正文。
+7. **执行前硬门禁**：baseline 捕获、解析或持久化失败时，直接生成 `DIFF evidence failed` blocking reason；不得标记 Task 为 RUNNING，不得调用 Worker/LLM/工具，也不得进入执行失败重规划。
+
+```mermaid
+flowchart TD
+    A[Task 首次执行] --> B[捕获 path + SHA-256 baseline]
+    B --> C{durable Plan?}
+    C -- 是 --> D[写入 plan_tasks.diff_baseline_json]
+    C -- 否 --> E[仅保留内存 hash 与有界文本缓存]
+    D -- 失败 --> X[UNVERIFIED: DIFF evidence failed]
+    B -- 失败 --> X
+    D --> F[执行 Worker]
+    E --> F
+    F --> G[按目录剪枝扫描当前状态]
+    G --> H[hash 判定变化]
+    H --> I[仅对变化且受阈值保护的文本临时做 HistogramDiff]
+    I --> J[有界 paths + counts + digest]
+    K[/plan resume] --> L[读取 durable baseline]
+    L -- 缺失或损坏 --> X
+    L --> G
+```
+
 ## 4. 安全、并发、隐私与性能
 
 ### 4.1 权限边界
@@ -476,7 +509,7 @@ tracker 是只读观察器，不产生新的工具权限。
 - 变化路径；
 - 文件数量；
 - 新增/删除行统计；
-- 二进制/大文件数量；
+- 无法提供行级统计的文件数量（binary、large、缓存预算外或 hash-only 恢复）；
 - digest 短摘要。
 
 ### 4.4 性能边界
@@ -486,7 +519,7 @@ tracker 是只读观察器，不产生新的工具权限。
 workspaceWrite 任务可能扫描整个项目，因此：
 
 - 复用 Snapshot exclude；
-- 大文件不把完整 bytes 常驻内存；
+- baseline 文本缓存总量最多 16 MiB，大文件不把完整 bytes 常驻内存；
 - 只对 <= 2 MiB 的文本执行 HistogramDiff。
 
 本次未引入全局缓存或增量文件 watcher，避免扩大实现范围。
@@ -544,6 +577,20 @@ mvn test -DskipTests=false
 mvn clean package
 git diff --check
 ```
+
+### 5.5 审查问题回归矩阵
+
+| 问题 | 先失败的测试 | 验收结果 |
+|---|---|---|
+| UNVERIFIED 被展示为依赖阻塞 | `PlanDiffEvidenceIntegrationTest` | 返回文本包含“未验证”和 DIFF blocking reason |
+| excludes 过滤过晚/嵌套目录漏排 | `TaskWorkspaceDiffTrackerTest` | `walkFileTree` 在目录入口剪枝；无斜杠规则匹配任意路径组件，路径 glob 匹配完整相对路径 |
+| baseline/current 双份正文常驻 | `TaskWorkspaceDiffTrackerTest` | durable baseline 只序列化 path/hash；进程内 baseline 文本缓存有 16 MiB 总上限 |
+| changedPaths 无上限 | `TaskEvidenceCollectorTest` | relatedPaths 有固定上限且摘要含省略数量 |
+| 惰性遍历异常逃逸 | `TaskWorkspaceDiffTrackerTest` | 统一转为 `IOException` 并由 Plan 记录失败证据 |
+| 恢复后重新建 baseline | `PlanExecuteRecoveryTest`、`PlanStateStoreTest` | 恢复使用首次执行前的持久化 hash baseline |
+| baseline 初始化失败后仍执行 Worker | `PlanExecuteRecoveryTest`、`PlanDiffEvidenceIntegrationTest` | 形成明确的 DIFF blocking reason，且 Worker/LLM/工具调用次数为 0 |
+
+实施顺序：先让上述测试在当前实现上稳定失败，再按“终态 → tracker → evidence 边界 → durable baseline → 文档”依赖顺序做最小修复；每个边界单独运行对应测试，最后执行 Plan 针对性回归、`mvn test -Pquick`、全量测试、构建和 `git diff --check`。
 
 如果环境导致某条命令无法执行，必须记录真实失败原因，不得写成通过。
 
@@ -650,42 +697,35 @@ docs/dev/30-plan-real-diff-evidence.md
 
 ## 7. 当前验证状态
 
-### 已完成
+2026-09-28 在本地分支最终源码上完成：
 
-- 已确认功能分支存在且基于目标 main 基线；
-- 已通过 GitHub compare 核对分支变更文件；
-- 已核对 JGit 依赖已存在，无新增第三方 dependency；
-- 已为 diff tracker、collector 和 Plan 集成补测试源码；
-- 已完成源码级设计审查：并行 Task 不做全 workspace diff，workspaceWrite 才允许全项目 scope。
+- 扩展针对性测试：65 项，0 failure，0 error，1 skipped；
+- 新增边界测试：13 项，0 failure，0 error；覆盖 16 MiB 文本缓存上限和非法 exclude 的执行前硬门禁；
+- `mvn test -Pquick -DskipTests=false`：1159 项，0 failure，0 error，4 skipped；
+- `mvn test -DskipTests=false`：1217 项，0 failure，0 error，10 skipped；
+- `mvn package -DskipTests`：BUILD SUCCESS；
+- `git diff --check` 与 `git diff --check main`：通过。
 
-### 尚未完成
-
-当前执行环境无法解析 `github.com`，不能通过本地 clone/materialize 获取完整 Maven 工程，因此截至本文创建时：
-
-- 未实际运行 Maven 测试；
-- 未实际运行 `mvn clean package`；
-- 未实际运行本地 `git diff --check`。
-
-这些项目在真正执行并得到结果前必须保持“未验证”状态。
+`mvn clean package -DskipTests` 曾在 clean 阶段因 VS Code Java 语言服务占用 `target/classes` 而失败，尚未进入编译；随后在同一最终源码上执行不删除被占用目录的 `mvn package -DskipTests`，编译、测试编译、jar 与 shade 均成功。该环境限制不属于源码或测试失败。
 
 ## 8. 已知限制与后续风险
 
-1. **文件类型识别是启发式**  
+1. **文件类型识别是启发式**
    当前以 NUL 字节判断 binary；不是 MIME/charset 完整识别。
 
-2. **大文本文件不做行级 diff**  
+2. **大文本文件不做行级 diff**
    超过阈值只比较 SHA-256，因此能证明内容变化，但 `additions/deletions` 不包含该文件。
 
-3. **workspaceWrite 扫描成本与项目规模相关**  
+3. **workspaceWrite 扫描成本与项目规模相关**
    已排除常见构建目录，但超大源码仓库仍可能有扫描开销。
 
-4. **EvidenceType.DIFF 仍代表“workspace content diff”而非 Git patch**  
+4. **EvidenceType.DIFF 仍代表“workspace content diff”而非 Git patch**
    它证明观察 scope 内有真实内容变化，不保证变化语义正确；语义正确性仍由 TEST/BUILD/LSP/Reviewer 等其它门禁共同完成。
 
-5. **重试使用 Task 初始 baseline**  
+5. **重试使用 Task 初始 baseline**
    这是有意设计：最终证据回答的是“这个 Task 最终相对开始时改变了什么”，而不是“最近一次 retry 改了什么”。
 
-6. **writePaths 准确性仍依赖 Planner 声明与现有资源治理**  
+6. **writePaths 准确性仍依赖 Planner 声明与现有资源治理**
    普通 Task 的 tracker 只观察声明写集；若未来允许某种工具绕过 writePaths 修改其它文件，则 DIFF tracker 不应被用来掩盖该权限缺陷，应由资源策略本身拒绝。
 
 ## 9. 审计检查清单
@@ -707,19 +747,19 @@ docs/dev/30-plan-real-diff-evidence.md
 - [x] Tracker 单元测试已编写。
 - [x] Collector 单元测试已更新。
 - [x] Plan no-op write 集成测试已编写。
-- [ ] 针对性 Maven 测试实际通过。
-- [ ] Plan 回归测试实际通过。
-- [ ] quick 回归实际通过。
-- [ ] 全量测试实际通过。
-- [ ] build 实际通过。
-- [ ] diff check 实际通过。
+- [x] 针对性 Maven 测试实际通过。
+- [x] Plan 回归测试实际通过。
+- [x] quick 回归实际通过。
+- [x] 全量测试实际通过。
+- [x] build 实际通过。
+- [x] diff check 实际通过。
 
 ### 交付
 
 - [x] 单独功能分支。
 - [x] 分阶段提交。
 - [x] 独立审计文档。
-- [ ] 最终验证结果回填本文。
+- [x] 最终验证结果回填本文。
 - [ ] 最终与 main 合并由用户自行决定。
 
 ## 10. 验收标准
@@ -735,4 +775,3 @@ docs/dev/30-plan-real-diff-evidence.md
 7. Plan 的 Reviewer 与 UNVERIFIED 终态行为不回归；
 8. 针对性测试、quick 回归、全量测试和构建结果被真实记录；
 9. 文档与最终源码保持一致。
-

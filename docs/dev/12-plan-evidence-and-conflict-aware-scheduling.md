@@ -324,7 +324,8 @@ DIFF 证据的实现约束：
 - 普通写任务只扫描声明的 `writePaths`，因此并行批次中不会把其他无冲突任务的修改计入本任务证据；`workspaceWrite=true` 的任务本身由冲突调度独占工作区，可扫描整个项目并复用 `SnapshotConfig` 的排除规则。
 - 文本文件通过 JGit `HistogramDiff` 统计新增/删除行；大文件或二进制文件仍通过 SHA-256 判断是否变化，但不伪造行级统计。
 - `TaskEvidenceCollector` 不再把 `write_file successful` 直接视为 `DIFF/PASSED`。每次重新计算会替换旧 DIFF 证据，避免“先改动、后回滚”仍被历史 PASSED 误放行。
-- Evidence 仅保存相对路径、增删行计数、非文本文件计数和摘要哈希，不保存源码正文或完整 diff。
+- Evidence 最多保存 50 个相对路径，并保留总文件数、省略数、增删行计数、非文本文件计数和摘要哈希，不保存源码正文或完整 diff。
+- durable Plan 在 Task 首次执行前把仅含相对路径与 SHA-256 的 baseline 持久化到 `plans.db`；中断恢复复用原 baseline，不以恢复后的 workspace 重新建基线。进程内 baseline 文本缓存总量限制为 16 MiB，恢复 baseline 不包含源码正文，因此恢复时已有变化只做 hash 证明，不伪造行级统计。
 
 #### 3.2.3 任务状态
 

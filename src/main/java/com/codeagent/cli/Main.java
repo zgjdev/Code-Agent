@@ -1,6 +1,7 @@
 package com.codeagent.cli;
 
 import com.codeagent.agent.Agent;
+import com.codeagent.agent.AgentExecutionResult;
 import com.codeagent.agent.ExecutionMode;
 import com.codeagent.agent.ExecutionModeRouter;
 import com.codeagent.agent.PipelineOptions;
@@ -54,6 +55,18 @@ import com.codeagent.runtime.CancellationContext;
 import com.codeagent.runtime.CancellationToken;
 import com.codeagent.runtime.api.RuntimeApiServer;
 import com.codeagent.runtime.api.RuntimeThreadStore;
+import com.codeagent.runtime.execution.ExecutionFinalizer;
+import com.codeagent.runtime.execution.ExecutionOutcome;
+import com.codeagent.runtime.execution.RuntimeExecution;
+import com.codeagent.runtime.execution.RuntimeExecutionQueue;
+import com.codeagent.runtime.execution.RuntimeExecutionStore;
+import com.codeagent.runtime.execution.TopLevelExecutionCoordinator;
+import com.codeagent.runtime.execution.TopLevelExecutionResult;
+import com.codeagent.runtime.execution.WorkspaceAwareExecutionScheduler;
+import com.codeagent.runtime.interaction.BrokerHitlHandler;
+import com.codeagent.runtime.interaction.BrokerPlanReviewHandler;
+import com.codeagent.runtime.interaction.ExecutionInteractionContext;
+import com.codeagent.runtime.interaction.InteractionBroker;
 import com.codeagent.runtime.task.DurableTaskManager;
 import com.codeagent.runtime.task.TaskCommandFormatter;
 import com.codeagent.snapshot.RestoreResult;
@@ -381,13 +394,6 @@ public class Main {
                         "可恢复会话初始化失败，当前仅使用内存上下文: " + e.getMessage());
             }
             final SessionStore sessionStore = openedSessionStore;
-            if (sessionStore != null) {
-                Runtime.getRuntime().addShutdownHook(new Thread(() ->
-                        closeSessionQuietly(activeSession.get()), "codeagent-session-shutdown"));
-            }
-            DurableTaskManager taskManager = openTaskManager(llmClientRef, config);
-            taskManager.start();
-            Runtime.getRuntime().addShutdownHook(new Thread(taskManager::close, "codeagent-task-shutdown"));
             WechatRuntimeController wechatRuntime = new WechatRuntimeController(renderer);
             Runtime.getRuntime().addShutdownHook(new Thread(wechatRuntime::stop, "codeagent-wechat-shutdown"));
             renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
@@ -412,6 +418,135 @@ public class Main {
                     // 降级到 CLI 继续执行
                 }
             }
+
+            InteractionBroker interactionBroker = new InteractionBroker();
+            CliUiEventBridge uiEvents = new CliUiEventBridge(renderer);
+            BrokerHitlHandler brokerHitlHandler = new BrokerHitlHandler(
+                    hitlHandler.isEnabled(), interactionBroker, uiEvents::interaction);
+            hitlHandler.setDelegate(brokerHitlHandler);
+
+            RuntimeExecutionStore executionStore;
+            try {
+                executionStore = new RuntimeExecutionStore(DurableTaskManager.defaultDbPath());
+            } catch (Exception e) {
+                throw new IllegalStateException("统一执行队列初始化失败: " + e.getMessage(), e);
+            }
+            ExecutionFinalizer executionFinalizer = new ExecutionFinalizer(executionStore);
+            PlanStateStore executionPlanStore;
+            try {
+                executionPlanStore = PlanStateStore.openDefault();
+            } catch (Exception e) {
+                closeExecutionStoreQuietly(executionStore);
+                interactionBroker.close();
+                throw new IllegalStateException("Plan 状态库初始化失败: " + e.getMessage(), e);
+            }
+            TopLevelExecutionCoordinator executionCoordinator = new TopLevelExecutionCoordinator(
+                    executionStore,
+                    execution -> localPathMentionExpander.expand(
+                            mentionExpander.expand(execution.submittedInput())),
+                    (submittedInput, history) -> {
+                        LlmClient client = llmClientRef.get();
+                        ExecutionModeRouter router = new ExecutionModeRouter(
+                                client, modeRouterPromptBuilder);
+                        return selectExecutionMode(null, router, submittedInput, history);
+                    },
+                    sessionId -> {
+                        SessionStore.SessionHandle session = activeSession.get();
+                        if (session == null || !session.sessionId().equals(sessionId)) {
+                            throw new IllegalStateException(
+                                    "Execution 绑定的 Session 当前不可用: " + sessionId);
+                        }
+                        return reactAgent.getParentConversationContext().conversationNodes();
+                    },
+                    (mode, submittedInput, action) -> reactAgent.getToolRegistry()
+                            .getSnapshotService()
+                            .runTurn(mode.name().toLowerCase(Locale.ROOT), submittedInput, action::run),
+                    (execution, resolvedInput, token) -> {
+                        AgentExecutionResult result = reactAgent.runExecution(
+                                resolvedInput, execution.submittedInput());
+                        return topLevelResult(result);
+                    },
+                    (execution, resolvedInput, token) -> {
+                        PlanExecuteAgent planAgent = createPlanAgent(
+                                llmClientRef.get(),
+                                reactAgent,
+                                new BrokerPlanReviewHandler(interactionBroker, uiEvents::interaction),
+                                ui);
+                        planAgent.setRuntimeExecutionId(execution.id());
+                        planAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
+                        planAgent.setSkillRegistry(skillRegistry);
+                        planAgent.setSkillContextBuffer(skillContextBuffer);
+                        return topLevelResult(planAgent.runOrResumeExecution(
+                                resolvedInput, execution.submittedInput()));
+                    });
+            WorkspaceAwareExecutionScheduler executionScheduler =
+                    new WorkspaceAwareExecutionScheduler(executionStore, workspace, (execution, token) -> {
+                        SessionStore.SessionHandle session = activeSession.get();
+                        if (session == null || !session.sessionId().equals(execution.sessionId())) {
+                            throw new IllegalStateException(
+                                    "Execution 绑定的 Session 当前不可写: " + execution.sessionId());
+                        }
+                        try (ExecutionInteractionContext.Scope ignored =
+                                     ExecutionInteractionContext.install(
+                                             execution.id(), execution.sessionId())) {
+                            executionFinalizer.ensureStarted(execution, session);
+                            uiEvents.started(execution, statusInfo(
+                                    reactAgent, mcpServerManager, skillRegistry, "running"));
+                            TopLevelExecutionResult proposed;
+                            try {
+                                proposed = executionCoordinator.run(execution, token);
+                            } catch (InterruptedException interrupted) {
+                                throw interrupted;
+                            } catch (CancellationException canceled) {
+                                proposed = new TopLevelExecutionResult(
+                                        null, null, ExecutionOutcome.CANCELED,
+                                        "⏹️ 已取消当前任务。", null);
+                            } catch (Exception failure) {
+                                String message = failure.getMessage() == null
+                                        ? failure.getClass().getSimpleName()
+                                        : failure.getMessage();
+                                proposed = TopLevelExecutionResult.failed(message);
+                            }
+                            RuntimeExecution routed = executionStore.find(execution.id())
+                                    .orElseThrow(() -> new IllegalStateException(
+                                            "Execution 状态丢失: " + execution.id()));
+                            if (routed.selectedMode() == null) {
+                                ExecutionMode fallbackMode = routed.explicitMode() == null
+                                        ? ExecutionMode.REACT : routed.explicitMode();
+                                RoutingSource fallbackSource = routed.explicitMode() == null
+                                        ? RoutingSource.AUTO_FALLBACK : RoutingSource.EXPLICIT;
+                                executionStore.commitRoutingDecision(
+                                        routed.id(), fallbackMode, fallbackSource);
+                            }
+                            RuntimeExecution completedExecution = executionFinalizer.finish(
+                                    execution.id(), proposed, session);
+                            interactionBroker.cancelExecution(
+                                    execution.id(), "Execution 已结束");
+                            uiEvents.completed(completedExecution, proposed.result(), statusInfo(
+                                    reactAgent, mcpServerManager, skillRegistry, "idle"));
+                            return proposed;
+                        }
+                    }, () -> legacyPlanClaimAllowed(
+                            executionPlanStore, workspace, activeSession.get()));
+            RuntimeExecutionQueue executionQueue = new RuntimeExecutionQueue(
+                    executionStore, executionScheduler, workspace);
+            try {
+                reconcileTerminalExecutionEnvelopes(executionStore, activeSession.get());
+                executionScheduler.start();
+            } catch (Exception e) {
+                closeExecutionStoreQuietly(executionStore);
+                interactionBroker.close();
+                throw new IllegalStateException("统一执行调度器启动失败: " + e.getMessage(), e);
+            }
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                executionScheduler.close();
+                interactionBroker.close();
+                closeSessionQuietly(activeSession.get());
+                try {
+                    executionStore.close();
+                } catch (Exception ignored) {
+                }
+            }, "codeagent-execution-shutdown"));
 
             reactAgent.setRenderer(renderer);
             reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled);
@@ -451,12 +586,49 @@ public class Main {
                 }
 
                 String input = promptInput.text().trim();
-
+                CliCommandParser.ParsedCommand command = CliCommandParser.parse(input);
+                boolean forceTaskAdd = command.type() == CliCommandParser.CommandType.TASK
+                        && command.payload() != null
+                        && command.payload().trim().regionMatches(true, 0, "add ", 0, 4);
+                if (command.type() == CliCommandParser.CommandType.NONE && !forceTaskAdd) {
+                    InteractionInputRouter.Result interactionResult =
+                            InteractionInputRouter.route(interactionBroker, input);
+                    if (interactionResult == InteractionInputRouter.Result.CONSUMED) {
+                        continue;
+                    }
+                    if (interactionResult == InteractionInputRouter.Result.INVALID) {
+                        uiEvents.message("❌ 当前输入不是有效的交互选项，请按提示重新输入");
+                        continue;
+                    }
+                }
                 if (input.isEmpty()) {
                     continue;
                 }
-
-                CliCommandParser.ParsedCommand command = CliCommandParser.parse(input);
+                SessionStore.SessionHandle currentSession = activeSession.get();
+                boolean sessionBusy = false;
+                if (currentSession != null) {
+                    try {
+                        sessionBusy = executionQueue.hasNonTerminal(currentSession.sessionId());
+                    } catch (Exception e) {
+                        uiEvents.message("❌ 无法读取执行状态: " + e.getMessage());
+                        continue;
+                    }
+                }
+                boolean legacyPlanActive = currentSession != null
+                        && hasLegacyActivePlan(
+                                executionPlanStore, workspace, currentSession.sessionId());
+                if (legacyPlanActive
+                        && command.type() != CliCommandParser.CommandType.PLAN_RESUME
+                        && command.type() != CliCommandParser.CommandType.PLAN_ABANDON
+                        && command.type() != CliCommandParser.CommandType.EXIT
+                        && command.type() != CliCommandParser.CommandType.SESSIONS) {
+                    uiEvents.message("⏸️ 当前 Session 存在未绑定 Execution 的旧版活动 Plan；请使用 /plan resume 或 /plan abandon");
+                    continue;
+                }
+                if (sessionBusy && !ExecutionControlPolicy.allowedWhileBusy(command.type())) {
+                    uiEvents.message("⏳ 当前 Session 仍有排队或运行中的 Execution，暂不能执行该命令");
+                    continue;
+                }
                 boolean submittedInputRendered = false;
                 if (command.type() != CliCommandParser.CommandType.NONE) {
                     renderer.beginTurn();
@@ -470,14 +642,34 @@ public class Main {
                         continue;
                     }
                     case EXIT -> {
-                        closeSessionNormally(activeSession.get(), "exit");
+                        executionScheduler.close();
+                        interactionBroker.close();
+                        boolean keepSessionOpen = activeSession.get() != null
+                                && hasNonTerminalQuietly(
+                                        executionQueue, activeSession.get().sessionId());
+                        if (!keepSessionOpen) {
+                            closeSessionNormally(activeSession.get(), "exit");
+                        }
+                        closeExecutionStoreQuietly(executionStore);
                         ui.println("\n👋 再见!");
                         wechatRuntime.stop();
                         renderer.close();
                         return;
                     }
                     case CANCEL -> {
-                        ui.println("当前没有正在运行的任务。\n");
+                        try {
+                            Optional<String> runningExecution = executionQueue.running();
+                            if (runningExecution.isEmpty()) {
+                                ui.println("当前没有正在运行的任务。\n");
+                            } else {
+                                String executionId = runningExecution.orElseThrow();
+                                executionQueue.cancel(executionId);
+                                interactionBroker.cancelExecution(executionId, "用户取消");
+                                ui.println("⏹️ 已请求取消 " + executionId + "\n");
+                            }
+                        } catch (Exception e) {
+                            ui.println("❌ 取消任务失败: " + e.getMessage() + "\n");
+                        }
                         continue;
                     }
                     case CLEAR -> {
@@ -678,27 +870,32 @@ public class Main {
                     }
                     case PLAN_RESUME -> {
                         nextTaskOverride = null;
-                        LlmClient activeClient = llmClient;
-                        PlanExecuteAgent planAgent = createPlanAgent(
-                                activeClient, reactAgent, terminal, lineReader, ui);
-                        planAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
-                        planAgent.setSkillRegistry(skillRegistry);
-                        planAgent.setSkillContextBuffer(skillContextBuffer);
-                        SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
-                        renderer.updateStatus(statusInfo(
-                                reactAgent, mcpServerManager, skillRegistry, "plan"));
-                        String response = runWithCancelSupport(
-                                terminal,
-                                ui,
-                                () -> snapshotService.runTurn(
-                                        "plan",
-                                        "/plan resume",
-                                        planAgent::resumeActivePlan));
-                        renderer.updateStatus(statusInfo(
-                                reactAgent, mcpServerManager, skillRegistry, "idle"));
-                        if (response != null && !response.isBlank()) {
-                            ui.println(response);
-                            ui.println();
+                        SessionStore.SessionHandle session = activeSession.get();
+                        if (session == null) {
+                            ui.println("❌ 当前没有可持久化的 Session\n");
+                            continue;
+                        }
+                        try {
+                            Optional<PlanStateStore.StoredPlanInfo> active =
+                                    executionPlanStore.findActiveRecord(
+                                            workspace, session.sessionId());
+                            if (active.isEmpty()) {
+                                ui.println("ℹ️ 当前 Session 没有未完成 Plan。\n");
+                                continue;
+                            }
+                            PlanStateStore.StoredPlanInfo plan = active.orElseThrow();
+                            String executionId = plan.executionId() == null
+                                    ? "legacy-plan-" + plan.planId()
+                                    : plan.executionId();
+                            RuntimeExecution adopted = executionQueue.adoptLegacyPlan(
+                                    executionId,
+                                    session.sessionId(),
+                                    plan.policyInput().isBlank() ? plan.goal() : plan.policyInput());
+                            executionPlanStore.bindExecution(plan.planId(), executionId);
+                            executionScheduler.signalWork();
+                            uiEvents.queued(adopted);
+                        } catch (Exception e) {
+                            ui.println("❌ 恢复计划入队失败: " + e.getMessage() + "\n");
                         }
                         continue;
                     }
@@ -707,6 +904,7 @@ public class Main {
                         PlanExecuteAgent planAgent = createPlanAgent(
                                 llmClient, reactAgent, terminal, lineReader, ui);
                         String response = planAgent.abandonActivePlan();
+                        executionScheduler.signalWork();
                         if (response != null && !response.isBlank()) {
                             ui.println(response);
                             ui.println();
@@ -863,7 +1061,15 @@ public class Main {
                         continue;
                     }
                     case TASK -> {
-                        printMcpCommandResult(ui, TaskCommandFormatter.handle(taskManager, command.payload()));
+                        SessionStore.SessionHandle session = activeSession.get();
+                        if (session == null) {
+                            ui.println("❌ 当前没有可持久化的 Session\n");
+                            continue;
+                        }
+                        printMcpCommandResult(ui, TaskCommandFormatter.handle(
+                                executionQueue,
+                                session.sessionId(),
+                                command.payload()));
                         continue;
                     }
                     case SKILL_LIST -> {
@@ -1046,10 +1252,8 @@ public class Main {
                     }
                 }
 
-                // 运行 Agent
+                // 所有顶层任务统一先持久化，再由 workspace 单 worker 执行。
                 String submittedInput = input;
-                input = mentionExpander.expand(input);
-                input = localPathMentionExpander.expand(input);
                 if (!(renderer instanceof InlineRenderer)) {
                     ui.println();
                 }
@@ -1057,59 +1261,35 @@ public class Main {
                     renderer.beginTurn();
                     printSubmittedInput(renderer, ui, submittedInput);
                 }
-                final String taskInput = input;
                 ExecutionMode explicitOverride = switch (command.type()) {
                     case SWITCH_PLAN -> ExecutionMode.PLAN;
                     case SWITCH_REACT -> ExecutionMode.REACT;
                     default -> nextTaskOverride;
                 };
-                LlmClient activeClient = llmClient;
-                ExecutionModeRouter modeRouter = new ExecutionModeRouter(
-                        activeClient, modeRouterPromptBuilder);
-                SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
-                renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "routing"));
-                String response = runWithCancelSupport(terminal,
-                        ui,
-                        () -> {
-                            RoutingDecision decision = selectExecutionMode(
-                                    explicitOverride,
-                                    modeRouter,
-                                    submittedInput,
-                                    reactAgent.getParentConversationContext().conversationNodes());
-                            recordExecutionModeSelection(
-                                    reactAgent.getConversationLedger(), decision, activeClient);
-                            String selectedMode = decision.mode().name().toLowerCase(Locale.ROOT);
-                            renderer.updateStatus(statusInfo(
-                                    reactAgent, mcpServerManager, skillRegistry, selectedMode));
-                            if (decision.mode() == ExecutionMode.PLAN
-                                    && decision.source() == RoutingSource.AUTO_MODEL) {
-                                ui.println("🧭 任务已自动选择 Plan-and-Execute 模式");
-                            }
-                            Callable<String> actualAgentCall;
-                            if (decision.mode() == ExecutionMode.PLAN) {
-                                actualAgentCall = () -> {
-                                    PlanExecuteAgent planAgent = createPlanAgent(
-                                            activeClient, reactAgent, terminal, lineReader, ui);
-                                    planAgent.setExternalContextSupplier(
-                                            mcpServerManager::resourceIndexForPrompt);
-                                    planAgent.setSkillRegistry(skillRegistry);
-                                    planAgent.setSkillContextBuffer(skillContextBuffer);
-                                    return planAgent.run(taskInput, submittedInput);
-                                };
-                            } else {
-                                actualAgentCall = () -> reactAgent.run(taskInput, submittedInput);
-                            }
-                            return snapshotService.runTurn(
-                                    selectedMode, taskInput, actualAgentCall::call);
-                        });
-                renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
-                nextTaskOverride = null;
-                if (response != null && !response.isBlank()) {
-                    ui.println(response);
-                    ui.println();
+                SessionStore.SessionHandle session = activeSession.get();
+                if (session == null) {
+                    uiEvents.message("❌ 当前没有可持久化的 Session，无法提交任务");
+                    continue;
                 }
+                RuntimeExecution queued;
+                try {
+                    queued = executionQueue.submit(
+                            session.sessionId(), submittedInput, explicitOverride);
+                } catch (Exception e) {
+                    uiEvents.message("❌ 任务入队失败: " + e.getMessage());
+                    continue;
+                }
+                uiEvents.queued(queued);
+                nextTaskOverride = null;
             }
-            closeSessionNormally(activeSession.get(), "eof");
+            executionScheduler.close();
+            interactionBroker.close();
+            boolean keepSessionOpen = activeSession.get() != null
+                    && hasNonTerminalQuietly(executionQueue, activeSession.get().sessionId());
+            if (!keepSessionOpen) {
+                closeSessionNormally(activeSession.get(), "eof");
+            }
+            closeExecutionStoreQuietly(executionStore);
             ui.println("\n👋 再见!");
             wechatRuntime.stop();
             renderer.close();
@@ -1465,12 +1645,85 @@ public class Main {
 
     private static PlanExecuteAgent createPlanAgent(LlmClient llmClient, Agent reactAgent,
                                                      Terminal terminal, LineReader lineReader, PrintStream out) {
+        return createPlanAgent(
+                llmClient, reactAgent, createPlanReviewHandler(terminal, lineReader, out), out);
+    }
+
+    private static boolean hasNonTerminalQuietly(
+            RuntimeExecutionQueue queue, String sessionId) {
+        try {
+            return queue.hasNonTerminal(sessionId);
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private static boolean legacyPlanClaimAllowed(
+            PlanStateStore store,
+            Path workspace,
+            SessionStore.SessionHandle session) {
+        return session != null && !hasLegacyActivePlan(store, workspace, session.sessionId());
+    }
+
+    private static boolean hasLegacyActivePlan(
+            PlanStateStore store, Path workspace, String sessionId) {
+        try {
+            return store.findLegacyActive(workspace, sessionId).isPresent();
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private static void closeExecutionStoreQuietly(RuntimeExecutionStore store) {
+        if (store == null) {
+            return;
+        }
+        try {
+            store.close();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static void reconcileTerminalExecutionEnvelopes(
+            RuntimeExecutionStore store, SessionStore.SessionHandle session) throws Exception {
+        if (session == null) {
+            return;
+        }
+        for (SessionProjection.ExecutionEnvelope envelope
+                : session.projection().executionEnvelopes().values()) {
+            if (!envelope.ended()) {
+                continue;
+            }
+            RuntimeExecution execution = store.find(envelope.executionId()).orElse(null);
+            if (execution == null || execution.terminal()) {
+                continue;
+            }
+            if (execution.selectedMode() == null) {
+                execution = store.commitRoutingDecision(
+                        execution.id(),
+                        ExecutionMode.valueOf(envelope.selectedMode().toUpperCase(Locale.ROOT)),
+                        execution.explicitMode() == null
+                                ? RoutingSource.AUTO_FALLBACK : RoutingSource.EXPLICIT);
+            }
+            store.complete(
+                    execution.id(),
+                    ExecutionOutcome.fromDatabase(envelope.outcome()),
+                    execution.result(),
+                    execution.error());
+        }
+    }
+
+    private static PlanExecuteAgent createPlanAgent(
+            LlmClient llmClient,
+            Agent reactAgent,
+            PlanExecuteAgent.PlanReviewHandler reviewHandler,
+            PrintStream out) {
         out.println("📋 使用多 Agent 协作 Plan-and-Execute 模式\n");
         PlanExecuteAgent planAgent = new PlanExecuteAgent(
                 llmClient,
                 reactAgent.getToolRegistry(),
                 reactAgent.getMemoryManager(),
-                createPlanReviewHandler(terminal, lineReader, out),
+                reviewHandler,
                 out,
                 PipelineOptions.FULL_PRESET
         );
@@ -1478,6 +1731,11 @@ public class Main {
         planAgent.setParentConversationContext(reactAgent.getParentConversationContext());
         planAgent.enableDefaultPlanStateStore();
         return planAgent;
+    }
+
+    private static TopLevelExecutionResult topLevelResult(AgentExecutionResult result) {
+        return new TopLevelExecutionResult(
+                null, null, result.outcome(), result.result(), result.error());
     }
 
     static String formatBetterHarnessProgress(BetterHarnessRunner.ProgressEvent event) {

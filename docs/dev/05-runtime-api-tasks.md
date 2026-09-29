@@ -1,5 +1,7 @@
 # 异步任务与 Runtime API
 
+> 实现状态更新（2026-09-29）：本文对 `DurableTaskManager/runtime_tasks` 的主体分析描述的是重构前实现。inline/plain CLI 现已按 [31-unified-background-execution-runtime.md](31-unified-background-execution-runtime.md) 改为统一 `runtime_executions`：普通输入、`/react`、`/plan`、`/task add` 共用单 workspace Worker、Session FIFO、typed outcome、execution-scoped cancellation、Session execution envelope 与 InteractionBroker。旧 `runtime_tasks` 仅做非破坏迁移；Runtime HTTP API、WeChat、Lanterna TUI 仍保持原路径。下文涉及旧后台任务实现的内容保留作为演进记录，不应再作为当前 inline/plain CLI 行为说明。
+
 > **本文怎么读**
 >
 > - 读者假设：会写 Java、懂工程常识，但**没有接触过持久化任务队列、HTTP 服务端接口或事件流**。第 0 部分专门补这些前置概念，有经验的读者可以直接跳到第 1 部分。

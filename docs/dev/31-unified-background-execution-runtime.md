@@ -746,8 +746,10 @@ Main CLI Thread
 Execution Worker
   └─ Router / ReAct / Plan
 
-CliUiEventBridge（唯一输出写入者）
-  └─ 串行化 stream / status / queue state，并用 inline printAbove 保护输入行
+Renderer（唯一终端输出 surface）
+  ├─ Agent / Plan streaming -> Renderer.stream()
+  └─ CliUiEventBridge -> lifecycle / interaction / queue event
+       （InlineRenderer 在读取态统一用 printAbove 保护输入行）
 ~~~
 
 要求：
@@ -755,7 +757,7 @@ CliUiEventBridge（唯一输出写入者）
 - CLI Input Loop 是 Terminal/LineReader 的唯一输入所有者；Worker、PlanReviewHandler、HITL 和取消监听都不得直接读 terminal；
 - 现有 `runWithCancelSupport` 的 Worker raw-mode/ESC 读取必须移除；ESC 改为 LineReader widget，在 CLI 输入线程中把取消投递给当前 foreground execution，方向键/粘贴控制序列继续不得误触发；
 - Ctrl+C/UserInterruptException 由 CLI 输入线程处理：有 foreground execution 时请求取消，没有时只清空当前编辑输入；不允许 Worker 修改 terminal attributes；
-- Worker 输出只能发布结构化 UI event，由 `CliUiEventBridge` 单线程/单锁写 Renderer；inline 使用 `printAbove`，plain 也不得由多个 Worker 裸写 `System.out`；
+- Worker 不得裸写 `System.out`。Agent/Plan 的 token streaming 继续走 `Renderer.stream()`，生命周期、交互和队列事件由 `CliUiEventBridge` 串行写 Renderer；`InlineRenderer` 在 LineReader 读取态统一使用 `printAbove`；
 - 普通消息 enqueue 后立即重新得到输入 prompt；
 - idle Session 的第一条任务会很快 claim；
 - busy Session 显示 queue position；
@@ -1010,7 +1012,7 @@ Workspace serialization、Session FIFO 与 Plan DAG parallelism 是三个不同�
 | `runtime/interaction/InteractionBroker.java`、`InteractionRequest.java` | keyed Plan review/HITL transport 与 allowedActions 校验 |
 | `agent/TopLevelExecutionCoordinator.java`、`TopLevelExecutionResult.java` | resolve 后的 route、durable ack、Snapshot、mode dispatch、typed outcome |
 | `cli/ExecutionInputResolver.java` | 无 UI 的 mention/path/resource expansion；不负责权限判断 |
-| `cli/CliUiEventBridge.java` | Worker UI event 串行化和 JLine-safe 输出 |
+| `cli/CliUiEventBridge.java` | Worker 生命周期/交互/队列 UI event 串行化；token streaming 复用 Renderer 既有 JLine-safe stream |
 | `history/SessionEvent.java`、`SessionReplayer.java`、`SessionProjection.java` | execution envelope required events 与 projection index |
 | `agent/Agent.java`、`PlanExecuteAgent.java`、`PlanConversationReconciler.java` | FIRST/RESUME typed entry、唯一顶层 User、executionId metadata |
 | `plan/PlanStateStore.java` | `plan_runs.execution_id` migration 与 lineage lookup |
@@ -1230,7 +1232,7 @@ Session FIFO 保护对话因果关系，但不能隔离文件系统。第一阶�
 - Ctrl+C / ESC；
 - Windows terminal。
 
-不允许用多线程裸 System.out 绕过 Renderer。CLI Input Loop 是唯一输入所有者，CliUiEventBridge 是唯一输出写入者；Worker 不得进入 raw mode 或调用 LineReader。
+不允许用多线程裸 System.out 绕过 Renderer。CLI Input Loop 是唯一输入所有者，Renderer 是唯一终端输出 surface；CliUiEventBridge 负责生命周期/交互/队列事件，Agent/Plan streaming 复用 Renderer.stream()。Worker 不得进入 raw mode 或调用 LineReader。
 
 ### 6.5 InteractionBroker 不能绕过安全门禁
 
@@ -1306,78 +1308,87 @@ ReAct / Plan
 
 ### 7.3 当前阶段
 
-当前只修改设计文档，尚未修改 Java 源码和测试。最新 review 已收敛：
+实现已进入回归阶段。当前已落地：
 
-- 当前 workspace 单顶层 Worker，Session 不是文件系统隔离边界；
-- SessionExecutionContextRegistry 独占 Agent/SessionHandle 生命周期；
-- execution/end + SQLite terminal 由 Finalizer 按 first-terminal-wins 提交；
-- RUNNING cancel 先 durable request，RUNTIME_SHUTDOWN 不伪装成用户取消；
-- ReAct/Plan 顶层 User 有唯一写入者和 FIRST/RESUME 入口；
-- CLI/LineReader 是唯一输入所有者，Worker 只通过 CliUiEventBridge 输出；
-- InteractionBroker 第一阶段单 pending 且不扩展 Tool Policy；
-- legacy runtime_tasks 与 legacy active Plan 都有非破坏、可重入的兼容路径。
+- `runtime_executions` schema、严格状态 codec、Session ordinal、workspace-bound claim、取消竞争和旧 `runtime_tasks` 非破坏迁移；
+- ordinary / `/react` / `/plan` / `/task add` 共用 `RuntimeExecutionQueue.submit`，inline/plain 输入线程不再等待 Agent 返回；
+- `WorkspaceAwareExecutionScheduler` 单 Worker、workspace 串行、Session FIFO、stale RUNNING recovery 和 `RUNTIME_SHUTDOWN` 回排；
+- ReAct / Plan typed outcome、ExecutionInputResolver 时序、durable routing ack、Snapshot 边界；
+- `execution/start` / `execution/end`、projection envelope index、Finalizer first-terminal-wins 和启动期 END -> SQLite 收敛；
+- Plan `execution_id` lineage、按 execution 恢复已有 DAG、legacy active Plan 确定性收养与 claim gate；
+- execution-scoped `CancellationContext`、InteractionBroker、Broker PlanReview/HITL handler、allowedActions 输入分流；
+- 全量 CommandType 运行中分类、`/task list|add|cancel|log` 兼容适配、README/AGENTS/旧 Runtime 文档状态说明。
 
-### 7.4 已确认源码事实
+尚未宣称完成的边界：
 
-- 普通 CLI 输入当前在执行期间不会继续读取下一条普通消息；
-- 普通输入当前不进入 runtime_tasks；
-- /task add 当前绕过 Auto Router；
-- DurableTaskManager 已有 SQLite queue、固定 Worker、claim、cancel、stale RUNNING recovery；
-- ReAct / Plan 已共享 ParentConversationContext；
-- Plan 已有 PlanStateStore 和 DAG node recovery；
-- PlanStateStore 当前无 execution_id；
-- Agent / Plan public run API 仍主要返回 String；
-- 当前 CancellationContext 不适合跨 Session 并发 execution。
+- `SessionExecutionContextRegistry` 的类型、lease 与驱逐规则已有测试，但 Main 仍由单 active Agent/Session 持有运行态；当前通过“Session 有非终态 Execution 时拒绝 `/new`/`/resume`”保证不会并发换绑，尚未完成多 Session lazy context 的最终接线；
+- `CliUiEventBridge` 已串行化队列、状态和交互提示；Agent/Plan streaming 复用 `Renderer.stream()`，`InlineRendererTest` 已验证 LineReader 读取态改走 `printAbove`。真实 Windows inline 终端的人工作业验收仍建议保留；
+- Runtime HTTP API、WeChat、Lanterna TUI 按 scope 未接队列，只做共享取消语义回归；
+- terminal Plan / Runtime 非终态窗口已补齐：按 `execution_id` 读取终态 lineage 并直接映射 typed outcome，不重新 Planner 或调用 LLM；
+- quick 首轮的增量编译残留已通过干净重建排除；修改后的 quick、全量和干净构建均已通过。
+
+### 7.4 实施验证记录
+
+- `RuntimeExecutionStoreTest,RuntimeExecutionQueueTest,WorkspaceAwareExecutionSchedulerTest,PlanStateStoreTest,PlanExecuteRecoveryTest,MainPlanAgentFactoryTest`：39 tests，全部通过；
+- `RuntimeExecutionStoreTest,WorkspaceAwareExecutionSchedulerTest,TopLevelExecutionCoordinatorTest,RuntimeExecutionTaskCommandFormatterTest,InteractionBrokerTest,BrokerInteractionHandlersTest,InteractionInputRouterTest,ExecutionControlPolicyTest`：25 tests，全部通过；
+- `RuntimeExecutionStoreTest,RuntimeExecutionQueueTest,RuntimeExecutionTaskCommandFormatterTest,SessionExecutionEnvelopeTest,PlanExecuteAgentTest,PlanConversationReconcilerTest,AgentSessionResumeTest`：34 tests，0 failure / 0 error / 1 skipped；
+- 干净重建 `LspDiagnosticFormatterTest,LspManagerTest,AgentLspDiagnosticsTest,PlanDiffEvidenceIntegrationTest`：7 tests，全部通过。
+- `PlanExecuteRecoveryTest,PlanStateStoreTest,SessionExecutionContextRegistryTest,InlineRendererTest,CancellationContextTest,WechatRendererTest`：58 tests，全部通过；其中终态 Plan 收敛测试确认不重新 Planner、不调用 LLM；
+- `mvn test -Pquick`：1197 tests，0 failure / 0 error / 4 skipped；
+- `mvn test -DskipTests=false`：1255 tests，0 failure / 0 error / 10 skipped；
+- `mvn test -Pphase16-smoke`：106 tests，0 failure / 0 error / 0 skipped；覆盖 inline/plain renderer、HITL、输入规范化和 TUI bootstrap；全量测试同时覆盖 Runtime API 与 WeChat 回归；
+- `mvn clean package -DskipTests`：`BUILD SUCCESS`（shade 插件仅报告既有重复资源 warning）。
+- `git diff --check`：exit 0；仅有仓库既有的 LF -> CRLF 提示。
 
 ---
 
 ## 8. 验收清单
 
-- [ ] inline/plain CLI 普通顶层任务全部先创建 durable Runtime Execution。
-- [ ] ordinary input、/react payload、/plan payload、/task add payload 走同一 enqueue API。
-- [ ] /task add 不再创建独立 Background Session 或 fork。
-- [ ] Agent 运行时 CLI 仍能接收下一条普通消息。
-- [ ] queued message 在真正开始前不会进入 Provider Surface / Top-level Conversation。
-- [ ] queued Execution 开始时能看到前序 Execution 的最终 Session context。
-- [ ] 同 Session 任意时刻最多一个 RUNNING Execution。
-- [ ] 同 workspace 即使不同 Session 也最多一个 RUNNING Execution。
-- [ ] 当前实例不 claim 其它 workspace 的 Execution；顶层 executor 固定为单 Worker。
+- [x] inline/plain CLI 普通顶层任务全部先创建 durable Runtime Execution。
+- [x] ordinary input、/react payload、/plan payload、/task add payload 走同一 enqueue API。
+- [x] /task add 不再创建独立 Background Session 或 fork。
+- [x] Agent 运行时 CLI 仍能接收下一条普通消息。
+- [x] queued message 在真正开始前不会进入 Provider Surface / Top-level Conversation。
+- [x] queued Execution 开始时能看到前序 Execution 的最终 Session context。
+- [x] 同 Session 任意时刻最多一个 RUNNING Execution。
+- [x] 同 workspace 即使不同 Session 也最多一个 RUNNING Execution。
+- [x] 当前实例不 claim 其它 workspace 的 Execution；顶层 executor 固定为单 Worker。
 - [ ] SessionExecutionContextRegistry 独占 writable SessionHandle/Agent/ParentConversationContext 生命周期。
-- [ ] EOF 时非终态 Execution 不被误写 CANCELED，相关 Session 不被提前关闭。
-- [ ] Runtime Execution 与 Plan Task 保持不同实体。
-- [ ] canonical store 使用 RuntimeExecution / runtime_executions 语义。
-- [ ] selected mode durable ack 在 ReAct/Plan 副作用之前。
-- [ ] selected mode CAS 支持同值幂等、异值 fail closed。
-- [ ] ReAct / Plan 使用 typed ExecutionOutcome。
-- [ ] partial、failed、rejected、user cancel、runtime shutdown 的映射无歧义。
-- [ ] 错误文本不会被误标为 COMPLETED。
-- [ ] Session Event Log 有 executionId 边界。
-- [ ] ReAct/Plan 各有唯一顶层 User 写入者，crash retry 使用 typed resume entry 且不重复 append。
-- [ ] ReAct interrupted Execution 阻塞后续同 Session queued Execution。
-- [ ] Plan Run 绑定 execution_id。
-- [ ] active Plan 按 execution_id 恢复。
-- [ ] terminal Plan 可收敛 Runtime Execution。
-- [ ] legacy active Plan 在 deterministic adoption 前阻止新 Execution，adoption crash 可收敛且不触发工具副作用。
-- [ ] Plan/HITL 通过 InteractionBroker 与 CLI 交互。
-- [ ] pending interaction 时普通输入不会被误当 queued task；/task add 可强制 enqueue。
-- [ ] InteractionBroker 请求带 interactionId/executionId/sessionId/allowedActions，且第一阶段每个 CLI surface 最多一个 pending。
-- [ ] HITL 非法文本不会被解释为批准或 queued task。
-- [ ] CancellationContext 成为唯一 execution-scoped 取消读取入口。
-- [ ] RUNNING cancel 先 durable cancel_requested_at，再由 Finalizer 提交唯一 CANCELED 终态。
-- [ ] execution/end 与 SQLite terminal 冲突时 fail closed，不猜测覆盖。
-- [ ] USER_CANCEL 与 RUNTIME_SHUTDOWN 语义分离。
-- [ ] Worker interrupt 不导致固定线程池永久减员。
-- [ ] Tool Policy 只以当前 Execution raw submitted input 为权限来源。
-- [ ] Router 只读取 raw submitted input，不读取 resolved task input 作为当前输入。
-- [ ] CLI Input Loop 是唯一终端输入所有者，Worker 不读 LineReader/raw terminal。
-- [ ] CliUiEventBridge 是唯一 Worker 输出入口，streaming 不破坏用户编辑行。
-- [ ] 所有 CliCommandParser CommandType 都有运行中 Control Plane 分类，未知新命令默认 fail closed。
-- [ ] legacy runtime_tasks migration 有 fixture 测试且失败不丢数据。
-- [ ] migration 可重入、未知状态回滚、旧表保留；legacy-unbound row 使用 NULL session/ordinal 且永不 claim。
-- [ ] Runtime HTTP API / WeChat / TUI 未被本次重构意外回归。
-- [ ] 针对性测试通过。
-- [ ] mvn test -Pquick 通过。
-- [ ] 全量测试通过。
-- [ ] 构建通过。
-- [ ] git diff --check 通过。
-- [ ] 本文是本任务唯一 docs/dev 设计与实施文档。
+- [x] EOF 时非终态 Execution 不被误写 CANCELED，相关 Session 不被提前关闭。
+- [x] Runtime Execution 与 Plan Task 保持不同实体。
+- [x] canonical store 使用 RuntimeExecution / runtime_executions 语义。
+- [x] selected mode durable ack 在 ReAct/Plan 副作用之前。
+- [x] selected mode CAS 支持同值幂等、异值 fail closed。
+- [x] ReAct / Plan 使用 typed ExecutionOutcome。
+- [x] partial、failed、rejected、user cancel、runtime shutdown 的映射无歧义。
+- [x] 错误文本不会被误标为 COMPLETED。
+- [x] Session Event Log 有 executionId 边界。
+- [x] ReAct/Plan 各有唯一顶层 User 写入者，crash retry 不重复 append 顶层 User。
+- [x] ReAct interrupted Execution 阻塞后续同 Session queued Execution。
+- [x] Plan Run 绑定 execution_id。
+- [x] active Plan 按 execution_id 恢复。
+- [x] terminal Plan 可收敛 Runtime Execution。
+- [x] legacy active Plan 在 deterministic adoption 前阻止新 Execution，adoption crash 可收敛且不触发工具副作用。
+- [x] Plan/HITL 通过 InteractionBroker 与 CLI 交互。
+- [x] pending interaction 时普通输入不会被误当 queued task；/task add 可强制 enqueue。
+- [x] InteractionBroker 请求带 interactionId/executionId/sessionId/allowedActions，且第一阶段每个 CLI surface 最多一个 pending。
+- [x] HITL 非法文本不会被解释为批准或 queued task。
+- [x] CancellationContext 成为唯一 execution-scoped 取消读取入口。
+- [x] RUNNING cancel 先 durable cancel_requested_at，再由 Finalizer 提交唯一 CANCELED 终态。
+- [x] execution/end 与 SQLite terminal 冲突时 fail closed，不猜测覆盖。
+- [x] USER_CANCEL 与 RUNTIME_SHUTDOWN 语义分离。
+- [x] Worker interrupt 不导致固定线程池永久减员。
+- [x] Tool Policy 只以当前 Execution raw submitted input 为权限来源。
+- [x] Router 只读取 raw submitted input，不读取 resolved task input 作为当前输入。
+- [x] CLI Input Loop 是唯一终端输入所有者，Worker 不读 LineReader/raw terminal。
+- [x] Renderer 是唯一终端输出 surface；CliUiEventBridge 串行化 lifecycle/interaction/queue event，Agent/Plan streaming 经 Renderer.stream() 且 inline 读取态使用 printAbove。
+- [x] 所有 CliCommandParser CommandType 都有运行中 Control Plane 分类，未知新命令默认 fail closed。
+- [x] legacy runtime_tasks migration 有旧 schema 测试且失败不丢数据。
+- [x] migration 可重入、未知状态回滚、旧表保留；legacy-unbound row 使用 NULL session/ordinal 且永不 claim。
+- [x] Runtime HTTP API / WeChat / TUI 未被本次重构意外回归。
+- [x] 针对性测试通过。
+- [x] mvn test -Pquick 通过。
+- [x] 全量测试通过。
+- [x] 构建通过。
+- [x] git diff --check 通过。
+- [x] 本文是本任务唯一 docs/dev 设计与实施文档。

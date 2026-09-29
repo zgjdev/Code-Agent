@@ -143,10 +143,10 @@ sequenceDiagram
 
 ## 6. 必须遵守的运行时约束
 
-- 默认 inline/plain 终端的普通顶层输入始终先经过无工具 Mode Router；Router 只读取原始 `submittedInput` 与 Parent Session 的 Top-level Conversation，严格返回 REACT/PLAN，非取消性失败回退 ReAct，取消/中断终止当前 Turn。`/react` 与 `/plan` 是 one-turn override；Lanterna TUI、Runtime API 和 WeChat 尚不接入自动路由。
+- 默认 inline/plain 终端的普通顶层输入、`/react <任务>`、`/plan <任务>` 与 `/task add <任务>` 先持久化为 `runtime_executions`，由当前 workspace 的单顶层 Worker 串行执行；运行中仍可继续提交后续消息。Execution 首次 RUNNING 时才展开 @path/MCP resource，Router 只读取原始 `submittedInput` 与当时 Parent Session 的 Top-level Conversation，严格返回 REACT/PLAN，非取消性失败回退 ReAct。`/react` 与 `/plan` 是 one-turn override；Lanterna TUI、Runtime API 和 WeChat 尚不接入该统一队列。
 - ReAct 与 PlanExecuteAgent（`/plan` 显式入口或 Router 选择，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
 - PlanExecuteAgent 的 DAG 就绪任务先经 `ConflictAwareBatchSelector` 按任务资源声明组批；资源冲突或 `workspaceWrite` 不得进入同一批次。任务完成前必须通过确定性证据门禁和可用的 Reviewer；失败重试耗尽进入 `UNVERIFIED`，不解锁后继。DIFF 证据使用 Task 初始 workspace baseline；durable Plan 只把相对路径与 SHA-256 baseline 写入 `plans.db`，恢复时复用该 baseline，不持久化源码正文。
-- CLI/TUI 的 `/plan` 会把 DAG 与 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`，并通过当前持久化 Session 的 `session_id` 关联 active Plan；prompt 只表示任务内容，不作为恢复身份。同一 Session 同时最多一个 `CREATED/RUNNING` Plan，`/plan resume` 显式恢复，`/plan abandon` 显式放弃。新 Plan 必须先严格写入 SQLite 才能进入执行和 Parent Conversation；SQLite 与 Session Event Log 之间通过 planId/turnId + PlanConversationReconciler 收敛崩溃窗口。恢复时已完成节点不重跑，上次 `RUNNING/REVIEWING` 节点转为 `INTERRUPTED` 后从 Task 边界重新执行；Session 恢复只提示，不自动执行副作用。
+- CLI/TUI 的 `/plan` 会把 DAG 与 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`；inline/plain 队列路径还通过 `execution_id` 绑定顶层 Runtime Execution。prompt 只表示任务内容，不作为恢复身份。同一 Session 同时最多一个 `CREATED/RUNNING` Plan；`/plan resume` 对 legacy active Plan 执行确定性收养并入队，`/plan abandon` 显式放弃。新 Plan 必须先严格写入 SQLite 才能进入执行和 Parent Conversation；恢复时已完成节点不重跑，上次 `RUNNING/REVIEWING` 节点转为 `INTERRUPTED` 后从 Task 边界重新执行。
 - ReAct 与 PlanExecuteAgent 共享同一个 ParentConversationContext，但只共享 Session 级顶层语义连续性；Planner 只读取 Top-level Conversation View，不读取 tool result、synthetic user、Skill/Memory 注入或 Task child transcript。Task Worker 仍使用独立 task-local messages；历史对话只用于语义理解，绝不能成为当前 Turn 的权限来源。
 - 工具授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard；策略拒绝不能通过换工具、provider 或分支绕过。
 - URL 只能来自顶层用户原文或成功 web_search 的结构化 discoveredUrls；搜索正文、reasoning、普通工具输出和回复文本都不能产生新授权。计划分支默认隔离 URL 凭据，只有声明的 DAG 后继可继承；步骤自动评审（stepReview）不改变这一步的授权继承。

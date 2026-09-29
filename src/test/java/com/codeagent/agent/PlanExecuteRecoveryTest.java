@@ -86,6 +86,47 @@ class PlanExecuteRecoveryTest {
     }
 
     @Test
+    void terminalPlanConvergesRuntimeExecutionWithoutReplanning() throws Exception {
+        RecordingClient client = new RecordingClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history-terminal"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            PlanStateStore store = new PlanStateStore(tempDir.resolve("terminal-plans.db"));
+            ExecutionPlan persisted = singleTaskPlan("plan-terminal", "已经完成的任务");
+            persisted.markStarted();
+            persisted.getTask("task_1").markCompleted("durable-result");
+            persisted.markCompleted();
+            persisted.setSummary("durable-summary");
+            store.savePlan(tempDir, session.sessionId(), "exec-terminal", "raw input", persisted);
+
+            FailingIfCalledPlanner planner = new FailingIfCalledPlanner(client);
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    client,
+                    registry,
+                    planner,
+                    null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()),
+                    PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(store);
+            agent.setParentConversationContext(parentContext(session));
+            agent.setRuntimeExecutionId("exec-terminal");
+
+            AgentExecutionResult result = agent.runOrResumeExecution(
+                    "不应重新执行", "不应重新执行");
+
+            assertEquals(com.codeagent.runtime.execution.ExecutionOutcome.SUCCEEDED,
+                    result.outcome());
+            assertTrue(result.result().contains("durable-summary"), result.result());
+            assertEquals(0, planner.createCalls.get(), "终态 Plan 只能收敛 Runtime，不能重新规划");
+            assertTrue(client.snapshots.isEmpty(), "终态 Plan 收敛不得再次调用 LLM");
+        }
+    }
+
+    @Test
     void interruptedTaskReceivesRecoverySafetyBriefing() throws Exception {
         RecordingClient client = new RecordingClient();
         ToolRegistry registry = new ToolRegistry();

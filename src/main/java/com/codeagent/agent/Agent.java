@@ -27,6 +27,7 @@ import com.codeagent.render.PlainRenderer;
 import com.codeagent.render.Renderer;
 import com.codeagent.render.StatusInfo;
 import com.codeagent.runtime.CancellationContext;
+import com.codeagent.runtime.interaction.ExecutionInteractionContext;
 import com.codeagent.skill.SkillContextBuffer;
 import com.codeagent.skill.SkillIndexFormatter;
 import com.codeagent.skill.SkillRegistry;
@@ -226,6 +227,10 @@ public class Agent {
      * the text the user actually submitted.
      */
     public String run(String userInput, String submittedUserInput) {
+        return runExecution(userInput, submittedUserInput).displayResult();
+    }
+
+    public AgentExecutionResult runExecution(String userInput, String submittedUserInput) {
         synchronizeParentContext();
         memoryManager.setSubmittedUserInput(submittedUserInput);
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
@@ -248,12 +253,15 @@ public class Agent {
             if (!memoryContext.isEmpty()) {
                 userMessageContent = userMessageContent + "\n\n" + memoryContext;
             }
-            appendTopLevelUserMessage(ImageReferenceParser.userMessage(
-                    userMessageContent,
-                    Path.of(toolRegistry.getProjectPath())), submittedUserInput, "user_input");
+            if (!currentExecutionUserAlreadyPersisted()) {
+                appendTopLevelUserMessage(ImageReferenceParser.userMessage(
+                        userMessageContent,
+                        Path.of(toolRegistry.getProjectPath())), submittedUserInput, "user_input");
+            }
         } catch (SessionPersistenceException e) {
             log.error("Failed to persist ReAct input before provider call", e);
-            return "Failed to persist conversation state: " + e.getMessage();
+            String display = "Failed to persist conversation state: " + e.getMessage();
+            return AgentExecutionResult.failed(display, e.getMessage());
         }
         StringBuilder reasoningTranscript = new StringBuilder();
         StreamRenderer streamRenderer = new StreamRenderer(renderer());
@@ -269,7 +277,7 @@ public class Agent {
             if (CancellationContext.isCancelled()) {
                 log.info("ReAct run cancelled before iteration");
                 pushStatus(budget, startNanos, "idle");
-                return "⏹️ 已取消当前任务。";
+                return AgentExecutionResult.canceled("⏹️ 已取消当前任务。");
             }
             // 工具定义必须先冻结，token 预测与实际 chat() 使用同一份列表。
             injectPendingLspDiagnostics();
@@ -310,7 +318,7 @@ public class Agent {
                     log.info("ReAct run cancelled after LLM response");
                     streamRenderer.finish();
                     pushStatus(budget, startNanos, "idle");
-                    return "⏹️ 已取消当前任务。";
+                    return AgentExecutionResult.canceled("⏹️ 已取消当前任务。");
                 }
 
                 budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
@@ -386,15 +394,20 @@ public class Agent {
 
                 if (streamRenderer.hasStreamedOutput()) {
                     streamRenderer.finish();
-                    return returnFinalResponseWhenStreamed ? (response.content() == null ? "" : response.content().trim()) : "";
+                    return AgentExecutionResult.succeeded(
+                            returnFinalResponseWhenStreamed
+                                    ? (response.content() == null ? "" : response.content().trim())
+                                    : "");
                 }
                 streamRenderer.clearThinkingPanel();
-                return formatUserFacingResponse(reasoningTranscript.toString(), response.content());
+                return AgentExecutionResult.succeeded(
+                        formatUserFacingResponse(reasoningTranscript.toString(), response.content()));
 
             } catch (SessionPersistenceException e) {
                 log.error("Failed to persist ReAct request lifecycle", e);
                 streamRenderer.finish();
-                return "Failed to persist conversation state: " + e.getMessage();
+                String display = "Failed to persist conversation state: " + e.getMessage();
+                return AgentExecutionResult.failed(display, e.getMessage());
             } catch (ContextWindowExceededException e) {
                 persistRequestFailedBestEffort(requestId, e);
                 if (overflowRetries < 1) {
@@ -415,12 +428,14 @@ public class Agent {
                 }
                 log.error("LLM context window exceeded in ReAct loop", e);
                 streamRenderer.finish();
-                return "❌ 上下文窗口超限: " + e.getMessage();
+                String display = "❌ 上下文窗口超限: " + e.getMessage();
+                return AgentExecutionResult.failed(display, e.getMessage());
             } catch (IOException e) {
                 persistRequestFailedBestEffort(requestId, e);
                 log.error("LLM call failed in ReAct loop", e);
                 streamRenderer.finish();
-                return "❌ 调用 LLM 失败: " + e.getMessage();
+                String display = "❌ 调用 LLM 失败: " + e.getMessage();
+                return AgentExecutionResult.failed(display, e.getMessage());
             }
         }
     }
@@ -429,7 +444,7 @@ public class Agent {
      * 预算安全阀命中后只允许一次无工具模型调用，把已完成工作整理成可交付的部分结果。
      * 这次调用不重新进入 ReAct 循环，也不暴露任何工具。
      */
-    private String finalizePartialResult(
+    private AgentExecutionResult finalizePartialResult(
             AgentBudget.ExitReason exitReason,
             AgentBudget budget,
             long startNanos,
@@ -477,15 +492,17 @@ public class Agent {
 
             if (streamRenderer.hasStreamedOutput()) {
                 streamRenderer.finish();
-                return returnFinalResponseWhenStreamed ? partialResult : "";
+                return AgentExecutionResult.partial(returnFinalResponseWhenStreamed ? partialResult : "");
             }
             streamRenderer.clearThinkingPanel();
-            return formatUserFacingResponse(reasoningTranscript.toString(), partialResult);
+            return AgentExecutionResult.partial(
+                    formatUserFacingResponse(reasoningTranscript.toString(), partialResult));
         } catch (IOException e) {
             log.error("LLM finalization call failed after ReAct budget exhaustion", e);
             streamRenderer.finish();
             pushStatus(budget, startNanos, "idle");
-            return formatPartialResult(description, "收尾调用失败：" + e.getMessage());
+            return AgentExecutionResult.partial(
+                    formatPartialResult(description, "收尾调用失败：" + e.getMessage()));
         }
     }
 
@@ -1247,7 +1264,22 @@ public class Agent {
         if (planId != null && !planId.isBlank()) {
             conversation.put("planId", planId);
         }
+        ExecutionInteractionContext.Identity execution = ExecutionInteractionContext.current();
+        if (execution != null) {
+            conversation.put("executionId", execution.executionId());
+        }
         return conversation;
+    }
+
+    private boolean currentExecutionUserAlreadyPersisted() {
+        ExecutionInteractionContext.Identity execution = ExecutionInteractionContext.current();
+        SessionProjection projection = parentConversationContext.projection();
+        if (execution == null || projection == null) {
+            return false;
+        }
+        SessionProjection.ExecutionEnvelope envelope =
+                projection.executionEnvelopes().get(execution.executionId());
+        return envelope != null && envelope.userSequence() != null;
     }
 
     private void synchronizeParentContext() {

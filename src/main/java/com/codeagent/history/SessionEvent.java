@@ -34,6 +34,8 @@ public record SessionEvent(
         public static final String SESSION_INTERRUPT = "session/interrupt";
         public static final String TURN_START = "turn/start";
         public static final String TURN_END = "turn/end";
+        public static final String EXECUTION_START = "execution/start";
+        public static final String EXECUTION_END = "execution/end";
         public static final String REQUEST_STARTED = "request/started";
         public static final String REQUEST_SNAPSHOT = "request/snapshot";
         public static final String REQUEST_FINISHED = "request/finished";

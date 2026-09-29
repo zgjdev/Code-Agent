@@ -22,6 +22,8 @@ public final class SessionReplayer {
             SessionEvent.Types.SESSION_INTERRUPT,
             SessionEvent.Types.TURN_START,
             SessionEvent.Types.TURN_END,
+            SessionEvent.Types.EXECUTION_START,
+            SessionEvent.Types.EXECUTION_END,
             SessionEvent.Types.REQUEST_STARTED,
             SessionEvent.Types.REQUEST_SNAPSHOT,
             SessionEvent.Types.REQUEST_FINISHED,
@@ -136,6 +138,8 @@ public final class SessionReplayer {
         }
 
         switch (event.type()) {
+            case SessionEvent.Types.EXECUTION_START -> startExecution(state, event);
+            case SessionEvent.Types.EXECUTION_END -> endExecution(state, event);
             case SessionEvent.Types.TURN_START -> startTurn(state, event);
             case SessionEvent.Types.TURN_END -> endTurn(state, event);
             case SessionEvent.Types.REQUEST_STARTED -> state.incompleteRequests.add(requiredText(payload, "requestId"));
@@ -165,6 +169,36 @@ public final class SessionReplayer {
                 // Lifecycle and diagnostic events do not directly change the active surface.
             }
         }
+    }
+
+    private static void startExecution(MutableProjection state, SessionEvent event) {
+        String executionId = requiredText(event.payload(), "executionId");
+        if (state.executionEnvelopes.containsKey(executionId)) {
+            throw new CorruptSessionException("duplicate execution start: " + executionId);
+        }
+        JsonNode ordinalNode = event.payload() == null ? null : event.payload().get("ordinal");
+        if (ordinalNode == null || !ordinalNode.isIntegralNumber()) {
+            throw new CorruptSessionException("execution/start requires ordinal");
+        }
+        state.executionEnvelopes.put(executionId, new SessionProjection.ExecutionEnvelope(
+                executionId, ordinalNode.longValue(), text(event.payload(), "explicitMode"),
+                event.sequence(), null, null, null, null, null, null));
+    }
+
+    private static void endExecution(MutableProjection state, SessionEvent event) {
+        String executionId = requiredText(event.payload(), "executionId");
+        SessionProjection.ExecutionEnvelope envelope = state.executionEnvelopes.get(executionId);
+        if (envelope == null) {
+            throw new CorruptSessionException("execution end has no start: " + executionId);
+        }
+        if (envelope.ended()) {
+            throw new CorruptSessionException("duplicate execution end: " + executionId);
+        }
+        String selectedMode = requiredText(event.payload(), "selectedMode");
+        String outcome = requiredText(event.payload(), "outcome");
+        String status = requiredText(event.payload(), "status");
+        state.executionEnvelopes.put(executionId,
+                envelope.ended(event.sequence(), selectedMode, outcome, status));
     }
 
     private static void finishRequest(MutableProjection state, String requestId) {
@@ -237,8 +271,34 @@ public final class SessionReplayer {
     }
 
     private static void applyMessageEvent(MutableProjection state, SessionEvent event) {
+        indexExecutionMessage(state, event);
         applySurface(state, event);
         applyConversation(state, event);
+    }
+
+    private static void indexExecutionMessage(MutableProjection state, SessionEvent event) {
+        String executionId = text(event.payload(), "executionId");
+        if (executionId == null && event.payload() != null) {
+            executionId = text(event.payload().get("conversation"), "executionId");
+        }
+        if (executionId == null) {
+            return;
+        }
+        SessionProjection.ExecutionEnvelope envelope = state.executionEnvelopes.get(executionId);
+        if (envelope == null || envelope.ended()) {
+            throw new CorruptSessionException("message is outside execution envelope: " + executionId);
+        }
+        if (SessionEvent.Types.USER_MESSAGE.equals(event.type())) {
+            if (envelope.userSequence() != null) {
+                throw new CorruptSessionException("duplicate top-level execution user: " + executionId);
+            }
+            state.executionEnvelopes.put(executionId, envelope.withUser(event.sequence()));
+        } else if (SessionEvent.Types.ASSISTANT_MESSAGE.equals(event.type())) {
+            if (envelope.assistantSequence() != null) {
+                throw new CorruptSessionException("duplicate top-level execution assistant: " + executionId);
+            }
+            state.executionEnvelopes.put(executionId, envelope.withAssistant(event.sequence()));
+        }
     }
 
     private static void applyConversation(MutableProjection state, SessionEvent event) {
@@ -427,6 +487,7 @@ public final class SessionReplayer {
         private final Map<String, SessionProjection.OpenTurn> openTurns = new LinkedHashMap<>();
         private final Set<String> incompleteRequests = new LinkedHashSet<>();
         private final Map<String, SessionProjection.PendingToolInvocation> pendingTools = new LinkedHashMap<>();
+        private final Map<String, SessionProjection.ExecutionEnvelope> executionEnvelopes = new LinkedHashMap<>();
         private final Map<String, List<SessionEvent>> compactions = new LinkedHashMap<>();
         private final Map<String, List<SessionEvent>> requestAssistants = new LinkedHashMap<>();
         private final Map<String, SessionProjection.MeasuredUsageFact> requestUsages = new LinkedHashMap<>();
@@ -447,6 +508,7 @@ public final class SessionReplayer {
             openTurns.putAll(checkpoint.openTurns());
             incompleteRequests.addAll(checkpoint.incompleteRequestIds());
             pendingTools.putAll(checkpoint.pendingTools());
+            executionEnvelopes.putAll(checkpoint.executionEnvelopes());
             warnings.addAll(checkpoint.warnings());
             lastAppliedSequence = checkpoint.lastAppliedSequence();
             historyVersion = checkpoint.historyVersion();
@@ -458,7 +520,7 @@ public final class SessionReplayer {
         private SessionProjection freeze() {
             return new SessionProjection(surface, conversation, openTurns,
                     lastAppliedSequence, historyVersion, compactionGeneration, lastCompletedUsage,
-                    incompleteRequests, pendingTools, cleanlyClosed, warnings);
+                    incompleteRequests, pendingTools, executionEnvelopes, cleanlyClosed, warnings);
         }
     }
 

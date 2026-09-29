@@ -6,6 +6,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Set;
@@ -292,5 +293,36 @@ class PlanStateStoreTest {
         plan.addTask(new Task("task_1", "分析", Task.TaskType.ANALYSIS));
         assertTrue(plan.computeExecutionOrder());
         return plan;
+    }
+
+    @Test
+    void bindsPlanLineageToRuntimeExecution(@TempDir Path tempDir) throws Exception {
+        PlanStateStore store = new PlanStateStore(tempDir.resolve("execution-lineage.db"));
+        ExecutionPlan plan = singleTaskPlan("plan-exec", "绑定 execution");
+
+        store.savePlan(tempDir, "session-a", "exec-1", "raw policy input", plan);
+
+        PlanStateStore.StoredPlanInfo info = store.findById(plan.getId()).orElseThrow().info();
+        assertEquals("exec-1", info.executionId());
+        assertEquals("plan-exec",
+                store.findByExecution(tempDir, "session-a", "exec-1").get(0).planId());
+        assertThrows(Exception.class, () -> store.savePlan(
+                tempDir, "session-a", "exec-2", "raw policy input", plan));
+    }
+
+    @Test
+    void legacyActivePlanCanBeBoundExactlyOnce(@TempDir Path tempDir) throws Exception {
+        PlanStateStore store = new PlanStateStore(tempDir.resolve("legacy-adoption.db"));
+        ExecutionPlan plan = singleTaskPlan("legacy-plan", "继续旧计划");
+        store.savePlan(tempDir, "session-a", "original input", plan);
+
+        assertEquals("legacy-plan", store.findLegacyActive(tempDir, "session-a")
+                .orElseThrow().planId());
+        store.bindExecution("legacy-plan", "legacy-plan-legacy-plan");
+        store.bindExecution("legacy-plan", "legacy-plan-legacy-plan");
+
+        assertTrue(store.findLegacyActive(tempDir, "session-a").isEmpty());
+        assertThrows(SQLException.class,
+                () -> store.bindExecution("legacy-plan", "different"));
     }
 }

@@ -7,6 +7,7 @@ import com.codeagent.history.SessionProjection;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.plan.PlanConversationResultBuilder;
 import com.codeagent.plan.PlanStateStore;
+import com.codeagent.runtime.interaction.ExecutionInteractionContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -134,6 +135,7 @@ public final class PlanConversationReconciler {
                 .put("turnId", turnId)
                 .put("planId", planId)
                 .put("mode", "plan");
+        addExecutionId(payload);
         if (continuation) {
             payload.put("continuation", true);
         }
@@ -156,6 +158,7 @@ public final class PlanConversationReconciler {
                 .put("planId", planId)
                 .put("mode", "plan")
                 .put("status", status == null ? "unknown" : status);
+        addExecutionId(payload);
         context.append(new SessionEventDraft(
                 SessionEvent.Types.TURN_END,
                 "plan",
@@ -179,12 +182,17 @@ public final class PlanConversationReconciler {
                 : LlmClient.Message.user(content);
         ObjectNode payload = JSON.createObjectNode();
         payload.set("message", JSON.valueToTree(message));
-        payload.putObject("conversation")
+        ObjectNode conversation = payload.putObject("conversation")
                 .put("turnId", turnId)
                 .put("planId", planId)
                 .put("mode", "plan")
                 .put("role", role)
                 .put("content", content);
+        ExecutionInteractionContext.Identity execution = ExecutionInteractionContext.current();
+        if (execution != null) {
+            payload.put("executionId", execution.executionId());
+            conversation.put("executionId", execution.executionId());
+        }
         context.append(new SessionEventDraft(
                 "assistant".equals(role)
                         ? SessionEvent.Types.ASSISTANT_MESSAGE
@@ -195,5 +203,12 @@ public final class PlanConversationReconciler {
                 false,
                 SessionEvent.SurfaceOperation.append(),
                 payload));
+    }
+
+    private static void addExecutionId(ObjectNode payload) {
+        ExecutionInteractionContext.Identity execution = ExecutionInteractionContext.current();
+        if (execution != null) {
+            payload.put("executionId", execution.executionId());
+        }
     }
 }

@@ -81,20 +81,45 @@ public final class PlanStateStore {
                                       String sessionId,
                                       String policyInput,
                                       ExecutionPlan plan) throws SQLException {
+        savePlan(workspace, sessionId, null, policyInput, plan);
+    }
+
+    public synchronized void savePlan(Path workspace,
+                                      String sessionId,
+                                      String executionId,
+                                      String policyInput,
+                                      ExecutionPlan plan) throws SQLException {
         Objects.requireNonNull(plan, "plan");
         String normalizedSessionId = normalizeSessionId(sessionId);
+        String normalizedExecutionId = normalizeExecutionId(executionId);
         String now = Instant.now().toString();
         try (Connection connection = openConnection()) {
             connection.setAutoCommit(false);
             try {
+                if (normalizedExecutionId != null) {
+                    try (PreparedStatement existing = connection.prepareStatement(
+                            "SELECT execution_id FROM plan_runs WHERE id = ?")) {
+                        existing.setString(1, plan.getId());
+                        try (ResultSet rows = existing.executeQuery()) {
+                            if (rows.next()) {
+                                String bound = rows.getString(1);
+                                if (bound != null && !bound.equals(normalizedExecutionId)) {
+                                    throw new SQLException(
+                                            "Plan is already bound to another execution: " + plan.getId());
+                                }
+                            }
+                        }
+                    }
+                }
                 try (PreparedStatement ps = connection.prepareStatement("""
                         INSERT INTO plan_runs (
-                            id, workspace, session_id, resume_key, policy_input,
+                            id, workspace, session_id, execution_id, resume_key, policy_input,
                             goal, status, summary, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(id) DO UPDATE SET
                             workspace = excluded.workspace,
                             session_id = excluded.session_id,
+                            execution_id = COALESCE(excluded.execution_id, plan_runs.execution_id),
                             policy_input = excluded.policy_input,
                             goal = excluded.goal,
                             status = excluded.status,
@@ -108,14 +133,19 @@ public final class PlanStateStore {
                     } else {
                         ps.setString(3, normalizedSessionId);
                     }
+                    if (normalizedExecutionId == null) {
+                        ps.setNull(4, Types.VARCHAR);
+                    } else {
+                        ps.setString(4, normalizedExecutionId);
+                    }
                     // Keep the old NOT NULL column populated for schema compatibility only.
-                    ps.setString(4, "");
-                    ps.setString(5, policyInput == null ? "" : policyInput);
-                    ps.setString(6, plan.getGoal());
-                    ps.setString(7, plan.getStatus().name());
-                    ps.setString(8, plan.getSummary());
-                    ps.setString(9, now);
+                    ps.setString(5, "");
+                    ps.setString(6, policyInput == null ? "" : policyInput);
+                    ps.setString(7, plan.getGoal());
+                    ps.setString(8, plan.getStatus().name());
+                    ps.setString(9, plan.getSummary());
                     ps.setString(10, now);
+                    ps.setString(11, now);
                     ps.executeUpdate();
                 }
 
@@ -283,7 +313,7 @@ public final class PlanStateStore {
         }
         try (Connection connection = openConnection();
              PreparedStatement ps = connection.prepareStatement("""
-                     SELECT id, workspace, session_id, policy_input, goal, status, summary
+                     SELECT id, workspace, session_id, execution_id, policy_input, goal, status, summary
                      FROM plan_runs
                      WHERE workspace = ?
                        AND session_id = ?
@@ -311,7 +341,7 @@ public final class PlanStateStore {
         }
         try (Connection connection = openConnection();
              PreparedStatement ps = connection.prepareStatement("""
-                     SELECT id, workspace, session_id, policy_input, goal, status, summary
+                     SELECT id, workspace, session_id, execution_id, policy_input, goal, status, summary
                      FROM plan_runs
                      WHERE id = ?
                      LIMIT 1
@@ -340,10 +370,111 @@ public final class PlanStateStore {
                 rs.getString("id"),
                 rs.getString("workspace"),
                 rs.getString("session_id"),
+                rs.getString("execution_id"),
                 rs.getString("policy_input"),
                 rs.getString("goal"),
                 ExecutionPlan.PlanStatus.valueOf(rs.getString("status")),
                 rs.getString("summary"));
+    }
+
+    public synchronized Optional<StoredPlanInfo> findLegacyActive(Path workspace, String sessionId)
+            throws SQLException {
+        String normalizedSessionId = normalizeSessionId(sessionId);
+        if (normalizedSessionId == null) {
+            return Optional.empty();
+        }
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT id, workspace, session_id, execution_id, policy_input, goal, status, summary
+                     FROM plan_runs
+                     WHERE workspace = ? AND session_id = ? AND execution_id IS NULL
+                       AND status IN (?, ?)
+                     ORDER BY updated_at DESC, created_at DESC
+                     LIMIT 1
+                     """)) {
+            statement.setString(1, normalizeWorkspace(workspace));
+            statement.setString(2, normalizedSessionId);
+            statement.setString(3, ExecutionPlan.PlanStatus.CREATED.name());
+            statement.setString(4, ExecutionPlan.PlanStatus.RUNNING.name());
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next() ? Optional.of(readStoredPlanInfo(rows)) : Optional.empty();
+            }
+        }
+    }
+
+    public synchronized void bindExecution(String planId, String executionId) throws SQLException {
+        if (planId == null || planId.isBlank()) {
+            throw new IllegalArgumentException("planId must not be blank");
+        }
+        String normalizedExecutionId = normalizeExecutionId(executionId);
+        if (normalizedExecutionId == null) {
+            throw new IllegalArgumentException("executionId must not be blank");
+        }
+        try (Connection connection = openConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                String current;
+                try (PreparedStatement query = connection.prepareStatement(
+                        "SELECT execution_id FROM plan_runs WHERE id = ?")) {
+                    query.setString(1, planId.trim());
+                    try (ResultSet rows = query.executeQuery()) {
+                        if (!rows.next()) {
+                            throw new SQLException("Unknown Plan: " + planId);
+                        }
+                        current = rows.getString(1);
+                    }
+                }
+                if (current != null && !current.equals(normalizedExecutionId)) {
+                    throw new SQLException("Plan is already bound to another execution: " + planId);
+                }
+                if (current == null) {
+                    try (PreparedStatement update = connection.prepareStatement("""
+                            UPDATE plan_runs SET execution_id = ?, updated_at = ?
+                            WHERE id = ? AND execution_id IS NULL
+                            """)) {
+                        update.setString(1, normalizedExecutionId);
+                        update.setString(2, Instant.now().toString());
+                        update.setString(3, planId.trim());
+                        if (update.executeUpdate() != 1) {
+                            throw new SQLException("Plan binding changed concurrently: " + planId);
+                        }
+                    }
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException e) {
+                connection.rollback();
+                throw e;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        }
+    }
+
+    public synchronized List<StoredPlanInfo> findByExecution(
+            Path workspace, String sessionId, String executionId) throws SQLException {
+        String normalizedSessionId = normalizeSessionId(sessionId);
+        String normalizedExecutionId = normalizeExecutionId(executionId);
+        if (normalizedSessionId == null || normalizedExecutionId == null) {
+            return List.of();
+        }
+        List<StoredPlanInfo> plans = new ArrayList<>();
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT id, workspace, session_id, execution_id, policy_input, goal, status, summary
+                     FROM plan_runs
+                     WHERE workspace = ? AND session_id = ? AND execution_id = ?
+                     ORDER BY updated_at, created_at, id
+                     """)) {
+            statement.setString(1, normalizeWorkspace(workspace));
+            statement.setString(2, normalizedSessionId);
+            statement.setString(3, normalizedExecutionId);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    plans.add(readStoredPlanInfo(rows));
+                }
+            }
+        }
+        return List.copyOf(plans);
     }
 
     /**
@@ -574,6 +705,13 @@ public final class PlanStateStore {
         return sessionId.trim();
     }
 
+    private static String normalizeExecutionId(String executionId) {
+        if (executionId == null || executionId.isBlank()) {
+            return null;
+        }
+        return executionId.trim();
+    }
+
     private Connection openConnection() throws SQLException {
         return DriverManager.getConnection("jdbc:sqlite:" + dbPath);
     }
@@ -586,6 +724,7 @@ public final class PlanStateStore {
                         id TEXT PRIMARY KEY,
                         workspace TEXT NOT NULL,
                         session_id TEXT,
+                        execution_id TEXT,
                         resume_key TEXT NOT NULL DEFAULT '',
                         policy_input TEXT NOT NULL DEFAULT '',
                         goal TEXT NOT NULL,
@@ -632,6 +771,11 @@ public final class PlanStateStore {
                     stmt.execute("ALTER TABLE plan_runs ADD COLUMN policy_input TEXT NOT NULL DEFAULT ''");
                 }
             }
+            if (!hasColumn(connection, "plan_runs", "execution_id")) {
+                try (Statement stmt = connection.createStatement()) {
+                    stmt.execute("ALTER TABLE plan_runs ADD COLUMN execution_id TEXT");
+                }
+            }
             if (!hasColumn(connection, "plan_tasks", "diff_baseline_json")) {
                 try (Statement stmt = connection.createStatement()) {
                     stmt.execute("ALTER TABLE plan_tasks ADD COLUMN diff_baseline_json TEXT");
@@ -647,6 +791,10 @@ public final class PlanStateStore {
                         ON plan_runs(workspace, session_id)
                         WHERE session_id IS NOT NULL
                           AND status IN ('CREATED', 'RUNNING')
+                        """);
+                stmt.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_plan_runs_execution
+                        ON plan_runs(workspace, session_id, execution_id, updated_at)
                         """);
             }
         }
@@ -685,6 +833,7 @@ public final class PlanStateStore {
     public record StoredPlanInfo(String planId,
                                  String workspace,
                                  String sessionId,
+                                 String executionId,
                                  String policyInput,
                                  String goal,
                                  ExecutionPlan.PlanStatus status,

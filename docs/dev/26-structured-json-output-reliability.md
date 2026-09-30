@@ -1,6 +1,6 @@
 # Structured JSON Output 可靠性改造
 
-> 状态：设计评审完成，待实现与验证。
+> 状态：实现与静态审查完成；当前执行环境无 Maven 且无法解析 github.com，仓库未配置可用 GitHub Actions，因此 Maven 针对性/quick/全量/package 与真实 `git diff --check` 尚未实际运行。
 >
 > 基线：`main`
 >
@@ -218,13 +218,14 @@ Schema：
 
 #### Planner
 
-Schema 对齐当前 prompt 的 Plan 结构。核心字段 `summary` / `tasks` 以及 Task 的 `id/description/type/dependencies` 必须存在；resources、acceptanceCriteria、requiredEvidence 按当前计划 contract 定义。
+Schema 对齐当前 prompt 的 Plan 结构。根对象的 `summary` / `tasks` 与每个 Task 的 `id` / `description` 必须存在；为保持已有 legacy planner JSON 兼容性，`type`、`dependencies`、resources、acceptanceCriteria、requiredEvidence 继续允许省略，其中缺失 `type` 保守回退为 `ANALYSIS`。字段一旦出现则必须满足对应类型约束。
 
-本地 validator 负责：
+本地 validator / decoder 负责：
 
-- root/object 与 tasks/array 基础结构。
-- task id/description/type/dependencies 的基本类型和枚举。
-- 后续仍由现有 `TaskResourceClaims.normalize`、依赖映射和 `computeExecutionOrder()` 做业务不变量验证。
+- root/object 与非空 tasks/array 基础结构。
+- task id/description 非空、id 唯一；type/dependencies 出现时类型正确，显式未知 type 拒绝并触发 repair。
+- dependency 必须引用已存在 Task，循环依赖拒绝。
+- 现有 `TaskResourceClaims.normalize` 继续校验资源声明；`computeExecutionOrder()` 继续做 DAG 不变量校验。
 
 结构修复失败才向上抛 `IOException`。
 
@@ -374,20 +375,84 @@ git diff --check
 
 ## 5. 验收清单
 
-- [ ] LLM 层存在统一 structured-output contract。
-- [ ] Provider 能力按 NONE / JSON_OBJECT / JSON_SCHEMA 分级。
-- [ ] Hunyuan 使用 JSON Schema；DeepSeek/Step 使用 JSON Object。
-- [ ] 未验证 Provider 不盲目发送 response_format。
-- [ ] endpoint 明确不支持 structured output 时可安全退回 plain chat。
-- [ ] Planner / Router / Reviewer 共用 bounded structured JSON retry。
-- [ ] 最大总尝试次数为 2，不存在无限格式重试。
-- [ ] malformed 输出不会进入 Plan 持久化或被 Reviewer 当成批准。
-- [ ] Router 最终失败仍 fallback ReAct。
-- [ ] Reviewer 自然语言关键词不再绕过 JSON contract。
-- [ ] 不改变工具权限、URL authority、HITL 和持久化 schema。
-- [ ] 针对性测试通过。
-- [ ] quick 回归通过。
-- [ ] 全量测试通过。
-- [ ] package 通过。
-- [ ] diff check 通过。
-- [ ] 实施结果和已知限制回填本文。
+- [x] LLM 层存在统一 structured-output contract。
+- [x] Provider 能力按 NONE / JSON_OBJECT / JSON_SCHEMA 分级。
+- [x] Hunyuan 使用 JSON Schema；DeepSeek/Step 使用 JSON Object。
+- [x] 未验证 Provider 不盲目发送 response_format。
+- [x] endpoint 只有明确不支持 structured output 参数时才安全退回 plain chat；schema 自身校验错误不会被误判为能力缺失。
+- [x] Planner / Router / Reviewer 共用 bounded structured JSON retry。
+- [x] 最大结构化输出尝试次数为 2，不存在无限格式重试。
+- [x] malformed 输出不会进入 Plan 持久化或被 Reviewer 当成批准。
+- [x] Router 最终失败仍 fallback ReAct。
+- [x] Reviewer 自然语言关键词不再绕过 JSON contract。
+- [x] 不改变工具权限、URL authority、HITL 和持久化 schema。
+- [ ] 针对性测试通过（当前执行环境未能运行 Maven）。
+- [ ] quick 回归通过（当前执行环境未能运行 Maven）。
+- [ ] 全量测试通过（当前执行环境未能运行 Maven）。
+- [ ] package 通过（当前执行环境未能运行 Maven）。
+- [ ] `git diff --check` 通过（当前环境无法获得本地 Git checkout；已另做文本静态检查）。
+- [x] 实施结果和已知限制回填本文。
+
+## 6. 实施记录与验证边界
+
+### 6.1 已实施
+
+实现按边界拆为少量可审计提交：
+
+- `629455e`：新增本设计文档。
+- `3e0385d`：加入 LLM structured-output contract、Provider request mapping、native 参数不兼容回退和 `StructuredJsonExecutor`。
+- `9fdf86c`：Planner / Mode Router / Reviewer 接入统一结构化执行器，并收紧 Reviewer fail-closed 语义。
+- `1d1781d`：补充 Provider capability 声明测试，防止未验证 Provider 被误设为原生 structured output。
+- `2359724`：收紧 native fallback 判定，并让 Planner 显式未知 task type 进入 repair，而不是静默降级。
+
+实现后的数据流为：
+
+```text
+Prompt contract
+    ↓
+LlmClient.chatStructured
+    ├─ verified provider → native json_object / json_schema
+    └─ unsupported/none  → plain chat
+    ↓
+StructuredJsonExecutor
+    ↓
+Jackson 单 JSON 文档解析
+    ↓
+调用点 deterministic decoder / business invariants
+    ├─ valid → 进入 Router / Plan / Reviewer 业务层
+    └─ invalid → 最多一次局部 repair → 仍失败则安全终止/降级
+```
+
+格式 repair 只在当前 LLM 操作的 request-local messages 中追加 invalid response 与格式纠正提示，不写 Parent Session，不改变 Tool exposure、URL authority、路径权限或 HITL 状态。为避免把无效 JSON 暴露成用户可见结果，structured executor 只向原 listener 透传 reasoning delta，不流式透传尚未验证的 content；最终有效内容仍作为 `ChatResponse` 返回业务层。
+
+### 6.2 已完成的静态审查
+
+已逐项复核：
+
+- `LlmClient` 新 API 均为 default method，未要求所有现有 Provider/测试 stub 强制实现。
+- `AbstractOpenAiCompatibleClient` 普通 `chat` 路径仍走原请求体；只有 structured 调用且 capability 非 `NONE` 时增加 `response_format`。
+- native structured 参数只有明确的 4xx unsupported/unknown parameter 才降级 plain chat；认证、限流、5xx、上下文超限和 schema 本身无效仍沿用原错误/retry 语义。
+- Router 的 canonical contract 仍拒绝额外字段、大小写枚举和 Markdown fence；区别仅是先允许一次 repair。
+- Planner 保留缺失 `type` → `ANALYSIS` 的 legacy 行为；显式未知 type、重复 Task id、未知依赖和 malformed dependency 都会确定性拒绝并触发 repair。
+- Reviewer 不再通过自然语言“通过/合格”等关键词推断批准；连续结构化失败进入原有 `ERROR → UNAVAILABLE` 路径。
+- 未修改 Session/Plan 数据库 schema、工具权限链或持久化格式。
+
+### 6.3 未能执行的动态验证
+
+当前执行环境存在两个客观限制：
+
+1. 本地运行环境没有可用的 `mvn`。
+2. 尝试获取仓库本地 checkout 时，运行环境无法解析 `github.com`；仓库当前也没有可供该分支自动执行的 GitHub Actions workflow。
+
+因此本文不能声称以下命令已经通过：
+
+```bash
+mvn test -DskipTests=false \
+  -Dtest=StructuredJsonExecutorTest,StructuredOutputRequestTest,ExecutionModeRouterTest,PlannerTest,ReviewResponseParserTest,SubAgentStepReviewerTest
+mvn test -Pquick
+mvn test -DskipTests=false
+mvn clean package
+git diff --check
+```
+
+这属于验证环境限制，不代表这些命令失败。后续在具备 Maven 的正常开发环境中，应先执行上述命令；任何失败都应继续在本分支修正后再合并。

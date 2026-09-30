@@ -144,6 +144,7 @@ sequenceDiagram
 ## 6. 必须遵守的运行时约束
 
 - 默认 inline/plain 终端的普通顶层输入始终先经过无工具 Mode Router；Router 只读取原始 `submittedInput` 与 Parent Session 的 Top-level Conversation，严格返回 REACT/PLAN，非取消性失败回退 ReAct，取消/中断终止当前 Turn。`/react` 与 `/plan` 是 one-turn override；Lanterna TUI、Runtime API 和 WeChat 尚不接入自动路由。
+- Planner、Mode Router 与 Reviewer 的 JSON 输出统一通过 LLM 层 `StructuredJsonExecutor` 校验：总尝试最多 2 次，首次语法/结构/业务约束失败只允许一次格式修复；Hunyuan/TokenHub 使用原生 JSON Schema，DeepSeek/Step 使用 JSON Object，未验证 Provider 不发送 `response_format`。兼容端点明确拒绝结构化参数时只回退普通 Chat 请求，本地校验仍必须通过。格式修复不得扩大工具、URL、路径或 HITL 权限；Reviewer 连续失败按不可用/拒绝处理，禁止用自然语言关键词猜测批准。
 - ReAct 与 PlanExecuteAgent（`/plan` 显式入口或 Router 选择，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
 - PlanExecuteAgent 的 DAG 就绪任务先经 `ConflictAwareBatchSelector` 按任务资源声明组批；资源冲突或 `workspaceWrite` 不得进入同一批次。任务完成前必须通过确定性证据门禁和可用的 Reviewer；失败重试耗尽进入 `UNVERIFIED`，不解锁后继。DIFF 证据使用 Task 初始 workspace baseline；durable Plan 只把相对路径与 SHA-256 baseline 写入 `plans.db`，恢复时复用该 baseline，不持久化源码正文。
 - CLI/TUI 的 `/plan` 会把 DAG 与 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`，并通过当前持久化 Session 的 `session_id` 关联 active Plan；prompt 只表示任务内容，不作为恢复身份。同一 Session 同时最多一个 `CREATED/RUNNING` Plan，`/plan resume` 显式恢复，`/plan abandon` 显式放弃。新 Plan 必须先严格写入 SQLite 才能进入执行和 Parent Conversation；SQLite 与 Session Event Log 之间通过 planId/turnId + PlanConversationReconciler 收敛崩溃窗口。恢复时已完成节点不重跑，上次 `RUNNING/REVIEWING` 节点转为 `INTERRUPTED` 后从 Task 边界重新执行；Session 恢复只提示，不自动执行副作用。
@@ -172,6 +173,7 @@ sequenceDiagram
 ```text
 命令解析：mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest
 工具/策略：mvn test -Dtest=ToolRegistryTest,TurnToolPolicyTest,ApprovalPolicyTest
+LLM/结构化输出：mvn test -Dtest=StructuredJsonExecutorTest,StructuredOutputRequestTest,ExecutionModeRouterTest,PlannerTest,ReviewResponseParserTest,SubAgentStepReviewerTest
 计划/多 Agent：mvn test -Dtest=ExecutionPlanTest,PlanStateStoreTest,PlannerTest,PlanExecuteAgentTest,PlanExecuteRecoveryTest,PlanConversationReconcilerTest,MainPlanAgentFactoryTest,StepBriefingTest,SubAgentStepReviewerTest,TaskWorkspaceDiffTrackerTest,TaskEvidenceCollectorTest,PlanDiffEvidenceIntegrationTest,PipelineOptionsTest
 Memory/RAG：mvn test -Dtest=MemoryManagerTest,ConversationHistoryCompactorTest,VectorStoreTest,CodeIndexTest
 MCP/Web：mvn test -Dtest=McpSchemaSanitizerTest,JsonRpcClientTest,NetworkPolicyTest,WebFetcherTest

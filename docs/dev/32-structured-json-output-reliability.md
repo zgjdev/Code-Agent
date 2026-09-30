@@ -1,6 +1,6 @@
 # Structured JSON Output 可靠性改造
 
-> 状态：实现与静态审查完成；当前执行环境无 Maven 且无法解析 github.com，仓库未配置可用 GitHub Actions，因此 Maven 针对性/quick/全量/package 与真实 `git diff --check` 尚未实际运行。
+> 状态：实现、静态审查与动态验证完成。GitHub Actions 临时验证 run `36737152077` 已通过针对性测试、quick 回归、全量测试、`mvn clean package` 与 `git diff --check`；临时验证 workflow 在验收后从功能分支删除。
 >
 > 基线：`main`
 >
@@ -386,11 +386,11 @@ git diff --check
 - [x] Router 最终失败仍 fallback ReAct。
 - [x] Reviewer 自然语言关键词不再绕过 JSON contract。
 - [x] 不改变工具权限、URL authority、HITL 和持久化 schema。
-- [ ] 针对性测试通过（当前执行环境未能运行 Maven）。
-- [ ] quick 回归通过（当前执行环境未能运行 Maven）。
-- [ ] 全量测试通过（当前执行环境未能运行 Maven）。
-- [ ] package 通过（当前执行环境未能运行 Maven）。
-- [ ] `git diff --check` 通过（当前环境无法获得本地 Git checkout；已另做文本静态检查）。
+- [x] 针对性测试通过（GitHub Actions run `36737152077`）。
+- [x] quick 回归通过（GitHub Actions run `36737152077`）。
+- [x] 全量测试通过（GitHub Actions run `36737152077`）。
+- [x] package 通过（GitHub Actions run `36737152077`）。
+- [x] `git diff --check` 通过（GitHub Actions run `36737152077`）。
 - [x] 实施结果和已知限制回填本文。
 
 ## 6. 实施记录与验证边界
@@ -439,14 +439,21 @@ Jackson 单 JSON 文档解析
 - 未修改 Session/Plan 数据库 schema、工具权限链或持久化格式。
 - 对分支相对 `main` 的 23 个变更文件逐一做文本静态检查：未发现 Git 冲突标记、行尾空白、空文件或缺失末尾换行。
 
-### 6.3 未能执行的动态验证
+### 6.3 动态验证结果
 
-当前执行环境存在两个客观限制：
+由于当前交互运行环境无法直接拉取 GitHub 仓库执行 Maven，本次在功能分支临时加入仅该分支触发的 GitHub Actions workflow 完成真实构建验证。第一轮验证暴露 Reviewer 兼容性回归：旧 Reviewer contract 允许只返回 `approved + issues`，而初版实现把 `summary/suggestions` 也设为必填，导致多余 repair 消耗测试预设响应。修正为“`approved` 必填，其余字段可选但出现时类型必须正确”后重新执行验证。
 
-1. 本地运行环境没有可用的 `mvn`。
-2. 尝试获取仓库本地 checkout 时，运行环境无法解析 `github.com`；仓库当前也没有可供该分支自动执行的 GitHub Actions workflow。
+最终 GitHub Actions run `36737152077` 结果：
 
-因此本文不能声称以下命令已经通过：
+```text
+Targeted tests   success
+Quick regression success
+Full tests       success
+Package          success
+Diff check       success
+```
+
+实际执行命令：
 
 ```bash
 mvn test -DskipTests=false \
@@ -454,7 +461,7 @@ mvn test -DskipTests=false \
 mvn test -Pquick
 mvn test -DskipTests=false
 mvn clean package
-git diff --check
+git diff --check origin/main...HEAD
 ```
 
-这属于验证环境限制，不代表这些命令失败。后续在具备 Maven 的正常开发环境中，应先执行上述命令；任何失败都应继续在本分支修正后再合并。
+其中最终 diff check 使用完整 checkout（`fetch-depth: 0`）确保 `origin/main` 可见。临时 `.github/workflows/structured-json-verify.yml` 仅用于本次验收，验证完成后从功能分支删除，不进入最终合并内容。

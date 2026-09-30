@@ -184,22 +184,22 @@ execute_command("mvn test")
 4. 重构 `ToolRegistry.executeTools()` 使用批次调度并共享总 timeout deadline。
 5. 同步 `AGENTS.md` 的工具并发约束。
 6. 验证：
-   - `mvn test -Dtest=ToolResourceSchedulingTest,ToolRegistryTest`
+   - `mvn test -Dtest=ToolResourceSchedulingTest,ToolResourceClaimResolverTest,ToolConflictAwareBatchSelectorTest,ToolRegistryTest`
    - `mvn test -Pquick`
    - `git diff --check`（如执行环境可用）
 
 ## 5. 验收清单
 
-- [ ] 不新增任何资源判断 LLM 调用。
-- [ ] 文件路径 claim 来自 Tool Call 参数并经过 PathGuard。
-- [ ] 同路径写读、重叠路径写写不会并发。
-- [ ] `execute_command` / `revert_turn` 不与 workspace 文件访问并发。
-- [ ] 不同路径写入仍可并发。
-- [ ] 只读调用仍可并发。
-- [ ] 未知 MCP 默认保守串行外部副作用。
-- [ ] Browser 原整批串行语义不回退。
-- [ ] 返回结果保持原 tool call 顺序。
-- [ ] 取消和 timeout 行为无回归。
+- [x] 不新增任何资源判断 LLM 调用。
+- [x] 文件路径 claim 来自 Tool Call 参数并经过 PathGuard。
+- [x] 同路径写读、重叠路径写写不会并发。
+- [x] `execute_command` / `revert_turn` 不与 workspace 文件访问并发。
+- [x] 不同路径写入仍可并发。
+- [x] 只读调用仍可并发。
+- [x] 未知 MCP 默认保守串行外部副作用。
+- [x] Browser 原整批串行语义不回退。
+- [x] 返回结果保持原 tool call 顺序。
+- [x] 取消和 timeout 行为无回归。
 
 
 ## 6. 实施记录
@@ -209,3 +209,15 @@ execute_command("mvn test")
 - 已增加 `ToolConflictAwareBatchSelector`：稳定前缀分批，不允许后续调用越过前面的冲突调用。
 - `ToolRegistry.executeTools()` 保留 Browser 整批串行；非 Browser 调用按资源分批，批内最多 4 并发，多个批次共享原有 batch timeout 总预算。
 - README 与 AGENTS.md 已同步新的同轮工具并发语义。
+
+
+## 7. 验证结果
+
+GitHub Actions 临时分支验证 run `36745940725`（完成后临时 workflow 从最终树删除）：
+
+- `mvn -B test -Dtest=ToolResourceSchedulingTest,ToolResourceClaimResolverTest,ToolConflictAwareBatchSelectorTest,ToolRegistryTest`：通过。
+- `mvn -B test -Pquick`：通过。
+- `git diff --check origin/main...HEAD`：通过。
+- Actions 最终状态：`completed / success`。
+
+验证覆盖了同路径 write/read 串行、command 与 workspace read 串行、目录读与后代写串行、不同路径写并发、稳定分批顺序、资源 claim 推导，以及原 ToolRegistry 回归测试。Browser 仍沿用原整批串行分支；取消与 timeout 由既有 ToolRegistry 回归和 quick suite 共同覆盖。

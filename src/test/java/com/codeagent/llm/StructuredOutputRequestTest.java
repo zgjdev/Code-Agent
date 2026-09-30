@@ -35,6 +35,20 @@ class StructuredOutputRequestTest {
     }
 
     @Test
+    void providerClassesDeclareOnlyVerifiedCapabilities() {
+        assertEquals(StructuredOutputCapability.JSON_SCHEMA,
+                new HunyuanClient("test-key").structuredOutputCapability());
+        assertEquals(StructuredOutputCapability.JSON_OBJECT,
+                new DeepSeekClient("test-key").structuredOutputCapability());
+        assertEquals(StructuredOutputCapability.JSON_OBJECT,
+                new StepClient("test-key").structuredOutputCapability());
+        assertEquals(StructuredOutputCapability.NONE,
+                new GLMClient("test-key").structuredOutputCapability());
+        assertEquals(StructuredOutputCapability.NONE,
+                new KimiClient("test-key").structuredOutputCapability());
+    }
+
+    @Test
     void jsonObjectCapabilitySendsNativeResponseFormat() throws Exception {
         server.enqueue(success());
         TestClient client = client(StructuredOutputCapability.JSON_OBJECT);

@@ -21,8 +21,16 @@ class ReviewResponseParserTest {
     }
 
     @Test
-    void rejectsWhenRequiredFieldsMissing() {
-        assertFalse(ReviewResponseParser.parseApproved("{\"approved\":true,\"issues\":[]}"));
+    void acceptsMinimalApprovedContractForLegacyReviewerCompatibility() {
+        assertTrue(ReviewResponseParser.parseApproved("{\"approved\":true,\"issues\":[]}"));
+    }
+
+    @Test
+    void rejectsWrongOptionalFieldTypes() {
+        assertFalse(ReviewResponseParser.parseApproved(
+                "{\"approved\":true,\"summary\":[],\"issues\":[]}"));
+        assertFalse(ReviewResponseParser.parseApproved(
+                "{\"approved\":true,\"issues\":\"none\"}"));
     }
 
     @Test

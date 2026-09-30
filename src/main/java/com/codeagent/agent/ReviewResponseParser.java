@@ -47,11 +47,11 @@ final class ReviewResponseParser {
         if (approved == null || !approved.isBoolean()) {
             throw new IOException("Reviewer field 'approved' must be boolean");
         }
-        if (summary == null || !summary.isTextual()) {
-            throw new IOException("Reviewer field 'summary' must be string");
+        if (summary != null && !summary.isNull() && !summary.isTextual()) {
+            throw new IOException("Reviewer field 'summary' must be string when present");
         }
-        validateTextArray(issues, "issues");
-        validateTextArray(suggestions, "suggestions");
+        validateOptionalTextArray(issues, "issues");
+        validateOptionalTextArray(suggestions, "suggestions");
         return root;
     }
 
@@ -93,9 +93,12 @@ final class ReviewResponseParser {
         return "审查未通过，请改进执行结果";
     }
 
-    private static void validateTextArray(JsonNode node, String field) throws IOException {
-        if (node == null || !node.isArray()) {
-            throw new IOException("Reviewer field '" + field + "' must be an array");
+    private static void validateOptionalTextArray(JsonNode node, String field) throws IOException {
+        if (node == null || node.isNull()) {
+            return;
+        }
+        if (!node.isArray()) {
+            throw new IOException("Reviewer field '" + field + "' must be an array when present");
         }
         for (JsonNode item : node) {
             if (!item.isTextual()) {
@@ -116,7 +119,7 @@ final class ReviewResponseParser {
         properties.putObject("suggestions")
                 .put("type", "array")
                 .putObject("items").put("type", "string");
-        root.putArray("required").add("approved").add("summary").add("issues").add("suggestions");
+        root.putArray("required").add("approved");
         root.put("additionalProperties", false);
         return root;
     }

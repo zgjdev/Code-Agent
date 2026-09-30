@@ -197,7 +197,7 @@ public class Planner {
             idMapping.put(originalId, newId);
 
             String typeStr = typeNode == null ? "" : typeNode.asText();
-            Task.TaskType type = parseTaskType(typeStr);
+            Task.TaskType type = parseTaskType(typeStr, originalId);
 
             try {
                 TaskResourceClaims resourceClaims = TaskResourceClaims.normalize(
@@ -296,14 +296,17 @@ public class Planner {
     /**
      * 解析任务类型
      */
-    private Task.TaskType parseTaskType(String typeStr) {
-        return switch (typeStr.toUpperCase()) {
+    private Task.TaskType parseTaskType(String typeStr, String taskId) throws IOException {
+        if (typeStr == null || typeStr.isBlank()) {
+            return Task.TaskType.ANALYSIS;
+        }
+        return switch (typeStr.trim().toUpperCase(Locale.ROOT)) {
             case "FILE_READ" -> Task.TaskType.FILE_READ;
             case "FILE_WRITE" -> Task.TaskType.FILE_WRITE;
             case "COMMAND" -> Task.TaskType.COMMAND;
             case "ANALYSIS" -> Task.TaskType.ANALYSIS;
             case "VERIFICATION" -> Task.TaskType.VERIFICATION;
-            default -> Task.TaskType.ANALYSIS;
+            default -> throw new IOException("Unknown planner task type '" + typeStr + "' for " + taskId);
         };
     }
 

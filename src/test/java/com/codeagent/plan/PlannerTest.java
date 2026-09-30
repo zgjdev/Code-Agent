@@ -106,6 +106,22 @@ class PlannerTest {
     }
 
     @Test
+    void repairsExplicitUnknownTaskTypeInsteadOfSilentlyDowngrading() throws Exception {
+        SequenceGLMClient client = new SequenceGLMClient(
+                "{\"summary\":\"bad\",\"tasks\":[{\"id\":\"t1\","
+                        + "\"description\":\"执行任务\",\"type\":\"MAGIC\",\"dependencies\":[]}]}",
+                "{\"summary\":\"fixed\",\"tasks\":[{\"id\":\"t1\","
+                        + "\"description\":\"执行任务\",\"type\":\"COMMAND\",\"dependencies\":[]}]}");
+        Planner planner = new Planner(client);
+
+        ExecutionPlan plan = planner.createPlan("先执行任务然后验证结果");
+
+        assertEquals("fixed", plan.getSummary());
+        assertEquals(Task.TaskType.COMMAND, plan.getTask("task_1").getType());
+        assertEquals(2, client.calls);
+    }
+
+    @Test
     void parsesPlanWrappedInMarkdownFence() throws Exception {
         StubGLMClient client = new StubGLMClient("""
                 ```json

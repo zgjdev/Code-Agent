@@ -86,6 +86,20 @@ class StructuredOutputRequestTest {
     }
 
     @Test
+    void schemaValidationErrorDoesNotMasqueradeAsUnsupportedCapability() throws Exception {
+        server.enqueue(new MockResponse()
+                .setResponseCode(400)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"error\":{\"message\":\"invalid json_schema: required field missing\"}}"));
+        TestClient client = client(StructuredOutputCapability.JSON_SCHEMA);
+
+        org.junit.jupiter.api.Assertions.assertThrows(IOException.class,
+                () -> client.chatStructured(messages(), null, spec(), LlmClient.StreamListener.NO_OP));
+
+        assertEquals(1, server.getRequestCount());
+    }
+
+    @Test
     void explicitUnsupportedResponseFormatFallsBackToPlainChat() throws Exception {
         server.enqueue(new MockResponse()
                 .setResponseCode(400)

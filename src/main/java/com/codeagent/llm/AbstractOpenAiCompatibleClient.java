@@ -432,10 +432,17 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             return false;
         }
         String message = failure.getMessage() == null ? "" : failure.getMessage().toLowerCase(Locale.ROOT);
-        return message.contains("response_format")
+        boolean mentionsStructuredParameter = message.contains("response_format")
                 || message.contains("response format")
                 || message.contains("json_schema")
                 || message.contains("json schema");
+        boolean explicitlyUnsupported = message.contains("unsupported")
+                || message.contains("not supported")
+                || message.contains("does not support")
+                || message.contains("unknown parameter")
+                || message.contains("unrecognized parameter")
+                || message.contains("unexpected parameter");
+        return mentionsStructuredParameter && explicitlyUnsupported;
     }
 
     protected void customizeRequestBody(ObjectNode requestBody) {

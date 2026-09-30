@@ -404,6 +404,7 @@ git diff --check
 - `9fdf86c`：Planner / Mode Router / Reviewer 接入统一结构化执行器，并收紧 Reviewer fail-closed 语义。
 - `1d1781d`：补充 Provider capability 声明测试，防止未验证 Provider 被误设为原生 structured output。
 - `2359724`：收紧 native fallback 判定，并让 Planner 显式未知 task type 进入 repair，而不是静默降级。
+- `f2dfaa3`：同步 README、AGENTS、架构参考与本文实施/验证状态。
 
 实现后的数据流为：
 
@@ -436,6 +437,7 @@ Jackson 单 JSON 文档解析
 - Planner 保留缺失 `type` → `ANALYSIS` 的 legacy 行为；显式未知 type、重复 Task id、未知依赖和 malformed dependency 都会确定性拒绝并触发 repair。
 - Reviewer 不再通过自然语言“通过/合格”等关键词推断批准；连续结构化失败进入原有 `ERROR → UNAVAILABLE` 路径。
 - 未修改 Session/Plan 数据库 schema、工具权限链或持久化格式。
+- 对分支相对 `main` 的 23 个变更文件逐一做文本静态检查：未发现 Git 冲突标记、行尾空白、空文件或缺失末尾换行。
 
 ### 6.3 未能执行的动态验证
 

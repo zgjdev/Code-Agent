@@ -1,0 +1,30 @@
+name: Temporary tool resource scheduling validation
+
+on:
+  push:
+    branches:
+      - "fix/react-tool-resource-conflict-scheduling"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Targeted tool scheduling tests
+        run: mvn -B test -Dtest=ToolResourceSchedulingTest,ToolResourceClaimResolverTest,ToolConflictAwareBatchSelectorTest,ToolRegistryTest
+      - name: Quick regression
+        run: mvn -B test -Pquick
+      - name: Diff check
+        run: |
+          git fetch origin main
+          git diff --check origin/main...HEAD

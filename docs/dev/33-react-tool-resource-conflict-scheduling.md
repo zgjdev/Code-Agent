@@ -200,3 +200,12 @@ execute_command("mvn test")
 - [ ] Browser 原整批串行语义不回退。
 - [ ] 返回结果保持原 tool call 顺序。
 - [ ] 取消和 timeout 行为无回归。
+
+
+## 6. 实施记录
+
+- 已增加 `ToolResourceClaim`：Tool 层独立资源模型，不反向依赖 Plan 包。
+- 已增加 `ToolResourceClaimResolver`：只读取工具名和实际 JSON 参数；文件路径复用 `PathGuard`，不增加 LLM 调用。
+- 已增加 `ToolConflictAwareBatchSelector`：稳定前缀分批，不允许后续调用越过前面的冲突调用。
+- `ToolRegistry.executeTools()` 保留 Browser 整批串行；非 Browser 调用按资源分批，批内最多 4 并发，多个批次共享原有 batch timeout 总预算。
+- README 与 AGENTS.md 已同步新的同轮工具并发语义。

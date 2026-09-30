@@ -46,6 +46,11 @@ public class StepClient extends AbstractOpenAiCompatibleClient {
     }
 
     @Override
+    public StructuredOutputCapability structuredOutputCapability() {
+        return StructuredOutputCapability.JSON_OBJECT;
+    }
+
+    @Override
     public int maxContextWindow() {
         return 256_000;
     }

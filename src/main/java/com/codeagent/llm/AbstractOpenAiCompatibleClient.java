@@ -63,9 +63,35 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
 
     @Override
     public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+        return chatInternal(messages, tools, null, listener);
+    }
+
+    @Override
+    public ChatResponse chatStructured(List<Message> messages, List<Tool> tools,
+                                       StructuredOutputSpec spec,
+                                       StreamListener listener) throws IOException {
+        if (spec == null || structuredOutputCapability() == StructuredOutputCapability.NONE) {
+            return chat(messages, tools, listener);
+        }
+        try {
+            return chatInternal(messages, tools, spec, listener);
+        } catch (LlmHttpException failure) {
+            if (!isStructuredOutputUnsupported(failure)) {
+                throw failure;
+            }
+            log.warn("Provider endpoint rejected native structured output; falling back to plain chat "
+                            + "provider={} model={} capability={} cause={}",
+                    getProviderName(), getModelName(), structuredOutputCapability(), failure.getMessage());
+            return chatInternal(messages, tools, null, listener);
+        }
+    }
+
+    private ChatResponse chatInternal(List<Message> messages, List<Tool> tools,
+                                      StructuredOutputSpec structuredOutput,
+                                      StreamListener listener) throws IOException {
         StreamListener streamListener = listener == null ? StreamListener.NO_OP : listener;
         RequestBody body = RequestBody.create(
-                buildRequestBody(messages, tools).toString(),
+                buildRequestBody(messages, tools, structuredOutput).toString(),
                 MediaType.parse("application/json")
         );
 
@@ -328,7 +354,8 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
         return cached;
     }
 
-    private ObjectNode buildRequestBody(List<Message> messages, List<Tool> tools) {
+    private ObjectNode buildRequestBody(List<Message> messages, List<Tool> tools,
+                                        StructuredOutputSpec structuredOutput) {
         ObjectNode requestBody = mapper.createObjectNode();
         requestBody.put("model", getModel());
         requestBody.put("stream", true);
@@ -373,8 +400,42 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 functionNode.set("parameters", tool.parameters());
             }
         }
+        appendResponseFormat(requestBody, structuredOutput);
         customizeRequestBody(requestBody);
         return requestBody;
+    }
+
+    private void appendResponseFormat(ObjectNode requestBody, StructuredOutputSpec spec) {
+        if (spec == null) {
+            return;
+        }
+        StructuredOutputCapability capability = structuredOutputCapability();
+        if (capability == StructuredOutputCapability.NONE) {
+            return;
+        }
+
+        ObjectNode responseFormat = requestBody.putObject("response_format");
+        if (capability == StructuredOutputCapability.JSON_SCHEMA) {
+            responseFormat.put("type", "json_schema");
+            ObjectNode jsonSchema = responseFormat.putObject("json_schema");
+            jsonSchema.put("name", spec.name());
+            jsonSchema.put("strict", spec.strict());
+            jsonSchema.set("schema", spec.schema());
+            return;
+        }
+        responseFormat.put("type", "json_object");
+    }
+
+    private boolean isStructuredOutputUnsupported(LlmHttpException failure) {
+        int status = failure.statusCode();
+        if (status < 400 || status >= 500) {
+            return false;
+        }
+        String message = failure.getMessage() == null ? "" : failure.getMessage().toLowerCase(Locale.ROOT);
+        return message.contains("response_format")
+                || message.contains("response format")
+                || message.contains("json_schema")
+                || message.contains("json schema");
     }
 
     protected void customizeRequestBody(ObjectNode requestBody) {

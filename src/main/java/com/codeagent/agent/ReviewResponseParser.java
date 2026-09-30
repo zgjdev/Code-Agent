@@ -1,19 +1,58 @@
 package com.codeagent.agent;
 
+import com.codeagent.llm.StructuredOutputSpec;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.util.Set;
+
 /**
- * 解析 Reviewer 的输出。失败关闭：无法确认通过时一律判为不通过。
+ * 解析 Reviewer 的结构化输出。失败关闭：无法确认通过时一律判为不通过。
  */
 final class ReviewResponseParser {
 
     private static final Logger log = LoggerFactory.getLogger(ReviewResponseParser.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Set<String> ALLOWED_FIELDS =
+            Set.of("approved", "summary", "issues", "suggestions");
+    private static final StructuredOutputSpec OUTPUT_SPEC =
+            new StructuredOutputSpec("step_review", buildSchema(), true);
 
     private ReviewResponseParser() {
+    }
+
+    static StructuredOutputSpec structuredOutputSpec() {
+        return OUTPUT_SPEC;
+    }
+
+    static JsonNode validateStructured(JsonNode root) throws IOException {
+        if (root == null || !root.isObject()) {
+            throw new IOException("Reviewer response must be a JSON object");
+        }
+        var fields = root.fieldNames();
+        while (fields.hasNext()) {
+            String field = fields.next();
+            if (!ALLOWED_FIELDS.contains(field)) {
+                throw new IOException("Unexpected reviewer field: " + field);
+            }
+        }
+
+        JsonNode approved = root.get("approved");
+        JsonNode summary = root.get("summary");
+        JsonNode issues = root.get("issues");
+        JsonNode suggestions = root.get("suggestions");
+        if (approved == null || !approved.isBoolean()) {
+            throw new IOException("Reviewer field 'approved' must be boolean");
+        }
+        if (summary == null || !summary.isTextual()) {
+            throw new IOException("Reviewer field 'summary' must be string");
+        }
+        validateTextArray(issues, "issues");
+        validateTextArray(suggestions, "suggestions");
+        return root;
     }
 
     static boolean parseApproved(String reviewContent) {
@@ -22,29 +61,11 @@ final class ReviewResponseParser {
             return false;
         }
         try {
-            JsonNode root = MAPPER.readTree(stripFences(reviewContent));
-            JsonNode approvedNode = root.path("approved");
-            if (approvedNode.isMissingNode() || approvedNode.isNull()) {
-                log.warn("Reviewer JSON missing 'approved' field, defaulting to rejected");
-                return false;
-            }
-            return approvedNode.asBoolean(false);
+            JsonNode root = validateStructured(MAPPER.readTree(stripFences(reviewContent)));
+            return root.path("approved").asBoolean(false);
         } catch (Exception e) {
-            // 无法解析 JSON：必须同时不含否定关键词且含有肯定关键词，才视为通过。
-            String lower = reviewContent.toLowerCase();
-            boolean hasNegativeKeyword = lower.contains("未通过") || lower.contains("不通过")
-                    || lower.contains("不合格") || lower.contains("有问题")
-                    || lower.contains("\"approved\": false") || lower.contains("\"approved\":false");
-            boolean hasPositiveKeyword = lower.contains("通过") || lower.contains("合格")
-                    || lower.contains("\"approved\": true") || lower.contains("\"approved\":true");
-            if (hasNegativeKeyword) {
-                return false;
-            }
-            if (!hasPositiveKeyword) {
-                log.warn("Reviewer output unparseable and contains no explicit approval, defaulting to rejected");
-                return false;
-            }
-            return true;
+            log.warn("Reviewer output is not valid structured JSON, defaulting to rejected: {}", e.getMessage());
+            return false;
         }
     }
 
@@ -53,7 +74,7 @@ final class ReviewResponseParser {
             return "";
         }
         try {
-            JsonNode root = MAPPER.readTree(stripFences(reviewContent));
+            JsonNode root = validateStructured(MAPPER.readTree(stripFences(reviewContent)));
             String issues = joinArray(root.path("issues"));
             if (!issues.isEmpty()) {
                 return issues;
@@ -72,8 +93,39 @@ final class ReviewResponseParser {
         return "审查未通过，请改进执行结果";
     }
 
+    private static void validateTextArray(JsonNode node, String field) throws IOException {
+        if (node == null || !node.isArray()) {
+            throw new IOException("Reviewer field '" + field + "' must be an array");
+        }
+        for (JsonNode item : node) {
+            if (!item.isTextual()) {
+                throw new IOException("Reviewer field '" + field + "' must contain only strings");
+            }
+        }
+    }
+
+    private static JsonNode buildSchema() {
+        var root = MAPPER.createObjectNode();
+        root.put("type", "object");
+        var properties = root.putObject("properties");
+        properties.putObject("approved").put("type", "boolean");
+        properties.putObject("summary").put("type", "string");
+        properties.putObject("issues")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
+        properties.putObject("suggestions")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
+        root.putArray("required").add("approved").add("summary").add("issues").add("suggestions");
+        root.put("additionalProperties", false);
+        return root;
+    }
+
     private static String stripFences(String content) {
-        return content.replaceAll("```json\\s*", "").replaceAll("```\\s*", "").trim();
+        String fence = String.valueOf((char) 96).repeat(3);
+        return content.replaceAll(fence + "json\\s*", "")
+                .replaceAll(fence + "\\s*", "")
+                .trim();
     }
 
     private static String joinArray(JsonNode node) {

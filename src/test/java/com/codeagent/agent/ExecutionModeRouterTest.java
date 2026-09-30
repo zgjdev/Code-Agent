@@ -10,7 +10,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.List;
+import java.util.Queue;
 import java.util.concurrent.CancellationException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -32,6 +34,20 @@ class ExecutionModeRouterTest {
         assertEquals(ExecutionMode.PLAN, router(planClient).route("task", List.of()).mode());
         assertNull(reactClient.tools);
         assertNull(planClient.tools);
+    }
+
+    @Test
+    void repairsOneInvalidStructuredResponseBeforeFallingBack() {
+        Queue<LlmClient.ChatResponse> responses = new ArrayDeque<>(List.of(
+                response("{\"mode\":\"PLAN\"}"),
+                response("{\"mode\":\"plan\"}")));
+        StubClient client = new StubClient(responses::remove);
+
+        RoutingDecision decision = router(client).route("task", List.of());
+
+        assertEquals(ExecutionMode.PLAN, decision.mode());
+        assertEquals(RoutingSource.AUTO_MODEL, decision.source());
+        assertEquals(2, client.calls);
     }
 
     @Test
@@ -122,6 +138,7 @@ class ExecutionModeRouterTest {
     private static class StubClient implements LlmClient {
         private final ResponseSupplier supplier;
         private List<Tool> tools;
+        private int calls;
 
         private StubClient(LlmClient.ChatResponse response) {
             this(() -> response);
@@ -137,6 +154,7 @@ class ExecutionModeRouterTest {
 
         @Override
         public ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException {
+            calls++;
             this.tools = tools;
             return supplier.get();
         }

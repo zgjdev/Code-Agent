@@ -13,6 +13,7 @@ import com.codeagent.context.RequestSnapshot;
 import com.codeagent.context.RequestSnapshotFactory;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.llm.LlmTraceLogger;
+import com.codeagent.llm.StructuredJsonExecutor;
 import com.codeagent.lsp.LspDiagnosticReport;
 import com.codeagent.memory.AutoCompactionManager;
 import com.codeagent.context.ContextProfile;
@@ -70,6 +71,7 @@ public class SubAgent {
     private final ThreadLocal<SessionStore.SessionHandle> childSession = new ThreadLocal<>();
     private TurnToolPolicy turnToolPolicy;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private final StructuredJsonExecutor structuredJsonExecutor = new StructuredJsonExecutor();
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
         this.name = name;
@@ -344,11 +346,24 @@ public class SubAgent {
                     requestSnapshot = requestSnapshotFactory.capture(
                             llmClient, conversationHistory, toolExposure.definitions(), historyVersion);
                 }
-                LlmClient.ChatResponse response = llmClient.chat(
-                        conversationHistory,
-                        toolExposure.definitions(),
-                        streamRenderer
-                );
+                LlmClient.ChatResponse response;
+                if (role == AgentRole.REVIEWER) {
+                    response = structuredJsonExecutor.execute(
+                            llmClient,
+                            conversationHistory,
+                            toolExposure.definitions(),
+                            ReviewResponseParser.structuredOutputSpec(),
+                            true,
+                            ReviewResponseParser::validateStructured,
+                            streamRenderer
+                    ).response();
+                } else {
+                    response = llmClient.chat(
+                            conversationHistory,
+                            toolExposure.definitions(),
+                            streamRenderer
+                    );
+                }
                 LlmTraceLogger.logReasoning(log,
                         "sub-agent name=" + name + " role=" + role + " iteration=" + budget.iteration(),
                         llmClient,

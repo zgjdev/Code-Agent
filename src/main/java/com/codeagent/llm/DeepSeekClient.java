@@ -64,6 +64,11 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
     }
 
     @Override
+    public StructuredOutputCapability structuredOutputCapability() {
+        return StructuredOutputCapability.JSON_OBJECT;
+    }
+
+    @Override
     public boolean supportsImageInput() {
         return false;
     }

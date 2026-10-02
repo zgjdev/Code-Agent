@@ -4,6 +4,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Map;
@@ -12,6 +13,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -559,4 +561,189 @@ class LongTermMemoryTest {
         assertEquals("global", LongTermMemory.scopeOf(legacy));
         assertTrue(LongTermMemory.isVisibleInProject(legacy, "/repo/current"));
     }
+
+    @Test
+    void independentInstancesShouldNotLoseEachOthersWrites() {
+        LongTermMemory first = new LongTermMemory(tempDir.toFile());
+        LongTermMemory second = new LongTermMemory(tempDir.toFile());
+
+        first.store(new MemoryEntry(
+                "first",
+                "第一个进程写入的事实",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"),
+                6
+        ));
+        second.store(new MemoryEntry(
+                "second",
+                "第二个进程写入的事实",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"),
+                6
+        ));
+
+        LongTermMemory reloaded = new LongTermMemory(tempDir.toFile());
+        assertEquals(2, reloaded.size());
+        assertTrue(reloaded.retrieve("first").isPresent());
+        assertTrue(reloaded.retrieve("second").isPresent());
+        assertTrue(first.retrieve("second").isPresent(),
+                "已有实例也应从 SQLite 看到其他实例已提交的写入");
+    }
+
+    @Test
+    void equivalentWritesAcrossIndependentInstancesShouldBeAtomic() throws Exception {
+        LongTermMemory first = new LongTermMemory(tempDir.toFile());
+        LongTermMemory second = new LongTermMemory(tempDir.toFile());
+        Map<String, String> domain = Map.of(
+                "scope", "project",
+                "project", "/repo/current"
+        );
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(2);
+        AtomicInteger successfulStores = new AtomicInteger();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            executor.submit(() -> {
+                ready.countDown();
+                try {
+                    start.await();
+                    if (first.storeIfNovel(new MemoryEntry(
+                            "first-duplicate",
+                            "并发跨实例保存时只保留这一条事实",
+                            MemoryEntry.MemoryType.FACT,
+                            domain,
+                            8
+                    ))) {
+                        successfulStores.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    done.countDown();
+                }
+            });
+            executor.submit(() -> {
+                ready.countDown();
+                try {
+                    start.await();
+                    if (second.storeIfNovel(new MemoryEntry(
+                            "second-duplicate",
+                            "并发跨实例保存时只保留这一条事实",
+                            MemoryEntry.MemoryType.FACT,
+                            domain,
+                            8
+                    ))) {
+                        successfulStores.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    done.countDown();
+                }
+            });
+
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            start.countDown();
+            assertTrue(done.await(10, TimeUnit.SECONDS));
+        } finally {
+            executor.shutdownNow();
+        }
+
+        LongTermMemory reloaded = new LongTermMemory(tempDir.toFile());
+        assertEquals(1, successfulStores.get());
+        assertEquals(1, reloaded.size());
+        assertEquals(8, reloaded.getTokenCount());
+    }
+
+    @Test
+    void freshStorageUsesSqliteWithoutCreatingLegacyJson() {
+        assertTrue(Files.exists(tempDir.resolve("memory.db")));
+        assertFalse(Files.exists(tempDir.resolve("long_term_memory.json")));
+
+        memory.store(new MemoryEntry(
+                "sqlite-only",
+                "新的长期记忆只写入 SQLite",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"),
+                7
+        ));
+
+        assertTrue(Files.exists(tempDir.resolve("memory.db")));
+        assertFalse(Files.exists(tempDir.resolve("long_term_memory.json")));
+    }
+
+    @Test
+    void shouldMigrateLegacyJsonExactlyOnce() throws Exception {
+        Path legacyDir = tempDir.resolve("legacy");
+        Files.createDirectories(legacyDir);
+        Path legacyJson = legacyDir.resolve("long_term_memory.json");
+        Files.writeString(legacyJson, """
+                [
+                  {
+                    "id": "legacy-1",
+                    "content": "从旧 JSON 迁移的事实",
+                    "type": "FACT",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "metadata": {
+                      "scope": "global"
+                    },
+                    "tokenCount": 9
+                  }
+                ]
+                """);
+
+        LongTermMemory migrated = new LongTermMemory(legacyDir.toFile());
+        assertTrue(Files.exists(legacyDir.resolve("memory.db")));
+        assertTrue(migrated.retrieve("legacy-1").isPresent());
+        assertEquals(Instant.parse("2026-01-01T00:00:00Z"),
+                migrated.retrieve("legacy-1").orElseThrow().getTimestamp());
+
+        Files.writeString(legacyJson, """
+                [
+                  {
+                    "id": "must-not-reimport",
+                    "content": "迁移完成后不应再次导入 JSON",
+                    "type": "FACT",
+                    "timestamp": "2026-02-01T00:00:00Z",
+                    "metadata": {
+                      "scope": "global"
+                    },
+                    "tokenCount": 9
+                  }
+                ]
+                """);
+
+        LongTermMemory reopened = new LongTermMemory(legacyDir.toFile());
+        assertTrue(reopened.retrieve("legacy-1").isPresent());
+        assertFalse(reopened.retrieve("must-not-reimport").isPresent());
+        assertEquals(1, reopened.size());
+    }
+
+    @Test
+    void supersedeCommittedByOneInstanceIsVisibleToAnother() {
+        LongTermMemory first = new LongTermMemory(tempDir.toFile());
+        LongTermMemory second = new LongTermMemory(tempDir.toFile());
+        first.store(new MemoryEntry(
+                "old-shared",
+                "用户偏好 Java",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"),
+                5
+        ));
+
+        assertTrue(second.supersede("old-shared", new MemoryEntry(
+                "new-shared",
+                "用户偏好 Python",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"),
+                5
+        )));
+
+        assertEquals("superseded",
+                LongTermMemory.statusOf(first.retrieve("old-shared").orElseThrow()));
+        assertTrue(first.retrieve("new-shared").isPresent());
+    }
+
+
 }

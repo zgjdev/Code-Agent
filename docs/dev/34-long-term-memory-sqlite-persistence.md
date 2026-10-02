@@ -263,22 +263,38 @@ embedding 仍是可重建派生数据，不属于本次事实源迁移。
 
 ## 5. 验收清单
 
-- [ ] 长期记忆唯一事实源为 `memory.db`。
-- [ ] 单条写入不再整体重写全部长期记忆。
-- [ ] 两个独立 `LongTermMemory` 实例不会互相覆盖已提交写入。
-- [ ] exact duplicate 的检查 + 写入具备跨进程原子性。
-- [ ] `SUPERSEDE` 在单个 SQLite transaction 内完成。
-- [ ] WAL 与 busy timeout 已配置。
-- [ ] 旧 JSON 可一次性迁移且失败时不会静默丢数据。
-- [ ] scope/status/lastConfirmedAt/supersede 兼容原语义。
-- [ ] `MemoryEmbeddingCache` 仍仅为进程内缓存。
-- [ ] 不新增 embedding 表或向量索引。
-- [ ] Memory targeted tests、quick regression 与 diff check 通过。
+- [x] 长期记忆唯一事实源为 `memory.db`。
+- [x] 单条写入不再整体重写全部长期记忆。
+- [x] 两个独立 `LongTermMemory` 实例不会互相覆盖已提交写入。
+- [x] exact duplicate 的检查 + 写入具备跨进程原子性。
+- [x] `SUPERSEDE` 在单个 SQLite transaction 内完成。
+- [x] WAL 与 busy timeout 已配置。
+- [x] 旧 JSON 可一次性迁移且失败时不会静默丢数据。
+- [x] scope/status/lastConfirmedAt/supersede 兼容原语义。
+- [x] `MemoryEmbeddingCache` 仍仅为进程内缓存。
+- [x] 不新增 embedding 表或向量索引。
+- [x] Memory targeted tests、quick regression 与 diff check 通过。
 
 ## 6. 实施记录
 
-待实现后补充。
+- 新增 `SqliteLongTermMemoryRepository`：初始化 `memory.db` schema、WAL/5s busy timeout、行级读写、事务以及 legacy JSON 迁移。
+- 新增 `LongTermMemorySemantics`：集中维护 scope、active/superseded、`lastConfirmedAt` 与 metadata 兼容规则。
+- `LongTermMemory` 已移除事实 `ConcurrentHashMap` 与整文件 JSON 保存；`retrieve/getAll/getActiveVisible/getByType/size/getTokenCount` 均读取 SQLite 当前已提交状态。
+- `storeIfNovel/confirm/supersede/delete/clear` 均在 `BEGIN IMMEDIATE` 写事务中执行；exact duplicate 检查与写入处于同一事务，并由 partial unique index 二次约束。
+- `SUPERSEDE` 在单个事务内完成旧条目失效与新条目写入，任一步失败都会回滚。
+- legacy `long_term_memory.json` 仅在无迁移标记时导入；成功后记录 `memory_meta.legacy_json_migration` 并尝试重命名为 `.migrated.bak`，后续启动不再重新导入。
+- `MemoryRetriever` 与 `MemoryEmbeddingCache` 未改动；embedding 仍只在当前 JVM 中缓存，没有新增向量表或向量索引。
+- 增加跨实例写入、跨实例 exact duplicate 并发、SQLite-only fresh storage、一次性 JSON 迁移和跨实例 supersede 可见性测试。
+- README 与 AGENTS 已同步新的事实源、迁移和并发语义。
 
 ## 7. 验证结果
 
-待实现后补充。
+GitHub Actions 临时分支验证 run `36962478279`：
+
+- `mvn -B test -DskipTests=false -Dtest=LongTermMemoryTest,MemoryManagerTest,MemoryRetrieverTest,MemoryWriteResolverTest,MemoryEmbeddingCacheTest`：通过。
+- `mvn -B test -Pquick`：通过。
+- `git diff --check origin/main...HEAD`：通过。
+- Actions 最终状态：`completed / success`。
+- 验证完成后，临时 `.github/workflows/tmp-memory-sqlite-validation.yml` 从最终分支树删除，仅在提交历史中保留验证留痕。
+
+本次没有执行全量 `mvn test -DskipTests=false`；按照 AGENTS 的常规交付门禁，已执行针对性 Memory 测试与 quick regression，未发现需要扩大到全量测试的失败信号。

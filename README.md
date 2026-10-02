@@ -193,7 +193,7 @@ CODEAGENT_SESSION_RESUME=off
 - `CODEAGENT.md` 或 `.codeagent/CODEAGENT.md`：可提交的团队规则
 - `CODEAGENT.local.md` 或 `.codeagent/CODEAGENT.local.md`：本地覆盖
 
-长期记忆不会自动从普通对话中提取。只有用户明确要求记住/更新，或执行 `/save` 时才会写入。检索使用词法 + 本地 BGE 混合召回；同义重复会 no-op，用户明确改变旧偏好/事实时旧记忆会保留为 superseded 历史，新事实成为 active。
+长期记忆不会自动从普通对话中提取。只有用户明确要求记住/更新，或执行 `/save` 时才会写入。检索使用词法 + 本地 BGE 混合召回；同义重复会 no-op，用户明确改变旧偏好/事实时旧记忆会保留为 superseded 历史，新事实成为 active。长期记忆事实持久化在 `~/.codeagent/memory/memory.db`，每条记忆独立行写入；SQLite 使用 WAL + 事务处理并发写入。旧 `long_term_memory.json` 首次升级时一次性迁移，成功后不再作为事实源；BGE embedding 仍只存在进程缓存，不写入 SQLite。
 
 ```text
 /memory
@@ -394,6 +394,7 @@ TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard / CommandGuar
 | `~/.codeagent/config.json` | Provider、模型与 Web Tool 路由配置 |
 | `~/.codeagent/history/` | 持久化会话与事件日志 |
 | `~/.codeagent/plans/plans.db` | Plan DAG checkpoint |
+| `~/.codeagent/memory/memory.db` | 长期记忆事实与生命周期状态 |
 | `~/.codeagent/tasks/tasks.db` | 后台任务队列 |
 | `~/.codeagent/snapshots/` | Side-Git 快照 |
 | `~/.codeagent/logs/` | 运行日志 |

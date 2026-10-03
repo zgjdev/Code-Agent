@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.codeagent.history.ConversationLedger;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.llm.LlmTraceLogger;
+import com.codeagent.llm.StructuredJsonExecutor;
+import com.codeagent.llm.StructuredOutputSpec;
 import com.codeagent.memory.TokenBudget;
 import com.codeagent.prompt.PromptAssembler;
 import com.codeagent.prompt.PromptContext;
@@ -27,9 +29,13 @@ import java.util.function.Supplier;
 public class Planner {
     private static final Logger log = LoggerFactory.getLogger(Planner.class);
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final StructuredOutputSpec PLAN_OUTPUT =
+            new StructuredOutputSpec("execution_plan", buildPlanSchema(), false);
+
     private final LlmClient llmClient;
     private final PrintStream out;
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final StructuredJsonExecutor structuredJsonExecutor = new StructuredJsonExecutor();
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private Supplier<String> projectMemorySupplier = () ->
@@ -90,7 +96,15 @@ public class Planner {
         conversationLedger.appendMessage("plan", "planner", "planning_request", messages.get(1));
 
         PlanningStreamRenderer streamRenderer = new PlanningStreamRenderer(out);
-        LlmClient.ChatResponse response = llmClient.chat(messages, null, streamRenderer);
+        StructuredJsonExecutor.Result<ExecutionPlan> structured = structuredJsonExecutor.execute(
+                llmClient,
+                messages,
+                null,
+                PLAN_OUTPUT,
+                true,
+                root -> parsePlan(goal, root),
+                streamRenderer);
+        LlmClient.ChatResponse response = structured.response();
         conversationLedger.appendMessage(
                 "plan",
                 "planner",
@@ -98,7 +112,7 @@ public class Planner {
                 LlmClient.Message.assistant(response.reasoningContent(), response.content()));
         LlmTraceLogger.logReasoning(log, "planner", llmClient, response.reasoningContent());
         streamRenderer.finish();
-        return parsePlan(goal, response.content());
+        return structured.value();
     }
 
     public int estimateRequestTokens(PlannerRequest request) {
@@ -132,33 +146,58 @@ public class Planner {
     }
 
     /**
-     * 解析LLM生成的计划JSON
+     * 解析并校验 LLM 生成的计划 JSON。任何确定性业务校验失败都会交给
+     * StructuredJsonExecutor 做一次 bounded repair。
      */
-    private ExecutionPlan parsePlan(String goal, String planJson) throws IOException {
-        // 清理可能的markdown代码块
-        String cleaned = planJson.replaceAll("```json\\s*", "")
-                .replaceAll("```\\s*", "")
-                .trim();
-
-        JsonNode root = mapper.readTree(cleaned);
-        String summary = root.path("summary").asText();
-        JsonNode tasksNode = root.path("tasks");
+    private ExecutionPlan parsePlan(String goal, JsonNode root) throws IOException {
+        if (root == null || !root.isObject()) {
+            throw new IOException("Planner response must be a JSON object");
+        }
+        JsonNode summaryNode = root.get("summary");
+        JsonNode tasksNode = root.get("tasks");
+        if (summaryNode == null || !summaryNode.isTextual()) {
+            throw new IOException("Planner response missing textual summary");
+        }
+        if (tasksNode == null || !tasksNode.isArray() || tasksNode.isEmpty()) {
+            throw new IOException("Planner response tasks must be a non-empty array");
+        }
 
         ExecutionPlan plan = new ExecutionPlan(generatePlanId(), goal);
-        plan.setSummary(summary);
+        plan.setSummary(summaryNode.asText());
 
         // 第一遍：创建所有任务（不处理依赖，因为可能有前向引用）
         Map<String, String> idMapping = new HashMap<>();
         int taskIndex = 1;
 
         for (JsonNode taskNode : tasksNode) {
-            String originalId = taskNode.path("id").asText();
+            if (!taskNode.isObject()) {
+                throw new IOException("Planner task must be a JSON object");
+            }
+            String originalId = taskNode.path("id").asText("").trim();
+            String description = taskNode.path("description").asText("").trim();
+            if (originalId.isEmpty()) {
+                throw new IOException("Planner task id must be non-empty");
+            }
+            if (idMapping.containsKey(originalId)) {
+                throw new IOException("Duplicate planner task id: " + originalId);
+            }
+            if (description.isEmpty()) {
+                throw new IOException("Planner task description must be non-empty: " + originalId);
+            }
+            JsonNode typeNode = taskNode.get("type");
+            if (typeNode != null && !typeNode.isNull() && !typeNode.isTextual()) {
+                throw new IOException("Planner task type must be textual: " + originalId);
+            }
+            JsonNode depsNode = taskNode.get("dependencies");
+            if (depsNode != null && !depsNode.isNull() && !depsNode.isArray()) {
+                throw new IOException("Planner task dependencies must be an array: " + originalId);
+            }
+
             String newId = "task_" + taskIndex++;
             idMapping.put(originalId, newId);
 
-            String description = taskNode.path("description").asText();
-            String typeStr = taskNode.path("type").asText();
-            Task.TaskType type = parseTaskType(typeStr);
+            String typeStr = typeNode == null ? "" : typeNode.asText();
+            Task.TaskType type = parseTaskType(typeStr, originalId);
 
             try {
                 TaskResourceClaims resourceClaims = TaskResourceClaims.normalize(
@@ -181,13 +220,17 @@ public class Planner {
             JsonNode depsNode = taskNode.path("dependencies");
             if (depsNode.isArray()) {
                 for (JsonNode depNode : depsNode) {
-                    String originalDepId = depNode.asText();
-                    String newDepId = idMapping.getOrDefault(originalDepId, originalDepId);
-                    Task dep = plan.getTask(newDepId);
-                    if (dep != null) {
-                        task.addDependency(newDepId);
-                        dep.addDependent(task.getId());
+                    if (!depNode.isTextual()) {
+                        throw new IOException("Planner dependency id must be textual for " + newId);
                     }
+                    String originalDepId = depNode.asText();
+                    String newDepId = idMapping.get(originalDepId);
+                    if (newDepId == null) {
+                        throw new IOException("Unknown planner dependency '" + originalDepId + "' for " + newId);
+                    }
+                    Task dep = plan.getTask(newDepId);
+                    task.addDependency(newDepId);
+                    dep.addDependent(task.getId());
                 }
             }
         }
@@ -200,17 +243,70 @@ public class Planner {
         return plan;
     }
 
+    private static JsonNode buildPlanSchema() {
+        var root = MAPPER.createObjectNode();
+        root.put("type", "object");
+        var properties = root.putObject("properties");
+        properties.putObject("summary").put("type", "string");
+
+        var tasks = properties.putObject("tasks");
+        tasks.put("type", "array");
+        var task = tasks.putObject("items");
+        task.put("type", "object");
+        var taskProperties = task.putObject("properties");
+        taskProperties.putObject("id").put("type", "string");
+        taskProperties.putObject("description").put("type", "string");
+        taskProperties.putObject("type").put("type", "string")
+                .putArray("enum")
+                .add("FILE_READ").add("FILE_WRITE").add("COMMAND")
+                .add("ANALYSIS").add("VERIFICATION");
+        taskProperties.putObject("dependencies")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
+
+        var resources = taskProperties.putObject("resources");
+        resources.put("type", "object");
+        var resourceProperties = resources.putObject("properties");
+        resourceProperties.putObject("readPaths")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
+        resourceProperties.putObject("writePaths")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
+        resourceProperties.putObject("workspaceWrite").put("type", "boolean");
+        resources.put("additionalProperties", false);
+
+        taskProperties.putObject("acceptanceCriteria")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
+        taskProperties.putObject("requiredEvidence")
+                .put("type", "array")
+                .putObject("items")
+                .put("type", "string")
+                .putArray("enum")
+                .add("DIFF").add("BUILD").add("TEST").add("LSP").add("TOOL_RESULT");
+        task.putArray("required").add("id").add("description");
+        task.put("additionalProperties", false);
+
+        root.putArray("required").add("summary").add("tasks");
+        root.put("additionalProperties", false);
+        return root;
+    }
+
     /**
      * 解析任务类型
      */
-    private Task.TaskType parseTaskType(String typeStr) {
-        return switch (typeStr.toUpperCase()) {
+    private Task.TaskType parseTaskType(String typeStr, String taskId) throws IOException {
+        if (typeStr == null || typeStr.isBlank()) {
+            return Task.TaskType.ANALYSIS;
+        }
+        return switch (typeStr.trim().toUpperCase(Locale.ROOT)) {
             case "FILE_READ" -> Task.TaskType.FILE_READ;
             case "FILE_WRITE" -> Task.TaskType.FILE_WRITE;
             case "COMMAND" -> Task.TaskType.COMMAND;
             case "ANALYSIS" -> Task.TaskType.ANALYSIS;
             case "VERIFICATION" -> Task.TaskType.VERIFICATION;
-            default -> Task.TaskType.ANALYSIS;
+            default -> throw new IOException("Unknown planner task type '" + typeStr + "' for " + taskId);
         };
     }
 

@@ -4,7 +4,9 @@ import com.codeagent.llm.GLMClient;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.ArrayDeque;
 import java.util.List;
+import java.util.Queue;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -85,6 +87,38 @@ class PlannerTest {
         assertTrue(client.lastUserPrompt.contains("[历史会话上下文]"));
         assertTrue(client.lastUserPrompt.contains("刚才我们在看 src/main"));
         assertEquals(1, occurrences(client.lastUserPrompt, goal));
+    }
+
+    @Test
+    void repairsMalformedPlannerJsonOnce() throws Exception {
+        SequenceGLMClient client = new SequenceGLMClient(
+                "not json",
+                "{\"summary\":\"修复后计划\",\"tasks\":["
+                        + "{\"id\":\"t1\",\"description\":\"执行命令\","
+                        + "\"type\":\"COMMAND\",\"dependencies\":[]}]}");
+        Planner planner = new Planner(client);
+
+        ExecutionPlan plan = planner.createPlan("先执行命令然后验证结果");
+
+        assertEquals("修复后计划", plan.getSummary());
+        assertEquals(2, client.calls);
+        assertEquals(List.of("task_1"), plan.getExecutionOrder());
+    }
+
+    @Test
+    void repairsExplicitUnknownTaskTypeInsteadOfSilentlyDowngrading() throws Exception {
+        SequenceGLMClient client = new SequenceGLMClient(
+                "{\"summary\":\"bad\",\"tasks\":[{\"id\":\"t1\","
+                        + "\"description\":\"执行任务\",\"type\":\"MAGIC\",\"dependencies\":[]}]}",
+                "{\"summary\":\"fixed\",\"tasks\":[{\"id\":\"t1\","
+                        + "\"description\":\"执行任务\",\"type\":\"COMMAND\",\"dependencies\":[]}]}");
+        Planner planner = new Planner(client);
+
+        ExecutionPlan plan = planner.createPlan("先执行任务然后验证结果");
+
+        assertEquals("fixed", plan.getSummary());
+        assertEquals(Task.TaskType.COMMAND, plan.getTask("task_1").getType());
+        assertEquals(2, client.calls);
     }
 
     @Test
@@ -252,6 +286,23 @@ class PlannerTest {
             offset = index + value.length();
         }
         return count;
+    }
+
+    private static final class SequenceGLMClient extends GLMClient {
+        private final Queue<String> contents = new ArrayDeque<>();
+        private int calls;
+
+        private SequenceGLMClient(String... contents) {
+            super("test-key");
+            this.contents.addAll(List.of(contents));
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) {
+            calls++;
+            String content = contents.isEmpty() ? "" : contents.remove();
+            return new ChatResponse("assistant", content, null, 100, 20);
+        }
     }
 
     private static final class FailingGLMClient extends GLMClient {

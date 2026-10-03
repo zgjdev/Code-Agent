@@ -1401,8 +1401,9 @@ public class ToolRegistry {
      * 执行同一轮 LLM 返回的多个工具调用。
      *
      * 结果按传入顺序返回，调用方可以安全地按原 tool_call 顺序回灌消息历史。
-     * 含浏览器工具的批次按原顺序串行，避免同一浏览器会话内的页面状态互相覆盖；
-     * 其余批次并行执行，超时后取消未完成任务，已完成工具不受影响。
+     * 含浏览器工具的批次继续按原顺序串行，避免同一浏览器会话内的页面状态互相覆盖；
+     * 其余调用先根据 tool name + arguments 本地推导资源，再切成稳定的无冲突批次，
+     * 每个批次最多并行 4 个。多个批次共享一次 batch timeout 预算。
      */
     public List<ToolExecutionResult> executeTools(List<ToolInvocation> invocations) {
         if (invocations == null || invocations.isEmpty()) {
@@ -1434,6 +1435,35 @@ public class ToolRegistry {
             return results;
         }
 
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(toolBatchTimeoutSeconds);
+        ToolConflictAwareBatchSelector batchSelector = new ToolConflictAwareBatchSelector(
+                new ToolResourceClaimResolver(pathGuard));
+        List<List<ToolInvocation>> batches = batchSelector.partition(invocations, MAX_PARALLEL_TOOLS);
+        List<ToolExecutionResult> results = new ArrayList<>(invocations.size());
+
+        for (List<ToolInvocation> batch : batches) {
+            if (CancellationContext.isCancelled()) {
+                appendFailedRemainder(invocations, results, "用户取消了此次工具调用");
+                break;
+            }
+
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                appendTimedOutRemainder(invocations, results);
+                break;
+            }
+
+            results.addAll(executeParallelBatch(batch, remainingNanos));
+            if (Thread.currentThread().isInterrupted()) {
+                appendFailedRemainder(invocations, results, "工具批次执行被中断");
+                break;
+            }
+        }
+        return results;
+    }
+
+    private List<ToolExecutionResult> executeParallelBatch(List<ToolInvocation> invocations,
+                                                           long timeoutNanos) {
         int parallelism = Math.min(invocations.size(), MAX_PARALLEL_TOOLS);
         ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
             Thread thread = new Thread(r, "codeagent-tool-executor");
@@ -1454,9 +1484,9 @@ public class ToolRegistry {
                     .toList();
 
             List<Future<ToolExecutionResult>> futures =
-                    executor.invokeAll(tasks, toolBatchTimeoutSeconds, TimeUnit.SECONDS);
+                    executor.invokeAll(tasks, timeoutNanos, TimeUnit.NANOSECONDS);
 
-            List<ToolExecutionResult> results = new ArrayList<>();
+            List<ToolExecutionResult> results = new ArrayList<>(invocations.size());
             for (int i = 0; i < futures.size(); i++) {
                 ToolInvocation invocation = invocations.get(i);
                 Future<ToolExecutionResult> future = futures.get(i);
@@ -1486,6 +1516,21 @@ public class ToolRegistry {
                     .toList();
         } finally {
             executor.shutdownNow();
+        }
+    }
+
+    private void appendTimedOutRemainder(List<ToolInvocation> invocations,
+                                         List<ToolExecutionResult> results) {
+        for (int i = results.size(); i < invocations.size(); i++) {
+            results.add(ToolExecutionResult.timedOut(invocations.get(i), toolBatchTimeoutSeconds));
+        }
+    }
+
+    private void appendFailedRemainder(List<ToolInvocation> invocations,
+                                       List<ToolExecutionResult> results,
+                                       String message) {
+        for (int i = results.size(); i < invocations.size(); i++) {
+            results.add(ToolExecutionResult.failed(invocations.get(i), message));
         }
     }
 

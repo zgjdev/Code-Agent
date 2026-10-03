@@ -276,6 +276,8 @@ CLI 入口 / Banner / .env 读取 / 日志初始化 / 统一 Execution 入队与
 ### ExecutionModeRouter.java / ModeRouterPromptBuilder.java
 默认 inline/plain 终端的普通顶层输入先写入统一队列，Worker 取得 Session 写租约后才调用 Mode Router；`/plan` 与 `/react` 绕过 Router 并只覆盖一个 Execution。Router 使用执行时的 `LlmClient`，只接收原始 `submittedInput` 和对应 Session 的 `ParentConversationContext.conversationNodes()` 确定性窗口，不注册工具，也不写 Parent Session。`modes/router.md` 独占 system message，历史和当前输入作为 JSON user message；响应只接受单字段 `{"mode":"react|plan"}`。非取消性 Provider/解析失败回退 ReAct，取消或线程中断直接终止 Execution。协调器将选择模式与路由来源持久化到 Execution 状态。
 
+Router 通过 `StructuredJsonExecutor` 做严格 JSON/字段/枚举校验，首次不规范时只允许一次格式修复；两次仍失败才按安全策略回退 ReAct。格式修复不扩大工具或权限边界。
+
 ### Agent.java
 ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 
@@ -298,10 +300,10 @@ Reconciler 负责 SQLite PlanStateStore 与 Parent Session Plan turn 的跨存�
 下行简报的唯一渲染点 / 用 Reviewer 子 Agent 实现审查层 / 审查输出的失败关闭解析
 
 ### SubAgent.java
-可配置角色子代理 / 独立对话历史 / 统一模式中只承担 Reviewer 角色，不调用工具
+可配置角色子代理 / 独立对话历史 / 统一模式中只承担 Reviewer 角色，不调用工具。Reviewer 的最终输出通过 `StructuredJsonExecutor` 约束为 `approved/summary/issues/suggestions` JSON；连续两次结构化失败返回 ERROR，由步骤审查层解释为 `UNAVAILABLE`，不再从自然语言关键词推断批准。
 
 ### Planner.java
-LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖计算。PlannerRequest 可携带由 PlannerConversationContextBuilder 从 Top-level Conversation View 确定性序列化出的历史文本；有历史时禁用 context-free minimal shortcut，current goal 在请求中只出现一次。Plan-only 长会话在 Planner 调用前也会检查 Parent context budget，必要时触发 durable Parent compaction。
+LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖计算。复杂计划通过 `StructuredJsonExecutor` 执行：JSON 语法、Task 字段类型、资源声明、依赖引用和 DAG 循环都会进入确定性校验，首次失败允许一次格式修复，仍失败则终止规划。为兼容旧计划，Task `type` 缺失仍保守回退 `ANALYSIS`。PlannerRequest 可携带由 PlannerConversationContextBuilder 从 Top-level Conversation View 确定性序列化出的历史文本；有历史时禁用 context-free minimal shortcut，current goal 在请求中只出现一次。Plan-only 长会话在 Planner 调用前也会检查 Parent context budget，必要时触发 durable Parent compaction。
 
 ### ExecutionPlan.java / PlanStateStore.java
 `ExecutionPlan` 负责 DAG 拓扑排序 / 可执行任务判定 / 进度可视化；`PlanStateStore` 负责 SQLite DAG checkpoint 与 Task 边界恢复。active Plan 按 workspace + `session_id` 关联，终态 Plan 不参与 active lookup；`findById` / `findActiveRecord` 提供 reconciliation 所需的只读持久化视图。COMPLETED Task 的 result 会恢复并继续进入下游 StepBriefing；要求 DIFF 的 durable Task 会在首次执行前把仅含相对路径与 SHA-256 的 baseline 写入 `plan_tasks.diff_baseline_json`，恢复时复用且不保存源码正文；旧版仅有 `resume_key` 且没有 `session_id` 的记录视为 legacy unbound plan，不做猜测式绑定。
@@ -315,11 +317,16 @@ McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTr
 ### TUI Package
 TuiBootstrap / LanternaWindow / TuiSessionController / pane/ / hitl/ / history/ / highlight/
 
+### StructuredJsonExecutor / LlmClient structured output
+
+`LlmClient` 通过 `StructuredOutputCapability` 声明 `NONE / JSON_OBJECT / JSON_SCHEMA`，`StructuredOutputSpec` 承载 provider-independent JSON contract。`StructuredJsonExecutor` 最多执行 2 次：首个结果先做 Jackson 严格单文档解析，再由调用点 deterministic decoder 校验业务结构；失败时仅追加一次局部 repair context，不写 Parent Session，也不产生新权限。OpenAI-compatible client 在已验证能力上发送原生 `response_format`；若兼容 endpoint 以明确 4xx 表示不支持该参数，本次调用退回 plain chat，但本地校验不降级。repair 尝试的 usage 会聚合回最终 `ChatResponse`。
+
 ### LLM Clients
-- GLMClient：glm-5.1，glm-5v 开头切多模态接口
-- DeepSeekClient：deepseek-v4-flash，thinking + tool calls 带回 reasoning_content
-- StepClient：step-3.5-flash，可通过 STEP_BASE_URL 切通道
-- KimiClient：kimi-k2.6，thinking + tool calls 带回 reasoning_content
+- GLMClient：glm-5.1，glm-5v 开头切多模态接口；structured output 能力保守为 `NONE`
+- DeepSeekClient：deepseek-v4-flash，thinking + tool calls 带回 reasoning_content；structured output 使用 `JSON_OBJECT`
+- HunyuanClient：hy4-preview / TokenHub OpenAI-compatible；structured output 使用 `JSON_SCHEMA`
+- StepClient：step-3.5-flash，可通过 STEP_BASE_URL 切通道；structured output 使用 `JSON_OBJECT`
+- KimiClient：kimi-k2.6，thinking + tool calls 带回 reasoning_content；structured output 能力保守为 `NONE`
 - FreeLlmApiClient：auto，默认 http://localhost:5173/v1，OpenAI-compatible 本地网关；可用 `/config provider freellmapi ...` 写入配置后 `/model freellmapi` 切换
 - XfyunMaaSClient：Qwen3.6-35B-A3B，默认 https://maas-api.cn-huabei-1.xf-yun.com/v2，OpenAI-compatible 讯飞星辰 MaaS；可用 `/config provider xfyun ...` 写入配置后 `/model xfyun` 切换。`model` 必须使用 MaaS 服务管控页展示的 modelId；微调模型可配置 `--lora-id <resourceId>`，作为 HTTP header `lora_id` 发出；该 provider 不发送 CodeAgent 内置 tools。
 - AgnesClient：agnes-2.0-flash，默认 https://apihub.agnes-ai.com/v1，OpenAI-compatible Agnes AI，默认 1M context window；可用 `/config provider agnes ...` 写入配置后 `/model agnes` 切换，支持流式输出和 tools。

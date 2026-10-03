@@ -58,6 +58,11 @@ public class HunyuanClient extends AbstractOpenAiCompatibleClient {
     }
 
     @Override
+    public StructuredOutputCapability structuredOutputCapability() {
+        return StructuredOutputCapability.JSON_SCHEMA;
+    }
+
+    @Override
     public int maxContextWindow() {
         return 1_000_000;
     }

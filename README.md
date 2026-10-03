@@ -14,6 +14,7 @@ inline/plain CLI 的普通顶层任务会先持久化到本地 Execution 队列�
 - **自动选择执行模式**：简单任务走 ReAct，复杂任务进入 Plan DAG，无需每次手工判断。
 - **面向工程任务**：内置文件、代码搜索、命令执行、Web、浏览器、Memory、RAG 和 MCP 工具。
 - **统一多 Agent 协作**：Planner 拆解 DAG，Worker 执行，Reviewer 审查；支持依赖调度、冲突感知和失败重试。
+- **可靠结构化输出**：Planner、Mode Router、Reviewer 对 JSON contract 做确定性本地校验，格式不合法时最多自动修复一次；已验证的 Provider 还会使用原生 JSON mode / JSON Schema。
 - **可恢复的长任务**：会话事件追加写入，Plan 状态持久化到 SQLite，中断后可从 Task 边界继续。
 - **本地优先的代码理解**：精确定位优先使用 glob、grep 和文件读取，语义检索使用随 JAR 分发的进程内 BGE。
 - **明确的安全边界**：工具调用经过策略、HITL、路径和命令防护；危险操作写入脱敏审计日志。
@@ -143,7 +144,7 @@ inline/plain CLI 的 `/plan resume` 会将旧版、尚未绑定 Execution 的活
 - Skill 加载、长期记忆保存和 Side-Git 恢复
 - MCP 动态工具
 
-同一轮产生多个工具调用时，CodeAgent 最多并行执行 4 个调用，并按原始顺序把结果回灌模型。Plan DAG 还会根据资源声明避免把写冲突任务放进同一批次。
+同一轮产生多个工具调用时，CodeAgent 会根据工具名和实际参数在本地推导资源 claim，将冲突调用按原顺序分批；无冲突批次最多并行 4 个调用，并按原始顺序把结果回灌模型。Plan DAG 还会根据 Task 的显式资源声明避免把写冲突任务放进同一批次。
 
 ### 代码检索与 RAG
 
@@ -196,7 +197,7 @@ CODEAGENT_SESSION_RESUME=off
 - `CODEAGENT.md` 或 `.codeagent/CODEAGENT.md`：可提交的团队规则
 - `CODEAGENT.local.md` 或 `.codeagent/CODEAGENT.local.md`：本地覆盖
 
-长期记忆不会自动从普通对话中提取。只有用户明确要求记住/更新，或执行 `/save` 时才会写入。检索使用词法 + 本地 BGE 混合召回；同义重复会 no-op，用户明确改变旧偏好/事实时旧记忆会保留为 superseded 历史，新事实成为 active。
+长期记忆不会自动从普通对话中提取。只有用户明确要求记住/更新，或执行 `/save` 时才会写入。检索使用词法 + 本地 BGE 混合召回；同义重复会 no-op，用户明确改变旧偏好/事实时旧记忆会保留为 superseded 历史，新事实成为 active。长期记忆事实持久化在 `~/.codeagent/memory/memory.db`，每条记忆独立行写入；SQLite 使用 WAL + 事务处理并发写入。旧 `long_term_memory.json` 首次升级时一次性迁移，成功后不再作为事实源；BGE embedding 仍只存在进程缓存，不写入 SQLite。
 
 ```text
 /memory
@@ -403,6 +404,7 @@ TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard / CommandGuar
 | `~/.codeagent/config.json` | Provider、模型与 Web Tool 路由配置 |
 | `~/.codeagent/history/` | 持久化会话与事件日志 |
 | `~/.codeagent/plans/plans.db` | Plan DAG checkpoint |
+| `~/.codeagent/memory/memory.db` | 长期记忆事实与生命周期状态 |
 | `~/.codeagent/tasks/tasks.db` | inline/plain CLI 的统一 Runtime Execution 队列；旧 `runtime_tasks` 只迁移为 legacy row |
 | `~/.codeagent/snapshots/` | Side-Git 快照 |
 | `~/.codeagent/logs/` | 运行日志 |

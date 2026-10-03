@@ -125,7 +125,7 @@ sequenceDiagram
     alt 有工具调用
         A->>P: 校验 URL、路径、命令、HITL
         P-->>A: allow / deny / approval
-        A->>T: executeTools（最多 4 并发）
+        A->>T: executeTools（本地资源判冲突，批内最多 4 并发）
         T-->>A: 按输入顺序返回结果
         A->>C: append tool_call/tool_result
         A->>L: 携带结果继续请求
@@ -152,7 +152,8 @@ sequenceDiagram
 - 默认 inline/plain 终端的普通顶层输入、`/react <任务>`、`/plan <任务>` 与 `/task add <任务>` 先持久化为 `runtime_executions`，由当前 workspace 的单顶层 Worker 串行执行；运行中仍可继续提交后续消息。Execution 首次 RUNNING 时才展开 @path/MCP resource，Router 只读取原始 `submittedInput` 与当时 Parent Session 的 Top-level Conversation，严格返回 REACT/PLAN，非取消性失败回退 ReAct。`/react` 与 `/plan` 是 one-turn override；Lanterna TUI、Runtime API 和 WeChat 尚不接入该统一队列。
 - 运行中直接输入即追加到同一队列；等待 Plan/HITL 时，普通输入由 InteractionInputRouter 优先作为交互回答，非法审批输入不得自动批准或入队，`/task add` 可显式追加任务。CLI 输入循环是唯一终端输入所有者，Worker 经 InteractionBroker 等待回答。
 - SessionExecutionContextRegistry 独占每个 Session 的 writable SessionHandle、Agent、ParentConversationContext、MemoryManager 与 SkillContextBuffer；启动上下文收养、其他 Session 懒加载。共享 ToolRegistry/MCP/Browser/HITL 保留进程级单 writable lease，执行前重绑 Session 协作者。Worker 与 CLI Session/Runtime mutation 共用互斥锁，CLI 修改使用 tryLock 失败关闭。当前 UI 指针不负责关闭 handle；仅空闲、非当前且无 pending interaction 的 Context 可驱逐。EOF/shutdown 释放运行态并保留非终态 Execution 恢复，不提前写 SESSION_END；后台任务不在进程退出后独立运行。
-- ReAct 与 PlanExecuteAgent（`/plan` 显式入口或 Router 选择，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
+- Planner、Mode Router 与 Reviewer 的 JSON 输出统一通过 LLM 层 `StructuredJsonExecutor` 校验：总尝试最多 2 次，首次语法/结构/业务约束失败只允许一次格式修复；Hunyuan/TokenHub 使用原生 JSON Schema，DeepSeek/Step 使用 JSON Object，未验证 Provider 不发送 `response_format`。兼容端点明确拒绝结构化参数时只回退普通 Chat 请求，本地校验仍必须通过。格式修复不得扩大工具、URL、路径或 HITL 权限；Reviewer 连续失败按不可用/拒绝处理，禁止用自然语言关键词猜测批准。
+- ReAct 与 PlanExecuteAgent（`/plan` 显式入口或 Router 选择，`FULL_PRESET`）都通过 executeTools()；同轮非 Browser Tool Call 先根据 tool name + arguments 在本地确定性推导资源 claim，冲突调用按原顺序分批、批内最多 4 个并发，结果仍按原始顺序归并。`execute_command` / `revert_turn` 按 workspace 写保守独占，无法安全解析的路径 claim 必须扩大范围而不能让 LLM 判断；Browser 批次继续整批串行。
 - PlanExecuteAgent 的 DAG 就绪任务先经 `ConflictAwareBatchSelector` 按任务资源声明组批；资源冲突或 `workspaceWrite` 不得进入同一批次。任务完成前必须通过确定性证据门禁和可用的 Reviewer；失败重试耗尽进入 `UNVERIFIED`，不解锁后继。DIFF 证据使用 Task 初始 workspace baseline；durable Plan 只把相对路径与 SHA-256 baseline 写入 `plans.db`，恢复时复用该 baseline，不持久化源码正文。
 - CLI/TUI 的 `/plan` 会把 DAG 与 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`；inline/plain 队列路径还通过 `execution_id` 绑定顶层 Runtime Execution。prompt 只表示任务内容，不作为恢复身份。同一 Session 同时最多一个 `CREATED/RUNNING` Plan；`/plan resume` 对 legacy active Plan 执行确定性收养并入队，`/plan abandon` 显式放弃。新 Plan 必须先严格写入 SQLite 才能进入执行和 Parent Conversation；恢复时已完成节点不重跑，上次 `RUNNING/REVIEWING` 节点转为 `INTERRUPTED` 后从 Task 边界重新执行。
 - ReAct 与 PlanExecuteAgent 共享同一个 ParentConversationContext，但只共享 Session 级顶层语义连续性；Planner 只读取 Top-level Conversation View，不读取 tool result、synthetic user、Skill/Memory 注入或 Task child transcript。Task Worker 仍使用独立 task-local messages；历史对话只用于语义理解，绝不能成为当前 Turn 的权限来源。
@@ -164,7 +165,7 @@ sequenceDiagram
 - 交互式 CLI 会同时启动已启用的 stdio/HTTP MCP Server；启动默认最多等待 8 秒，超时 server 保持 STARTING 并后台继续，用 /mcp 查看状态。Runtime API/后台 headless 路径不创建 McpServerManager。
 - /clear 只清空当前发送视图、session memory 预计算状态和 Skill buffer，长期记忆及 raw ledger 保留；/compact 手动执行完整摘要压缩。
 - RAG 只保留三类召回：SQLite FTS5 + BM25 词法检索、BGE + cosine 语义检索、代码关系图检索；Symbol Index 仅作为 Graph seed 基础设施，不独立参与融合。实时精确定位继续由 `grep_code` / `glob_files` / `read_file` 承担，不进入 RAG。远程 Embedding 仅在当前项目/provider/model/endpoint/policy-version 匹配的显式授权后启用，拒绝或故障必须降级而不能中止 FTS / Graph 检索。
-- 长期记忆的事实源仍是 `~/.codeagent/memory/long_term_memory.json`；普通检索只读取当前 scope 可见的 active 记忆，使用词法 + 进程内 BGE 混合相关度，并按 `lastConfirmedAt` 应用下限 0.6、30 天半衰期的乘法衰减；legacy 缺失确认时间时回退 creation timestamp。embedding 只做进程内派生缓存且不得发送到远端。显式 `save_memory` / `/save` 写入统一解析 CREATE / DUPLICATE / SUPERSEDE；DUPLICATE 只刷新已有记忆的确认时间、不重复创建，普通 retrieval 不得自动确认；写入候选不应用时间衰减。embedding 只召回候选，SUPERSEDE 必须由无工具关系分类器返回当前 `submittedUserInput` 的原文 evidence，失败时不得让旧记忆失效。
+- 长期记忆的唯一事实源为 `~/.codeagent/memory/memory.db`；每条 `MemoryEntry` 独立行持久化，写路径使用 SQLite WAL、`busy_timeout` 与事务，`store/confirm/supersede/delete/clear` 不得回退为整文件快照覆盖。旧 `long_term_memory.json` 只在无迁移标记时一次性事务导入，成功后 SQLite 成为唯一事实源并尝试保留 `.migrated.bak`。普通检索只读取当前 scope 可见的 active 记忆，使用词法 + 进程内 BGE 混合相关度，并按 `lastConfirmedAt` 应用下限 0.6、30 天半衰期的乘法衰减；legacy 缺失确认时间时回退 creation timestamp。embedding 仍只做进程内派生缓存且不得发送到远端。显式 `save_memory` / `/save` 写入统一解析 CREATE / DUPLICATE / SUPERSEDE；DUPLICATE 只刷新已有记忆的确认时间、不重复创建，普通 retrieval 不得自动确认；写入候选不应用时间衰减。embedding 只召回候选，SUPERSEDE 必须由无工具关系分类器返回当前 `submittedUserInput` 的原文 evidence，失败时不得让旧记忆失效。
 - DeepSeek/Kimi thinking 的 reasoning_content 必须回传下一轮；DeepSeek 当前不发送图片 block。usage 未经真实契约验证的 provider 必须保持 trusted=false 并使用本地完整估算。
 - Side-Git snapshot 独立于系统 git；revert 前先创建 pre-restore snapshot，并纳入 HITL/AuditLog。
 - raw session JSONL 可能含敏感内容：用户目录权限按平台收紧，禁止提交、复制或在报告中泄露正文、工具参数、结果、图片 payload、Memory 正文和 secret。
@@ -180,6 +181,7 @@ sequenceDiagram
 ```text
 命令解析：mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest
 工具/策略：mvn test -Dtest=ToolRegistryTest,TurnToolPolicyTest,ApprovalPolicyTest
+LLM/结构化输出：mvn test -Dtest=StructuredJsonExecutorTest,StructuredOutputRequestTest,ExecutionModeRouterTest,PlannerTest,ReviewResponseParserTest,SubAgentStepReviewerTest
 计划/多 Agent：mvn test -Dtest=ExecutionPlanTest,PlanStateStoreTest,PlannerTest,PlanExecuteAgentTest,PlanExecuteRecoveryTest,PlanConversationReconcilerTest,MainPlanAgentFactoryTest,StepBriefingTest,SubAgentStepReviewerTest,TaskWorkspaceDiffTrackerTest,TaskEvidenceCollectorTest,PlanDiffEvidenceIntegrationTest,PipelineOptionsTest
 Memory/RAG：mvn test -Dtest=MemoryManagerTest,ConversationHistoryCompactorTest,VectorStoreTest,CodeIndexTest
 MCP/Web：mvn test -Dtest=McpSchemaSanitizerTest,JsonRpcClientTest,NetworkPolicyTest,WebFetcherTest

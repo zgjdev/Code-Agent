@@ -14,6 +14,21 @@ public interface LlmClient {
 
     ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException;
 
+    default ChatResponse chatStructured(List<Message> messages, List<Tool> tools,
+                                        StructuredOutputSpec spec) throws IOException {
+        return chatStructured(messages, tools, spec, StreamListener.NO_OP);
+    }
+
+    default ChatResponse chatStructured(List<Message> messages, List<Tool> tools,
+                                        StructuredOutputSpec spec,
+                                        StreamListener listener) throws IOException {
+        return chat(messages, tools, listener);
+    }
+
+    default StructuredOutputCapability structuredOutputCapability() {
+        return StructuredOutputCapability.NONE;
+    }
+
     String getModelName();
 
     String getProviderName();

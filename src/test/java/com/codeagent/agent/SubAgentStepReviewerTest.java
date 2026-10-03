@@ -4,8 +4,8 @@ import com.codeagent.llm.GLMClient;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.plan.Task;
 import com.codeagent.tool.ToolRegistry;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -24,7 +24,7 @@ class SubAgentStepReviewerTest {
 
     @Test
     void approvesWhenReviewerReturnsApprovedTrue() {
-        StepReviewDecision decision = review("{\"approved\": true, \"issues\": []}");
+        StepReviewDecision decision = review(validReview(true, "", List.of(), List.of()));
 
         assertTrue(decision.approved());
         assertEquals("", decision.feedback());
@@ -32,10 +32,42 @@ class SubAgentStepReviewerTest {
 
     @Test
     void rejectsAndCarriesIssues() {
-        StepReviewDecision decision = review("{\"approved\": false, \"issues\": [\"缺少测试\"]}");
+        StepReviewDecision decision = review(validReview(
+                false, "缺少验证", List.of("缺少测试"), List.of()));
 
         assertFalse(decision.approved());
         assertEquals("- 缺少测试", decision.feedback());
+    }
+
+    @Test
+    void repairsMalformedReviewerJsonOnce() {
+        SubAgent reviewer = new SubAgent(
+                "reviewer",
+                AgentRole.REVIEWER,
+                new SequenceClient(
+                        "检查完毕，结果合格",
+                        validReview(true, "通过", List.of(), List.of())),
+                new ToolRegistry());
+
+        StepReviewDecision decision = new SubAgentStepReviewer(reviewer, quietOut())
+                .review("总目标", TASK, "执行结果");
+
+        assertTrue(decision.approved());
+    }
+
+    @Test
+    void malformedReviewerJsonAfterRepairIsUnavailable() {
+        SubAgent reviewer = new SubAgent(
+                "reviewer",
+                AgentRole.REVIEWER,
+                new SequenceClient("检查完毕，结果合格", "仍然不是 JSON"),
+                new ToolRegistry());
+
+        StepReviewDecision decision = new SubAgentStepReviewer(reviewer, quietOut())
+                .review("总目标", TASK, "执行结果");
+
+        assertFalse(decision.approved());
+        assertEquals(StepReviewDecision.ReviewOutcome.UNAVAILABLE, decision.outcome());
     }
 
     @Test
@@ -63,27 +95,45 @@ class SubAgentStepReviewerTest {
 
     private StepReviewDecision review(String reviewerContent) {
         SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER,
-                new OneShotClient(reviewerContent), new ToolRegistry());
+                new SequenceClient(reviewerContent), new ToolRegistry());
         return new SubAgentStepReviewer(reviewer, quietOut()).review("总目标", TASK, "执行结果");
+    }
+
+    private static String validReview(boolean approved,
+                                      String summary,
+                                      List<String> issues,
+                                      List<String> suggestions) {
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(
+                    java.util.Map.of(
+                            "approved", approved,
+                            "summary", summary,
+                            "issues", issues,
+                            "suggestions", suggestions));
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static PrintStream quietOut() {
         return new PrintStream(new ByteArrayOutputStream());
     }
 
-    private static final class OneShotClient extends GLMClient {
+    private static final class SequenceClient extends GLMClient {
         private final Queue<LlmClient.ChatResponse> responses;
 
-        private OneShotClient(String content) {
+        private SequenceClient(String... contents) {
             super("test-key");
-            this.responses = new ArrayDeque<>(List.of(
-                    new LlmClient.ChatResponse("assistant", content, null, 10, 5)));
+            this.responses = new ArrayDeque<>();
+            for (String content : contents) {
+                responses.add(new LlmClient.ChatResponse("assistant", content, null, 10, 5));
+            }
         }
 
         @Override
         public LlmClient.ChatResponse chat(List<LlmClient.Message> messages,
-                                          List<LlmClient.Tool> tools,
-                                          LlmClient.StreamListener listener) {
+                                           List<LlmClient.Tool> tools,
+                                           LlmClient.StreamListener listener) {
             LlmClient.ChatResponse response = responses.poll();
             return response == null
                     ? new LlmClient.ChatResponse("assistant", "", null, 10, 5)
@@ -98,8 +148,8 @@ class SubAgentStepReviewerTest {
 
         @Override
         public LlmClient.ChatResponse chat(List<LlmClient.Message> messages,
-                                          List<LlmClient.Tool> tools,
-                                          LlmClient.StreamListener listener) throws IOException {
+                                           List<LlmClient.Tool> tools,
+                                           LlmClient.StreamListener listener) throws IOException {
             throw new IOException("boom");
         }
     }

@@ -25,7 +25,7 @@ For the primary entry point, see `/AGENTS.md`.
 | RAG 索引 | `~/.codeagent/rag/codebase.db` | `-Dcodeagent.rag.dir` |
 | 审计日志 | `~/.codeagent/audit/audit-YYYY-MM-DD.jsonl` | `CODEAGENT_AUDIT_DIR` / `-Dcodeagent.audit.dir` |
 | Side-Git 快照 | `~/.codeagent/snapshots/<project_hash>/<worktree_hash>/.git` | `CODEAGENT_SNAPSHOT_DIR` / `-Dcodeagent.snapshot.dir` |
-| 后台任务 | `~/.codeagent/tasks/tasks.db` | — |
+| inline/plain Runtime Execution 队列 | `~/.codeagent/tasks/tasks.db` | `CODEAGENT_TASK_DIR` / `-Dcodeagent.task.dir` |
 | Plan DAG 状态 | `~/.codeagent/plans/plans.db` | `-Dcodeagent.plan.dir` / `CODEAGENT_PLAN_DIR` |
 | Better Harness 报告 | `<project>/.codeagent/better-harness/<run-id>/` | `/better-harness --inline` 禁止写文件 |
 
@@ -244,11 +244,19 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 覆盖优先级：jar 内置 < 用户级 ~/.codeagent/prompts/ < 项目级 .codeagent/prompts/
 - 必要校验：base.md 和最终 prompt 必须包含 `## Language`
 
-### Async Tasks + Runtime API (Phase 20)
+### Unified Execution Queue + Runtime API (Phase 20 后续改造)
 
-- DurableTaskManager(SQLite) / CLI: /task, /task list, /task add, /task cancel, /task log
+- inline/plain 的普通输入、`/react <任务>`、`/plan <任务>`、`/task add <任务>` 统一调用 RuntimeExecutionQueue.submit，先写 SQLite `runtime_executions` 再执行；`/task list|cancel|log` 查询和控制同一 Execution，旧 `runtime_tasks` 非破坏迁移为 legacy row。
+- WorkspaceAwareExecutionScheduler 固定单 Worker，只 claim 当前 workspace；同 workspace 顶层串行、同 Session 按 ordinal FIFO。排队输入尚不进入 Parent Conversation，开始执行时读取最新上下文并展开 @path/MCP resource，路由选择必须 durable ack 后才执行 Agent/Plan 副作用。
+- 运行中直接输入即可排队。等待 Plan/HITL 时，InteractionInputRouter 优先分流普通输入，非法审批不会批准或入队；`/task add` 显式追加任务。InteractionBroker 携带 interactionId/executionId/sessionId/allowedActions；Worker 不读取终端。
+- SessionExecutionContextFactory/Registry 为每个 Session 懒加载独立 Agent、ParentConversationContext、MemoryManager、SkillContextBuffer 和唯一 writable SessionHandle。ToolRegistry 的 MCP/Browser/HITL 注册仍共享；进程级单 writable lease 与 CLI mutation 互斥锁保护绑定切换，执行其他 Session 后恢复当前 UI Session 的绑定。
+- `/new`、`/resume` 在源/目标 Session 有非终态任务时拒绝切换；空闲、非当前、无 pending interaction 的 Context 才可驱逐。EOF/shutdown 将未完成执行保留供恢复，Session 不提前写 SESSION_END；进程退出后无独立后台服务继续执行。
+- ExecutionFinalizer 通过 Session execution/start/end envelope 与 SQLite terminal CAS 收敛崩溃窗口；Plan 按 execution_id 绑定和恢复，旧活动 Plan 通过 `/plan resume` 确定性收养。USER_CANCEL 与 RUNTIME_SHUTDOWN 分开，取消与恢复不保证工具副作用 exactly-once。
+- Lanterna TUI、Runtime HTTP API、WeChat 尚未接入以上队列。DurableTaskManager 保留为旧实现与兼容基础设施，Main 已删除其无调用者的 openTaskManager；runHeadlessTask 仍用于 Runtime API。
 - Runtime API: `serve --http --port 8080`，仅 127.0.0.1，需 API Key
 - 端点：POST /v1/threads / POST /v1/threads/{id}/turns / GET /v1/threads/{id}/events
+
+设计、实施记录及验证限制统一见 [31-unified-background-execution-runtime.md](dev/31-unified-background-execution-runtime.md)。
 
 ### Image Input (Phase 21)
 
@@ -264,10 +272,12 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ## Core File Descriptions
 
 ### Main.java
-CLI 入口 / Banner / .env 读取 / 日志初始化 / 自动模式路由与 one-turn override / JLine raw mode
+CLI 入口 / Banner / .env 读取 / 日志初始化 / 统一 Execution 入队与控制 / Session Context Registry 接线 / Broker 交互输入分流 / JLine raw mode；模式路由在 Worker 开始执行时发生。
 
 ### ExecutionModeRouter.java / ModeRouterPromptBuilder.java
-默认 inline/plain 终端的普通顶层输入始终先经过 Mode Router；`/plan` 与 `/react` 绕过 Router 并只覆盖一个 Turn。Router 使用当前活动 `LlmClient`，只接收原始 `submittedInput` 和 `ParentConversationContext.conversationNodes()` 的确定性窗口，不注册工具，也不写 Parent Session。`modes/router.md` 独占 system message，历史和当前输入作为 JSON user message；响应只接受单字段 `{"mode":"react|plan"}`。Router 通过 `StructuredJsonExecutor` 做严格 JSON/字段/枚举校验，首次不规范时只允许一次格式修复；两次仍失败才按安全策略回退 ReAct。非取消性 Provider/解析失败回退 ReAct，取消或线程中断直接终止 Turn。路由 metadata 写入 `ConversationLedger`，但 prompt、历史和用户正文不会复制进去。
+默认 inline/plain 终端的普通顶层输入先写入统一队列，Worker 取得 Session 写租约后才调用 Mode Router；`/plan` 与 `/react` 绕过 Router 并只覆盖一个 Execution。Router 使用执行时的 `LlmClient`，只接收原始 `submittedInput` 和对应 Session 的 `ParentConversationContext.conversationNodes()` 确定性窗口，不注册工具，也不写 Parent Session。`modes/router.md` 独占 system message，历史和当前输入作为 JSON user message；响应只接受单字段 `{"mode":"react|plan"}`。非取消性 Provider/解析失败回退 ReAct，取消或线程中断直接终止 Execution。协调器将选择模式与路由来源持久化到 Execution 状态。
+
+Router 通过 `StructuredJsonExecutor` 做严格 JSON/字段/枚举校验，首次不规范时只允许一次格式修复；两次仍失败才按安全策略回退 ReAct。格式修复不扩大工具或权限边界。
 
 ### Agent.java
 ReAct 主循环 / 对话历史 / 工具调用与结果回灌

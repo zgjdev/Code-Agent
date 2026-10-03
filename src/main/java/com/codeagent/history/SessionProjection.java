@@ -20,6 +20,7 @@ public record SessionProjection(
         MeasuredUsageFact lastCompletedUsage,
         Set<String> incompleteRequestIds,
         Map<String, PendingToolInvocation> pendingTools,
+        Map<String, ExecutionEnvelope> executionEnvelopes,
         boolean cleanlyClosed,
         List<String> warnings) {
 
@@ -29,6 +30,7 @@ public record SessionProjection(
         openTurns = Map.copyOf(openTurns);
         incompleteRequestIds = Set.copyOf(incompleteRequestIds);
         pendingTools = Map.copyOf(pendingTools);
+        executionEnvelopes = Map.copyOf(executionEnvelopes);
         warnings = List.copyOf(warnings);
     }
 
@@ -54,7 +56,7 @@ public record SessionProjection(
         updatedWarnings.add(warning);
         return new SessionProjection(activeSurface, topLevelConversation, openTurns,
                 lastAppliedSequence, historyVersion, compactionGeneration, lastCompletedUsage,
-                incompleteRequestIds, pendingTools, cleanlyClosed, updatedWarnings);
+                incompleteRequestIds, pendingTools, executionEnvelopes, cleanlyClosed, updatedWarnings);
     }
 
     public record SurfaceNode(long sequence, LlmClient.Message message) {
@@ -88,5 +90,38 @@ public record SessionProjection(
     }
 
     public record PendingToolInvocation(String invocationId, String name, String arguments) {
+    }
+
+    public record ExecutionEnvelope(
+            String executionId,
+            Long ordinal,
+            String explicitMode,
+            long startSequence,
+            Long userSequence,
+            Long assistantSequence,
+            String selectedMode,
+            String outcome,
+            String status,
+            Long endSequence) {
+
+        public ExecutionEnvelope withUser(long sequence) {
+            return new ExecutionEnvelope(executionId, ordinal, explicitMode, startSequence,
+                    sequence, assistantSequence, selectedMode, outcome, status, endSequence);
+        }
+
+        public ExecutionEnvelope withAssistant(long sequence) {
+            return new ExecutionEnvelope(executionId, ordinal, explicitMode, startSequence,
+                    userSequence, sequence, selectedMode, outcome, status, endSequence);
+        }
+
+        public ExecutionEnvelope ended(
+                long sequence, String selectedMode, String outcome, String status) {
+            return new ExecutionEnvelope(executionId, ordinal, explicitMode, startSequence,
+                    userSequence, assistantSequence, selectedMode, outcome, status, sequence);
+        }
+
+        public boolean ended() {
+            return endSequence != null;
+        }
     }
 }

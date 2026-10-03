@@ -1,5 +1,7 @@
 # 多 Agent 协作的 Plan-and-Execute
 
+> 顶层执行更新（2026-10-03）：inline/plain 的普通输入、`/react`、`/plan` 和 `/task add` 已共用统一 Execution 队列；Runtime API 仍走独立 headless 路径。本文的旧行号和早期实现分析保留为历史证据，当前提交、Session 隔离和恢复接线见 [统一后台执行 Runtime](31-unified-background-execution-runtime.md)。
+
 > **合并说明（2026-09-18）**
 >
 > 本文由原 `02-dag-orchestration.md`（DAG 任务编排）与 `03-multi-agent-collaboration.md`（Multi-Agent 协作）合并而成，现在同时覆盖简历里这两条项目描述。原 02 已删除。
@@ -396,7 +398,8 @@ prompts/modes/
 |---|---|---|
 | `PlanExecuteAgent` | Plan-and-Execute 的调度器 + 单任务循环 | 本文主角 |
 | `AgentOrchestrator`（已删除） | Planner / Worker / Reviewer 三角色协作，合并前的另一个模式 | **无关**，已并入 `PlanExecuteAgent` |
-| `DurableTaskManager` / `RuntimeApiServer` | 后台任务与 HTTP API | **无关**，它们内部跑的是普通 ReAct Agent（`Main.java:1119-1130`） |
+| `RuntimeExecutionQueue` / `TopLevelExecutionCoordinator` | inline/plain 的统一顶层队列与执行协调 | Worker 可路由到本模块，`/plan` 显式指定 Plan；不等同于 Plan 内部 DAG 队列 |
+| `DurableTaskManager` / `RuntimeApiServer` | 旧后台任务实现 / 当前 HTTP API | CLI 已不创建旧 Manager；HTTP API 仍是独立 headless ReAct 入口 |
 | `SubAgent` | 角色化的另一份 ReAct 循环，当前只服务 Reviewer | 与主 `Agent` 平行，不继承它 |
 
 另外五个容易混的点：

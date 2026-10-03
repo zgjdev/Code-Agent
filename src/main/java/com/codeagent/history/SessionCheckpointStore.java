@@ -184,6 +184,22 @@ public final class SessionCheckpointStore {
                     item.path("name").asText(null), item.path("arguments").asText(null));
             tools.put(tool.invocationId(), tool);
         }
+        Map<String, SessionProjection.ExecutionEnvelope> executions = new LinkedHashMap<>();
+        node.path("executionEnvelopes").fields().forEachRemaining(entry -> {
+            JsonNode item = entry.getValue();
+            SessionProjection.ExecutionEnvelope envelope = new SessionProjection.ExecutionEnvelope(
+                    item.path("executionId").asText(entry.getKey()),
+                    item.path("ordinal").isNumber() ? item.path("ordinal").longValue() : null,
+                    item.path("explicitMode").asText(null),
+                    item.path("startSequence").asLong(),
+                    item.path("userSequence").isNumber() ? item.path("userSequence").longValue() : null,
+                    item.path("assistantSequence").isNumber() ? item.path("assistantSequence").longValue() : null,
+                    item.path("selectedMode").asText(null),
+                    item.path("outcome").asText(null),
+                    item.path("status").asText(null),
+                    item.path("endSequence").isNumber() ? item.path("endSequence").longValue() : null);
+            executions.put(entry.getKey(), envelope);
+        });
         List<String> warnings = new ArrayList<>();
         node.path("warnings").forEach(item -> warnings.add(item.asText()));
         SessionProjection.MeasuredUsageFact fact = null;
@@ -200,7 +216,7 @@ public final class SessionCheckpointStore {
         return new SessionProjection(surface, conversation, openTurns,
                 node.path("lastAppliedSequence").asLong(), node.path("historyVersion").asLong(),
                 node.path("compactionGeneration").asLong(), fact, requests, tools,
-                node.path("cleanlyClosed").asBoolean(), warnings);
+                executions, node.path("cleanlyClosed").asBoolean(), warnings);
     }
 
     private static String prefixHash(List<SessionEvent> events, long sequence) throws IOException {

@@ -1,5 +1,7 @@
 # Plan-and-Execute 持久化 DAG 与 Session 绑定恢复
 
+> 后续实现说明（2026-10-03）：本文保留本次 Session 绑定恢复改造的设计背景。当前 inline/plain 的 Plan 已接入统一 Execution 队列，并通过 `execution_id` 关联恢复；旧 Plan 可经 `/plan resume` 接管。顶层执行恢复与 Session 生命周期以 [统一后台执行 Runtime](31-unified-background-execution-runtime.md) 为准，Task 边界恢复和非 exactly-once 限制仍适用。
+
 ## 1. 背景、目标与非目标
 
 `PlanStateStore` 已经能把 Plan DAG、Task 状态、资源声明、验收条件和执行结果 checkpoint 到 SQLite，并在进程退出后把遗留 `RUNNING/REVIEWING` Task 恢复为 `INTERRUPTED`。当前恢复身份使用 `workspace + resume_key`，其中 `resume_key` 是用户原始 Plan prompt。

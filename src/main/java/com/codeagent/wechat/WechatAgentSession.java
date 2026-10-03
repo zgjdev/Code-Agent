@@ -71,8 +71,13 @@ public class WechatAgentSession implements AutoCloseable {
             throw new IllegalStateException("当前已有微信任务在运行");
         }
         renderer.resetWechatStream();
-        runningToken = CancellationContext.startRun();
-        Callable<String> task = () -> agent.run(prompt);
+        runningToken = new CancellationToken();
+        CancellationToken executionToken = runningToken;
+        Callable<String> task = () -> {
+            try (CancellationContext.Scope ignored = CancellationContext.install(executionToken)) {
+                return agent.run(prompt);
+            }
+        };
         running = executor.submit(task);
         return running;
     }

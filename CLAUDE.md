@@ -6,7 +6,7 @@
 
 信息冲突时按以下顺序判断：代码实际行为 > AGENTS.md > CODEAGENT.md > README.md > ROADMAP.md > CLAUDE.md。ROADMAP.md 只表示演进方向，不代表已交付。
 
-CodeAgent 是面向商业使用的 Java 17+ Agent CLI，对标 Claude Code。当前主路径为 ReAct 与统一多 Agent 协作的 Plan-and-Execute（`PlanExecuteAgent`，由 `/plan` 进入，人工计划门与步骤自动评审串联生效），共享 ToolRegistry、Memory、Snapshot、Policy、Renderer 等基础设施。核心模块位于 src/main/java/com/codeagent/，测试位于 src/test/java/。
+CodeAgent 是面向商业使用的 Java 17+ Agent CLI，对标 Claude Code。inline/plain CLI 的普通输入先进入持久化 Execution 队列，Worker 开始执行时由 Mode Router 选择 ReAct 或统一多 Agent 协作的 Plan-and-Execute；`/react`、`/plan` 提供单轮覆盖。两条路径共享 ToolRegistry、Memory、Snapshot、Policy、Renderer 等基础设施。核心模块位于 src/main/java/com/codeagent/，测试位于 src/test/java/。完整运行时契约以 [AGENTS.md](AGENTS.md) 和 [统一后台执行运行时](docs/dev/31-unified-background-execution-runtime.md) 为准。
 
 ## 2. 开发流程（最高优先级）
 
@@ -66,7 +66,10 @@ flowchart LR
 ```mermaid
 graph TB
     CLI[CLI / Runtime API / WeChat] --> ROUTE[命令与入口解析]
-    ROUTE --> MODE{执行模式}
+    ROUTE --> QUEUE[inline/plain: RuntimeExecutionQueue]
+    QUEUE --> WORKER[workspace 单 Worker + Session Context lease]
+    WORKER --> MODE{执行模式}
+    ROUTE -->|Runtime API / WeChat / Lanterna 原路径| MODE
     MODE --> REACT[Agent ReAct]
     MODE --> PLAN[PlanExecuteAgent 统一多 Agent 协作]
     REACT --> CORE[Prompt + Context + ConversationLedger]
@@ -101,6 +104,7 @@ graph TB
 sequenceDiagram
     participant U as 用户
     participant M as Main/Runtime
+    participant Q as inline/plain Execution 队列与 Worker
     participant A as Agent 路径
     participant P as TurnToolPolicy
     participant T as ToolRegistry
@@ -108,8 +112,10 @@ sequenceDiagram
     participant R as Renderer
     participant C as ConversationLedger
     U->>M: 输入命令或任务
-    M->>M: 解析、展开 MCP/@path、建立 prompt
-    M->>A: 执行当前 mode
+    M->>M: 解析命令与 pending interaction
+    M->>Q: 持久化 submittedInput 并返回输入循环
+    Q->>Q: claim、取得 Session lease、展开 MCP/@path、durable routing ack
+    Q->>A: 执行当前 mode（其他入口保持原路径）
     A->>C: append user/system 边界
     A->>L: 请求（完整 request snapshot）
     L-->>A: reasoning/content/tool_call/usage
@@ -141,6 +147,8 @@ sequenceDiagram
 
 ## 6. 必须遵守的运行时约束
 
+- inline/plain 普通输入、`/react <任务>`、`/plan <任务>`、`/task add <任务>` 共用 runtime_executions 队列；运行中可直接输入追加任务，等待 Plan/HITL 时普通输入先作为交互回答，`/task add` 显式入队。Worker 不读终端，同 workspace 顶层串行、同 Session FIFO，任务开始时读取最新 Session 上下文。
+- SessionExecutionContextRegistry 管理 writable handle、独立 Agent/ParentConversationContext/MemoryManager/SkillContextBuffer；共享 ToolRegistry 绑定由进程级单 lease 和 CLI mutation 互斥锁保护。EOF/shutdown 保留非终态任务供恢复；API、WeChat、Lanterna TUI 尚未接入统一队列。详细生命周期、Plan execution_id 与恢复限制见 AGENTS.md 第 6 节。
 - ReAct 与 PlanExecuteAgent（`/plan` 入口，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
 - 工具授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard；策略拒绝不能通过换工具、provider 或分支绕过。
 - URL 只能来自顶层用户原文或成功 web_search 的结构化 discoveredUrls；搜索正文、reasoning、普通工具输出和回复文本都不能产生新授权。计划分支默认隔离 URL 凭据，只有声明的 DAG 后继可继承；步骤自动评审（stepReview）不改变这一步的授权继承。

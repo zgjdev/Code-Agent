@@ -24,6 +24,7 @@ import com.codeagent.prompt.PromptContext;
 import com.codeagent.prompt.PromptMode;
 import com.codeagent.prompt.ProjectMemoryLoader;
 import com.codeagent.runtime.CancellationContext;
+import com.codeagent.runtime.execution.ExecutionOutcome;
 import com.codeagent.skill.SkillContextBuffer;
 import com.codeagent.skill.SkillIndexFormatter;
 import com.codeagent.skill.SkillRegistry;
@@ -58,17 +59,19 @@ public class PlanExecuteAgent {
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
     private record PlanRunOutcome(String displayResult,
                                   String conversationResult,
-                                  boolean persistAssistantMessage) {
-        static PlanRunOutcome terminal(String displayResult, String conversationResult) {
-            return new PlanRunOutcome(displayResult, conversationResult, true);
+                                  boolean persistAssistantMessage,
+                                  ExecutionOutcome outcome) {
+        static PlanRunOutcome terminal(
+                String displayResult, String conversationResult, ExecutionOutcome outcome) {
+            return new PlanRunOutcome(displayResult, conversationResult, true, outcome);
         }
 
         static PlanRunOutcome rejected(String displayResult) {
-            return new PlanRunOutcome(displayResult, "", false);
+            return new PlanRunOutcome(displayResult, "", false, ExecutionOutcome.REJECTED);
         }
 
         static PlanRunOutcome canceledBeforeExecution(String displayResult) {
-            return new PlanRunOutcome(displayResult, "", false);
+            return new PlanRunOutcome(displayResult, "", false, ExecutionOutcome.CANCELED);
         }
     }
 
@@ -159,6 +162,7 @@ public class PlanExecuteAgent {
     private SkillContextBuffer skillContextBuffer;
     private TurnToolPolicy turnToolPolicy = TurnToolPolicy.forExplicitTask("");
     private String submittedPolicyInput = "";
+    private String runtimeExecutionId;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private final PlannerConversationContextBuilder plannerConversationContextBuilder =
             new PlannerConversationContextBuilder();
@@ -346,7 +350,8 @@ public class PlanExecuteAgent {
             throw new IOException("Plan 持久化不可用，已拒绝执行以避免不可恢复状态");
         }
         try {
-            planStateStore.savePlan(planWorkspace(), sessionId, submittedPolicyInput, plan);
+            planStateStore.savePlan(
+                    planWorkspace(), sessionId, runtimeExecutionId, submittedPolicyInput, plan);
             return true;
         } catch (SQLException e) {
             throw new IOException("保存 Plan 状态失败: " + e.getMessage(), e);
@@ -484,6 +489,15 @@ public class PlanExecuteAgent {
 
     /** Use submittedUserInput for policy decisions and userInput for expanded task context. */
     public String run(String userInput, String submittedUserInput) {
+        return runExecution(userInput, submittedUserInput).displayResult();
+    }
+
+    public void setRuntimeExecutionId(String executionId) {
+        this.runtimeExecutionId = executionId == null || executionId.isBlank()
+                ? null : executionId.trim();
+    }
+
+    public AgentExecutionResult runExecution(String userInput, String submittedUserInput) {
         reconcilePlanConversationSafely();
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
         submittedPolicyInput = submittedUserInput == null ? "" : submittedUserInput;
@@ -499,7 +513,7 @@ public class PlanExecuteAgent {
             if (CancellationContext.isCancelled()) {
                 conversationLedger.appendEvent(
                         "run_cancelled", "plan", "plan-agent", "before_planning", Map.of());
-                return "⏹️ 已取消当前计划执行。";
+                return AgentExecutionResult.canceled("⏹️ 已取消当前计划执行。");
             }
             PlanRunOutcome outcome = runWithPlan(userInput, streamState);
             if (outcome.persistAssistantMessage()
@@ -513,9 +527,10 @@ public class PlanExecuteAgent {
             }
             if (streamState.hasStreamedOutput()
                     && (outcome.displayResult() == null || outcome.displayResult().isBlank())) {
-                return "";
+                return new AgentExecutionResult(outcome.outcome(), "", outcomeError(outcome));
             }
-            return outcome.displayResult();
+            return new AgentExecutionResult(
+                    outcome.outcome(), outcome.displayResult(), outcomeError(outcome));
         } catch (Exception e) {
             log.error("Plan run failed", e);
             String errorMessage = "❌ 执行失败: " + e.getMessage();
@@ -524,8 +539,51 @@ public class PlanExecuteAgent {
                     "plan-agent",
                     "run_error",
                     LlmClient.Message.assistant(errorMessage));
-            return errorMessage;
+            return AgentExecutionResult.failed(errorMessage, e.getMessage());
         }
+    }
+
+    /** Resumes the Plan lineage already bound to this Runtime Execution, or starts it once. */
+    public AgentExecutionResult runOrResumeExecution(String userInput, String submittedUserInput) {
+        if (runtimeExecutionId != null && planStateStore != null) {
+            String sessionId = currentSessionId();
+            if (sessionId != null) {
+                try {
+                    List<PlanStateStore.StoredPlanInfo> lineage = planStateStore.findByExecution(
+                            planWorkspace(), sessionId, runtimeExecutionId);
+                    if (lineage.stream().anyMatch(PlanStateStore.StoredPlanInfo::active)) {
+                        return resumeActivePlanExecution();
+                    }
+                    if (!lineage.isEmpty()) {
+                        return convergeTerminalPlan(lineage.get(lineage.size() - 1));
+                    }
+                } catch (SQLException e) {
+                    return AgentExecutionResult.failed(
+                            "❌ 恢复计划失败: " + e.getMessage(), e.getMessage());
+                }
+            }
+        }
+        return runExecution(userInput, submittedUserInput);
+    }
+
+    private static AgentExecutionResult convergeTerminalPlan(PlanStateStore.StoredPlanInfo plan) {
+        String summary = plan.summary().isBlank() ? plan.goal() : plan.summary();
+        return switch (plan.status()) {
+            case COMPLETED -> AgentExecutionResult.succeeded(
+                    "✅ 已从持久化终态计划收敛执行结果。\n" + summary);
+            case FAILED -> AgentExecutionResult.failed(
+                    "⚠️ 持久化计划已失败。\n" + summary, summary);
+            case CANCELLED -> AgentExecutionResult.canceled(
+                    "⏹️ 持久化计划已取消。\n" + summary);
+            case CREATED, RUNNING -> throw new IllegalStateException(
+                    "Active Plan must be resumed instead of converged: " + plan.planId());
+        };
+    }
+
+    private static String outcomeError(PlanRunOutcome outcome) {
+        return outcome.outcome() == ExecutionOutcome.FAILED || outcome.outcome() == ExecutionOutcome.REJECTED
+                ? outcome.displayResult()
+                : null;
     }
 
 /**
@@ -558,21 +616,29 @@ public class PlanExecuteAgent {
     }
 
     public String resumeActivePlan() {
+        return resumeActivePlanExecution().displayResult();
+    }
+
+    public AgentExecutionResult resumeActivePlanExecution() {
         String sessionId = currentSessionId();
         if (planStateStore == null || sessionId == null || sessionId.isBlank()) {
-            return "⚠️ 当前没有可绑定的持久化 Session，无法恢复 Plan。";
+            return AgentExecutionResult.failed(
+                    "⚠️ 当前没有可绑定的持久化 Session，无法恢复 Plan。",
+                    "durable session unavailable");
         }
         try {
             requireDurableParentConversationContext();
             reconcilePlanConversation();
         } catch (IOException e) {
             log.warn("Plan resume reconciliation failed for session {}", sessionId, e);
-            return "❌ 恢复计划失败: " + e.getMessage();
+            return AgentExecutionResult.failed(
+                    "❌ 恢复计划失败: " + e.getMessage(), e.getMessage());
         }
 
         Optional<PlanStateStore.ResumeCandidate> candidateOptional = loadActivePlanForResume();
         if (candidateOptional.isEmpty()) {
-            return "ℹ️ 当前 Session 没有未完成 Plan。";
+            return AgentExecutionResult.failed(
+                    "ℹ️ 当前 Session 没有未完成 Plan。", "active plan unavailable");
         }
 
         PlanStateStore.ResumeCandidate candidate = candidateOptional.get();
@@ -590,7 +656,9 @@ public class PlanExecuteAgent {
         try {
             String turnId = currentOpenTurnId(candidate.plan().getId());
             if (turnId == null || turnId.isBlank()) {
-                return "❌ 恢复计划失败: durable Plan turn 不可用";
+                return AgentExecutionResult.failed(
+                        "❌ 恢复计划失败: durable Plan turn 不可用",
+                        "durable plan turn unavailable");
             }
             String priorConversationContext = priorConversationContextBeforeTurn(turnId);
             PlanRunOutcome outcome = executePlan(
@@ -602,10 +670,12 @@ public class PlanExecuteAgent {
                         "plan", "plan-agent", "resume_result",
                         LlmClient.Message.assistant(outcome.conversationResult()));
             }
-            return outcome.displayResult();
+            return new AgentExecutionResult(
+                    outcome.outcome(), outcome.displayResult(), outcomeError(outcome));
         } catch (Exception e) {
             log.error("Plan resume failed: {}", candidate.plan().getId(), e);
-            return "❌ 恢复计划失败: " + e.getMessage();
+            return AgentExecutionResult.failed(
+                    "❌ 恢复计划失败: " + e.getMessage(), e.getMessage());
         }
     }
 
@@ -907,7 +977,8 @@ public class PlanExecuteAgent {
                 checkpointPlanDurably(plan);
                 String conversationResult = conversationResultBuilder.build(plan);
                 finishPlanTurnIfNeeded(turnId, plan, conversationResult);
-                return PlanRunOutcome.terminal("⏹️ 已取消当前计划执行。", conversationResult);
+                return PlanRunOutcome.terminal(
+                        "⏹️ 已取消当前计划执行。", conversationResult, ExecutionOutcome.CANCELED);
             }
             List<Task> executableTasks = getExecutableTasksInOrder(plan);
             if (executableTasks.isEmpty()) {
@@ -989,12 +1060,14 @@ public class PlanExecuteAgent {
                         finishPlanTurnIfNeeded(turnId, plan, conversationResult);
                         return PlanRunOutcome.terminal(
                                 prefix + nullToEmpty(replannedOutcome.displayResult()),
-                                conversationResult);
+                                conversationResult,
+                                replannedOutcome.outcome());
                     }
                     return new PlanRunOutcome(
                             prefix + nullToEmpty(replannedOutcome.displayResult()),
                             replannedOutcome.conversationResult(),
-                            true);
+                            true,
+                            replannedOutcome.outcome());
                 }
             }
         }
@@ -1011,7 +1084,8 @@ public class PlanExecuteAgent {
                     : finalResult.toString();
             return PlanRunOutcome.terminal(
                     "⚠️ 计划包含未验证任务。\n" + detail,
-                    conversationResult);
+                    conversationResult,
+                    ExecutionOutcome.FAILED);
         }
 
         if (!plan.isAllCompleted() && !plan.hasFailed()) {
@@ -1021,7 +1095,8 @@ public class PlanExecuteAgent {
             finishPlanTurnIfNeeded(turnId, plan, conversationResult);
             return PlanRunOutcome.terminal(
                     "⚠️ 计划未能继续推进，存在未满足依赖的任务。",
-                    conversationResult);
+                    conversationResult,
+                    ExecutionOutcome.FAILED);
         }
 
         String planSummary = finalResult.isEmpty()
@@ -1036,7 +1111,7 @@ public class PlanExecuteAgent {
             String display = planSummary.isBlank()
                     ? "⚠️ 计划部分完成，有任务失败。"
                     : "⚠️ 计划部分完成，有任务失败。\n" + planSummary;
-            return PlanRunOutcome.terminal(display, conversationResult);
+            return PlanRunOutcome.terminal(display, conversationResult, ExecutionOutcome.FAILED);
         }
 
         plan.markCompleted();
@@ -1046,7 +1121,7 @@ public class PlanExecuteAgent {
         String display = planSummary.isBlank()
                 ? "✅ 计划执行完成！"
                 : "✅ 计划执行完成！\n" + planSummary;
-        return PlanRunOutcome.terminal(display, conversationResult);
+        return PlanRunOutcome.terminal(display, conversationResult, ExecutionOutcome.SUCCEEDED);
     }
 
     private List<Task> getExecutableTasksInOrder(ExecutionPlan plan) {

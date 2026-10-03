@@ -28,6 +28,44 @@ class SessionExecutionContextRegistryTest {
     }
 
     @Test
+    void sharedRuntimeAllowsOnlyOneWritableLeaseAcrossSessions() throws Exception {
+        try (SessionExecutionContextRegistry<TestContext> registry =
+                     new SessionExecutionContextRegistry<>(
+                             TestContext::new, ignored -> false, ignored -> false)) {
+            try (var first = registry.acquire("session-a")) {
+                IllegalStateException failure = assertThrows(
+                        IllegalStateException.class,
+                        () -> registry.acquire("session-b"));
+                assertTrue(failure.getMessage().contains("session-a"));
+            }
+
+            try (var second = registry.acquire("session-b")) {
+                assertEquals("session-b", second.context().sessionId);
+            }
+        }
+    }
+
+    @Test
+    void adoptsAlreadyOpenStartupContextWithoutLoadingSecondHandle() throws Exception {
+        AtomicInteger loads = new AtomicInteger();
+        TestContext startup = new TestContext("session-startup");
+        try (SessionExecutionContextRegistry<TestContext> registry =
+                     new SessionExecutionContextRegistry<>(sessionId -> {
+                         loads.incrementAndGet();
+                         return new TestContext(sessionId);
+                     }, ignored -> false, ignored -> false)) {
+            registry.adopt("session-startup", startup);
+
+            try (var lease = registry.acquire("session-startup")) {
+                assertSame(startup, lease.context());
+            }
+            assertEquals(0, loads.get());
+            assertThrows(IllegalStateException.class,
+                    () -> registry.adopt("session-startup", new TestContext("duplicate")));
+        }
+    }
+
+    @Test
     void evictionRefusesCurrentBusyOrPendingSession() throws Exception {
         AtomicInteger closed = new AtomicInteger();
         SessionExecutionContextRegistry<TestContext> registry =

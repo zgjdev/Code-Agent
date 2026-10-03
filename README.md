@@ -127,6 +127,8 @@ Plan 路径包含：
 
 使用 `/plan resume` 继续当前 Session 的未完成计划，使用 `/plan abandon` 显式放弃。
 
+inline/plain CLI 的 `/plan resume` 会将旧版、尚未绑定 Execution 的活动 Plan 收养到统一队列；已绑定 Execution 的计划随对应任务恢复。恢复保留已完成节点，从未完成的 Task 边界继续，不保证工具副作用恰好执行一次。
+
 ## 核心能力
 
 ### 代码与终端工具
@@ -167,6 +169,8 @@ CodeAgent 把实时确定性工具与索引式 RAG 分开：
 - Provider Surface 和 Top-level Conversation View 分离维护。
 - ReAct 与 Plan 共享顶层语义连续性，但不共享 Task transcript 或隐式权限。
 - 上下文接近预算时自动压缩，也可以手动执行 `/compact`。
+
+inline/plain CLI 由 Session Context Registry 管理每个 Session 的 Agent、上下文和 writable 会话句柄。`/new`、`/resume` 在源或目标 Session 有非终态任务时拒绝切换；共享运行态正被其他 Session 执行使用时，也会拒绝修改会话或运行配置。退出会停止当前执行并保留可恢复的非终态任务，相关 Session 保持未关闭；恢复任务不会因关闭终端而继续在独立服务中运行。
 
 常用命令：
 
@@ -323,6 +327,10 @@ inline/plain CLI 的普通输入、`/react <任务>`、`/plan <任务>` 和 `/ta
 
 当前 workspace 的顶层 Execution 严格串行；Plan 内部仍可按资源声明并行执行最多 4 个无冲突 DAG 节点。`/cancel` 取消当前 RUNNING Execution。Lanterna TUI、Runtime HTTP API 和 WeChat 暂未接入该队列。
 
+Agent 运行时可以直接输入下一条任务并回车，无需 `/task add`。新任务排队等待，开始执行时读取前序任务完成后的最新 Session 上下文；它不会中途修改正在运行的任务。等待 HITL 审批或 Plan 人工评审时，普通输入优先作为交互回答处理，无效审批输入不会变成任务；此时使用 `/task add <任务>` 可以明确追加任务。
+
+实现与恢复限制见 [统一后台执行运行时](docs/dev/31-unified-background-execution-runtime.md)。
+
 Runtime API 仅监听 loopback，并强制要求 API Key：
 
 ```bash
@@ -409,7 +417,10 @@ raw session、日志和导出可能包含敏感内容，请勿提交或公开复
 ```mermaid
 graph TB
     CLI[CLI / Runtime API / WeChat] --> ENTRY[命令与入口解析]
-    ENTRY --> MODE{执行模式}
+    ENTRY --> QUEUE[inline/plain: RuntimeExecutionQueue]
+    QUEUE --> WORKER[workspace 单 Worker + Session Context lease]
+    WORKER --> MODE{执行模式}
+    ENTRY -->|Runtime API / WeChat / Lanterna 原路径| MODE
     MODE --> REACT[Agent ReAct]
     MODE --> PLAN[PlanExecuteAgent]
     REACT --> CORE[Prompt + Context + Conversation Ledger]
@@ -477,7 +488,7 @@ src/main/java/com/codeagent/
 ├── policy/      安全策略与审计
 ├── rag/         索引、检索与 Embedding
 ├── render/      inline/plain 渲染器
-├── runtime/     后台任务与 Runtime API
+├── runtime/     统一执行队列、交互 Broker 与 Runtime API
 ├── skill/       Skill 发现、加载和状态
 ├── snapshot/    Side-Git 快照
 ├── tool/        工具注册与统一执行入口

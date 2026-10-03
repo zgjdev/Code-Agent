@@ -60,6 +60,9 @@ import com.codeagent.runtime.execution.ExecutionOutcome;
 import com.codeagent.runtime.execution.RuntimeExecution;
 import com.codeagent.runtime.execution.RuntimeExecutionQueue;
 import com.codeagent.runtime.execution.RuntimeExecutionStore;
+import com.codeagent.runtime.execution.SessionExecutionContext;
+import com.codeagent.runtime.execution.SessionExecutionContextFactory;
+import com.codeagent.runtime.execution.SessionExecutionContextRegistry;
 import com.codeagent.runtime.execution.TopLevelExecutionCoordinator;
 import com.codeagent.runtime.execution.TopLevelExecutionResult;
 import com.codeagent.runtime.execution.WorkspaceAwareExecutionScheduler;
@@ -72,6 +75,7 @@ import com.codeagent.runtime.task.TaskCommandFormatter;
 import com.codeagent.snapshot.RestoreResult;
 import com.codeagent.snapshot.SnapshotService;
 import com.codeagent.snapshot.TurnSnapshot;
+import com.codeagent.skill.SkillContextBuffer;
 import com.codeagent.skill.SkillRegistry;
 import com.codeagent.tool.ToolRegistry;
 import com.codeagent.util.AnsiStyle;
@@ -113,6 +117,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
@@ -122,6 +127,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 
 /**
@@ -355,6 +361,7 @@ public class Main {
                         startupNote,
                         "原始会话账本初始化失败: " + e.getMessage());
             }
+            final ConversationLedger sessionConversationLedger = conversationLedger;
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
             reactAgent.setConversationLedger(conversationLedger);
@@ -424,6 +431,10 @@ public class Main {
             BrokerHitlHandler brokerHitlHandler = new BrokerHitlHandler(
                     hitlHandler.isEnabled(), interactionBroker, uiEvents::interaction);
             hitlHandler.setDelegate(brokerHitlHandler);
+            configureSessionAgent(reactAgent, sessionConversationLedger, mcpServerManager,
+                    skillRegistry, skillContextBuffer, renderer, hitlHandler);
+            reactAgent.getToolRegistry().setWriteFileObserver(
+                    (path, ba) -> renderer.appendDiff(path, ba[0], ba[1]));
 
             RuntimeExecutionStore executionStore;
             try {
@@ -440,61 +451,98 @@ public class Main {
                 interactionBroker.close();
                 throw new IllegalStateException("Plan 状态库初始化失败: " + e.getMessage(), e);
             }
-            TopLevelExecutionCoordinator executionCoordinator = new TopLevelExecutionCoordinator(
-                    executionStore,
-                    execution -> localPathMentionExpander.expand(
-                            mentionExpander.expand(execution.submittedInput())),
-                    (submittedInput, history) -> {
-                        LlmClient client = llmClientRef.get();
-                        ExecutionModeRouter router = new ExecutionModeRouter(
-                                client, modeRouterPromptBuilder);
-                        return selectExecutionMode(null, router, submittedInput, history);
-                    },
-                    sessionId -> {
-                        SessionStore.SessionHandle session = activeSession.get();
-                        if (session == null || !session.sessionId().equals(sessionId)) {
-                            throw new IllegalStateException(
-                                    "Execution 绑定的 Session 当前不可用: " + sessionId);
-                        }
-                        return reactAgent.getParentConversationContext().conversationNodes();
-                    },
-                    (mode, submittedInput, action) -> reactAgent.getToolRegistry()
-                            .getSnapshotService()
-                            .runTurn(mode.name().toLowerCase(Locale.ROOT), submittedInput, action::run),
-                    (execution, resolvedInput, token) -> {
-                        AgentExecutionResult result = reactAgent.runExecution(
-                                resolvedInput, execution.submittedInput());
-                        return topLevelResult(result);
-                    },
-                    (execution, resolvedInput, token) -> {
-                        PlanExecuteAgent planAgent = createPlanAgent(
-                                llmClientRef.get(),
-                                reactAgent,
-                                new BrokerPlanReviewHandler(interactionBroker, uiEvents::interaction),
-                                ui);
-                        planAgent.setRuntimeExecutionId(execution.id());
-                        planAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
-                        planAgent.setSkillRegistry(skillRegistry);
-                        planAgent.setSkillContextBuffer(skillContextBuffer);
-                        return topLevelResult(planAgent.runOrResumeExecution(
-                                resolvedInput, execution.submittedInput()));
+            SessionExecutionContextFactory sessionContextFactory = sessionStore == null
+                    ? null
+                    : new SessionExecutionContextFactory(sessionStore, workspace, buffer -> {
+                        Agent agent = new Agent(llmClientRef.get(), hitlToolRegistry);
+                        configureSessionAgent(agent, sessionConversationLedger, mcpServerManager,
+                                skillRegistry, buffer, renderer, hitlHandler);
+                        return agent;
                     });
+            SessionExecutionContextRegistry<SessionExecutionContext> sessionContexts =
+                    new SessionExecutionContextRegistry<>(sessionId -> {
+                        if (sessionContextFactory == null) {
+                            throw new IllegalStateException("可恢复会话存储不可用");
+                        }
+                        SessionExecutionContext context = sessionContextFactory.load(sessionId);
+                        try {
+                            reconcileTerminalExecutionEnvelopes(executionStore, context.session());
+                            return context;
+                        } catch (Exception failure) {
+                            context.close();
+                            throw failure;
+                        }
+                    }, sessionId -> hasNonTerminalQuietly(executionStore, sessionId),
+                            sessionId -> interactionBroker.pending()
+                                    .map(request -> sessionId.equals(request.sessionId()))
+                                    .orElse(false));
+            if (activeSession.get() != null) {
+                sessionContexts.adopt(activeSession.get().sessionId(),
+                        new SessionExecutionContext(reactAgent, activeSession.get(), skillContextBuffer));
+            }
+            AtomicReference<Agent> activeAgent = new AtomicReference<>(reactAgent);
+            ReentrantLock sharedRuntimeLock = new ReentrantLock();
+            Function<Agent, TopLevelExecutionCoordinator> coordinatorFor = executionAgent ->
+                    new TopLevelExecutionCoordinator(
+                            executionStore,
+                            execution -> localPathMentionExpander.expand(
+                                    mentionExpander.expand(execution.submittedInput())),
+                            (submittedInput, history) -> {
+                                LlmClient client = llmClientRef.get();
+                                ExecutionModeRouter router = new ExecutionModeRouter(
+                                        client, modeRouterPromptBuilder);
+                                return selectExecutionMode(null, router, submittedInput, history);
+                            },
+                            sessionId -> {
+                                SessionStore.SessionHandle bound = executionAgent.getSessionHandle();
+                                if (bound == null || !bound.sessionId().equals(sessionId)) {
+                                    throw new IllegalStateException(
+                                            "Execution 与 Session 上下文不匹配: " + sessionId);
+                                }
+                                return executionAgent.getParentConversationContext().conversationNodes();
+                            },
+                            (mode, submittedInput, action) -> executionAgent.getToolRegistry()
+                                    .getSnapshotService()
+                                    .runTurn(mode.name().toLowerCase(Locale.ROOT),
+                                            submittedInput, action::run),
+                            (execution, resolvedInput, token) -> topLevelResult(
+                                    executionAgent.runExecution(
+                                            resolvedInput, execution.submittedInput())),
+                            (execution, resolvedInput, token) -> {
+                                PlanExecuteAgent planAgent = createPlanAgent(
+                                        llmClientRef.get(),
+                                        executionAgent,
+                                        new BrokerPlanReviewHandler(
+                                                interactionBroker, uiEvents::interaction),
+                                        ui);
+                                planAgent.setRuntimeExecutionId(execution.id());
+                                planAgent.setExternalContextSupplier(
+                                        mcpServerManager::resourceIndexForPrompt);
+                                planAgent.setSkillRegistry(skillRegistry);
+                                planAgent.setSkillContextBuffer(
+                                        executionAgent.getToolRegistry().getSkillContextBuffer());
+                                return topLevelResult(planAgent.runOrResumeExecution(
+                                        resolvedInput, execution.submittedInput()));
+                            });
             WorkspaceAwareExecutionScheduler executionScheduler =
                     new WorkspaceAwareExecutionScheduler(executionStore, workspace, (execution, token) -> {
-                        SessionStore.SessionHandle session = activeSession.get();
-                        if (session == null || !session.sessionId().equals(execution.sessionId())) {
-                            throw new IllegalStateException(
-                                    "Execution 绑定的 Session 当前不可写: " + execution.sessionId());
-                        }
-                        try (ExecutionInteractionContext.Scope ignored =
+                        sharedRuntimeLock.lockInterruptibly();
+                        try {
+                            try (SessionExecutionContextRegistry.Lease<SessionExecutionContext> lease =
+                                     sessionContexts.acquire(execution.sessionId());
+                             ExecutionInteractionContext.Scope ignored =
                                      ExecutionInteractionContext.install(
                                              execution.id(), execution.sessionId())) {
+                            SessionExecutionContext context = lease.context();
+                            context.activateSharedBindings();
+                            Agent executionAgent = context.agent();
+                            SessionStore.SessionHandle session = context.session();
                             executionFinalizer.ensureStarted(execution, session);
                             uiEvents.started(execution, statusInfo(
-                                    reactAgent, mcpServerManager, skillRegistry, "running"));
+                                    executionAgent, mcpServerManager, skillRegistry, "running"));
                             TopLevelExecutionResult proposed;
                             try {
-                                proposed = executionCoordinator.run(execution, token);
+                                proposed = coordinatorFor.apply(executionAgent).run(execution, token);
                             } catch (InterruptedException interrupted) {
                                 throw interrupted;
                             } catch (CancellationException canceled) {
@@ -523,8 +571,23 @@ public class Main {
                             interactionBroker.cancelExecution(
                                     execution.id(), "Execution 已结束");
                             uiEvents.completed(completedExecution, proposed.result(), statusInfo(
-                                    reactAgent, mcpServerManager, skillRegistry, "idle"));
+                                    executionAgent, mcpServerManager, skillRegistry, "idle"));
                             return proposed;
+                            } finally {
+                                SessionStore.SessionHandle selected = activeSession.get();
+                                if (selected != null
+                                        && !selected.sessionId().equals(execution.sessionId())) {
+                                    try (SessionExecutionContextRegistry.Lease<SessionExecutionContext> lease =
+                                                 sessionContexts.acquire(selected.sessionId())) {
+                                        lease.context().activateSharedBindings();
+                                    } catch (Exception restoreFailure) {
+                                        uiEvents.message("⚠️ 当前会话运行态恢复失败: "
+                                                + restoreFailure.getMessage());
+                                    }
+                                }
+                            }
+                        } finally {
+                            sharedRuntimeLock.unlock();
                         }
                     }, () -> legacyPlanClaimAllowed(
                             executionPlanStore, workspace, activeSession.get()));
@@ -541,17 +604,12 @@ public class Main {
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 executionScheduler.close();
                 interactionBroker.close();
-                closeSessionQuietly(activeSession.get());
+                closeSessionContextsQuietly(sessionContexts);
                 try {
                     executionStore.close();
                 } catch (Exception ignored) {
                 }
             }, "codeagent-execution-shutdown"));
-
-            reactAgent.setRenderer(renderer);
-            reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled);
-            reactAgent.getToolRegistry().setWriteFileObserver(
-                    (path, ba) -> renderer.appendDiff(path, ba[0], ba[1]));
 
             // Day 3：inline 模式绑 Ctrl+O 到 BlockRegistry.toggleLast 实现折叠块展开/收起
             boolean spaciousPrompt = false;
@@ -605,6 +663,7 @@ public class Main {
                     continue;
                 }
                 SessionStore.SessionHandle currentSession = activeSession.get();
+                Agent currentAgent = activeAgent.get();
                 boolean sessionBusy = false;
                 if (currentSession != null) {
                     try {
@@ -635,7 +694,19 @@ public class Main {
                     printSubmittedInput(renderer, ui, input);
                     submittedInputRendered = true;
                 }
-                switch (command.type()) {
+                ExecutionControlPolicy.Category commandCategory =
+                        ExecutionControlPolicy.classify(command.type());
+                boolean commandRuntimeLocked = false;
+                if (commandCategory == ExecutionControlPolicy.Category.SESSION_MUTATION
+                        || commandCategory == ExecutionControlPolicy.Category.RUNTIME_MUTATION) {
+                    commandRuntimeLocked = sharedRuntimeLock.tryLock();
+                    if (!commandRuntimeLocked) {
+                        uiEvents.message("⏳ 另一 Session 的 Execution 正在使用共享运行态，暂不能执行该命令");
+                        continue;
+                    }
+                }
+                try {
+                    switch (command.type()) {
                     case UNKNOWN_COMMAND -> {
                         ui.println("❌ 未知命令: " + command.payload());
                         printSlashCommandHelp(ui);
@@ -648,8 +719,9 @@ public class Main {
                                 && hasNonTerminalQuietly(
                                         executionQueue, activeSession.get().sessionId());
                         if (!keepSessionOpen) {
-                            closeSessionNormally(activeSession.get(), "exit");
+                            markSessionClosedQuietly(activeSession.get(), "exit");
                         }
+                        closeSessionContextsQuietly(sessionContexts);
                         closeExecutionStoreQuietly(executionStore);
                         ui.println("\n👋 再见!");
                         wechatRuntime.stop();
@@ -673,14 +745,14 @@ public class Main {
                         continue;
                     }
                     case CLEAR -> {
-                        reactAgent.clearHistory();
+                        currentAgent.clearHistory();
                         hitlHandler.clearApprovedAll();
-                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         ui.println("🗑️ 当前对话历史已清空，长期记忆保持不变\n");
                         continue;
                     }
                     case COMPACT -> {
-                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "compacting"));
+                        renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "compacting"));
                         boolean activityPanel = renderer.supportsActivityPanel();
                         if (activityPanel) {
                             renderer.beginActivity("Compacting conversation", "正在整理早期对话并生成摘要");
@@ -689,12 +761,12 @@ public class Main {
                         }
                         Agent.CompactionResult result;
                         try {
-                            result = reactAgent.compactHistoryNow();
+                            result = currentAgent.compactHistoryNow();
                         } finally {
                             if (activityPanel) {
                                 renderer.endActivity();
                             }
-                            renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                            renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         }
                         if (result.error() != null && !result.error().isBlank()) {
                             ui.println("❌ 手动压缩失败: " + result.error() + "\n");
@@ -731,26 +803,37 @@ public class Main {
                             ui.println("❌ 用法: /resume <session-id>\n");
                             continue;
                         }
-                        SessionStore.SessionHandle prepared = null;
                         try {
                             String targetSessionId = "last".equalsIgnoreCase(command.payload())
                                     ? sessionStore.latest(workspace)
                                             .orElseThrow(() -> new IOException("当前项目没有持久化会话"))
                                             .sessionId()
                                     : command.payload();
-                            prepared = sessionStore.resumeWritable(targetSessionId, workspace);
-                            reactAgent.attachSession(prepared);
-                            SessionStore.SessionHandle previous = activeSession.getAndSet(prepared);
-                            closeSessionQuietly(previous);
+                            if (hasNonTerminalQuietly(executionStore, targetSessionId)) {
+                                throw new IllegalStateException("目标会话仍有排队或运行中的任务");
+                            }
+                            String previousSessionId = activeSession.get() == null
+                                    ? null : activeSession.get().sessionId();
+                            try (SessionExecutionContextRegistry.Lease<SessionExecutionContext> lease =
+                                         sessionContexts.acquire(targetSessionId)) {
+                                SessionExecutionContext context = lease.context();
+                                context.activateSharedBindings();
+                                activeAgent.set(context.agent());
+                                activeSession.set(context.session());
+                            }
+                            if (previousSessionId != null
+                                    && !previousSessionId.equals(targetSessionId)) {
+                                evictSessionContextQuietly(
+                                        sessionContexts, previousSessionId, targetSessionId);
+                            }
                             sessionIdCandidates.set(sessionIds(sessionStore, workspace));
-                            ui.println("✅ 已恢复会话 " + prepared.sessionId());
-                            String planNotice = activePlanNotice(workspace, prepared);
+                            ui.println("✅ 已恢复会话 " + targetSessionId);
+                            String planNotice = activePlanNotice(workspace, activeSession.get());
                             if (!planNotice.isBlank()) {
                                 ui.println(planNotice);
                             }
                             ui.println();
                         } catch (Exception e) {
-                            closeSessionQuietly(prepared);
                             ui.println("❌ 恢复会话失败，当前会话保持不变: " + e.getMessage() + "\n");
                         }
                         continue;
@@ -760,18 +843,36 @@ public class Main {
                             ui.println("❌ 可恢复会话存储不可用\n");
                             continue;
                         }
-                        SessionStore.SessionHandle prepared = null;
+                        String createdSessionId = null;
                         try {
-                            prepared = sessionStore.create(new SessionStore.SessionCreateRequest(
+                            SessionStore.SessionHandle created = sessionStore.create(
+                                    new SessionStore.SessionCreateRequest(
                                     workspace, llmClient.getProviderName(), llmClient.getModelName(),
                                     null, "react", "agent"));
-                            reactAgent.attachSession(prepared);
-                            SessionStore.SessionHandle previous = activeSession.getAndSet(prepared);
-                            closeSessionNormally(previous, "new-session");
+                            String targetSessionId = created.sessionId();
+                            createdSessionId = targetSessionId;
+                            closeSessionQuietly(created);
+                            SessionStore.SessionHandle previous = activeSession.get();
+                            String previousSessionId = previous == null ? null : previous.sessionId();
+                            try (SessionExecutionContextRegistry.Lease<SessionExecutionContext> lease =
+                                         sessionContexts.acquire(targetSessionId)) {
+                                SessionExecutionContext context = lease.context();
+                                context.activateSharedBindings();
+                                activeAgent.set(context.agent());
+                                activeSession.set(context.session());
+                            }
+                            if (previous != null) {
+                                markSessionClosedQuietly(previous, "new-session");
+                            }
+                            if (previousSessionId != null) {
+                                evictSessionContextQuietly(
+                                        sessionContexts, previousSessionId, targetSessionId);
+                            }
                             sessionIdCandidates.set(sessionIds(sessionStore, workspace));
-                            ui.println("✅ 已创建新会话 " + prepared.sessionId() + "\n");
+                            ui.println("✅ 已创建新会话 " + targetSessionId + "\n");
                         } catch (Exception e) {
-                            closeSessionQuietly(prepared);
+                            closeAbandonedSessionQuietly(
+                                    sessionStore, workspace, createdSessionId, "new-session-failed");
                             ui.println("❌ 创建新会话失败，当前会话保持不变: " + e.getMessage() + "\n");
                         }
                         continue;
@@ -791,7 +892,7 @@ public class Main {
                         }
                         try {
                             ProjectMemoryInitializer.InitResult result = ProjectMemoryInitializer.initialize(
-                                    Path.of(reactAgent.getToolRegistry().getProjectPath()), force);
+                                    Path.of(currentAgent.getToolRegistry().getProjectPath()), force);
                             if (result.written()) {
                                 ui.println("✅ " + result.message());
                                 ui.println("   路径: " + result.path());
@@ -807,14 +908,14 @@ public class Main {
                     }
                     case CONTEXT_STATUS -> {
                         ui.println("📋 上下文状态：");
-                        ui.println(reactAgent.getContextStatus());
+                        ui.println(currentAgent.getContextStatus());
                         ui.println();
                         continue;
                     }
                     case MEMORY_STATUS -> {
                         ui.println("📋 记忆系统状态：");
-                        ui.println(reactAgent.getMemoryManager().getSystemStatus());
-                        ui.println("   当前项目作用域: " + reactAgent.getMemoryManager().getCurrentProject());
+                        ui.println(currentAgent.getMemoryManager().getSystemStatus());
+                        ui.println("   当前项目作用域: " + currentAgent.getMemoryManager().getCurrentProject());
                         ui.println("   /memory list - 查看长期记忆");
                         ui.println("   /memory search <关键词> - 搜索当前项目可见长期记忆");
                         ui.println("   /memory delete <id> - 删除单条长期记忆");
@@ -824,7 +925,7 @@ public class Main {
                         continue;
                     }
                     case MEMORY_LIST -> {
-                        List<MemoryEntry> entries = reactAgent.getMemoryManager().listLongTerm();
+                        List<MemoryEntry> entries = currentAgent.getMemoryManager().listLongTerm();
                         ui.println(formatMemoryEntries("📋 长期记忆列表", entries));
                         ui.println();
                         continue;
@@ -834,7 +935,7 @@ public class Main {
                         if (query == null || query.isBlank()) {
                             ui.println("❌ 请提供搜索关键词，例如 /memory search Chrome 登录态\n");
                         } else {
-                            List<MemoryEntry> entries = reactAgent.getMemoryManager().searchLongTerm(query, 20);
+                            List<MemoryEntry> entries = currentAgent.getMemoryManager().searchLongTerm(query, 20);
                             ui.println(formatMemoryEntries("🔎 长期记忆搜索: " + query, entries));
                             ui.println();
                         }
@@ -844,7 +945,7 @@ public class Main {
                         String id = command.payload();
                         if (id == null || id.isBlank()) {
                             ui.println("❌ 请提供要删除的记忆 id，例如 /memory delete fact-abcd1234\n");
-                        } else if (reactAgent.getMemoryManager().deleteLongTerm(id)) {
+                        } else if (currentAgent.getMemoryManager().deleteLongTerm(id)) {
                             ui.println("🗑️ 已删除长期记忆: " + id + "\n");
                         } else {
                             ui.println("📭 未找到长期记忆: " + id + "\n");
@@ -852,7 +953,7 @@ public class Main {
                         continue;
                     }
                     case MEMORY_CLEAR -> {
-                        reactAgent.getMemoryManager().clearLongTerm();
+                        currentAgent.getMemoryManager().clearLongTerm();
                         ui.println("🧹 长期记忆已清空\n");
                         ui.println();
                         continue;
@@ -862,7 +963,7 @@ public class Main {
                         if (saveRequest.fact().isEmpty()) {
                             ui.println("❌ 请提供要保存的内容，例如 /save 这个项目使用Java 17，或 /save --global 默认用中文回答\n");
                         } else {
-                            String result = reactAgent.getMemoryManager().storeFactWithResult(
+                            String result = currentAgent.getMemoryManager().storeFactWithResult(
                                     saveRequest.fact(), saveRequest.scope(), command.payload());
                             ui.println(result + "\n");
                         }
@@ -902,7 +1003,7 @@ public class Main {
                     case PLAN_ABANDON -> {
                         nextTaskOverride = null;
                         PlanExecuteAgent planAgent = createPlanAgent(
-                                llmClient, reactAgent, terminal, lineReader, ui);
+                                llmClient, currentAgent, terminal, lineReader, ui);
                         String response = planAgent.abandonActivePlan();
                         executionScheduler.signalWork();
                         if (response != null && !response.isBlank()) {
@@ -957,11 +1058,11 @@ public class Main {
                                 llmClientRef.set(newClient);
                                 config.setDefaultProvider(target.provider());
                                 config.save();
-                                reactAgent.setLlmClient(llmClient);
+                                currentAgent.setLlmClient(llmClient);
                                 ui.println("✅ 已切换到: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
-                                ui.println("   上下文策略: " + reactAgent.getMemoryManager().getContextProfile().summary());
+                                ui.println("   上下文策略: " + currentAgent.getMemoryManager().getContextProfile().summary());
                                 ui.println("   对话上下文已保留，使用 /clear 可清空\n");
-                                renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                                renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                             }
                         }
                         continue;
@@ -981,11 +1082,11 @@ public class Main {
                             ui.println("   /hitl on  - 启用人工审批");
                             ui.println("   /hitl off - 关闭人工审批\n");
                         }
-                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
                     case POLICY_STATUS -> {
-                        printPolicyStatus(ui, reactAgent);
+                        printPolicyStatus(ui, currentAgent);
                         continue;
                     }
                     case CONFIG -> {
@@ -993,25 +1094,25 @@ public class Main {
                             handleConfigPalette(renderer, config, llmClient, hitlHandler, skillRegistry);
                         } else if (command.payload().trim().toLowerCase().startsWith("embedding")) {
                             ui.println(handleEmbeddingConfigCommand(config, command.payload(),
-                                    Path.of(reactAgent.getToolRegistry().getProjectPath()),
-                                    reactAgent.getToolRegistry(), hitlHandler));
-                            renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                                    Path.of(currentAgent.getToolRegistry().getProjectPath()),
+                                    currentAgent.getToolRegistry(), hitlHandler));
+                            renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         } else {
                             ui.println(handleConfigCommand(config, command.payload()));
-                            renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                            renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         }
                         continue;
                     }
                     case AUDIT_TAIL -> {
-                        printAuditTail(ui, reactAgent, command.payload());
+                        printAuditTail(ui, currentAgent, command.payload());
                         continue;
                     }
                     case SNAPSHOT -> {
-                        printSnapshotCommand(ui, reactAgent.getToolRegistry().getSnapshotService(), command.payload());
+                        printSnapshotCommand(ui, currentAgent.getToolRegistry().getSnapshotService(), command.payload());
                         continue;
                     }
                     case RESTORE_SNAPSHOT -> {
-                        printRestoreCommand(ui, reactAgent.getToolRegistry().getSnapshotService(), command.payload());
+                        printRestoreCommand(ui, currentAgent.getToolRegistry().getSnapshotService(), command.payload());
                         continue;
                     }
                     case MCP_LIST -> {
@@ -1021,7 +1122,7 @@ public class Main {
                     }
                     case MCP_RESTART -> {
                         printMcpCommandResult(ui, mcpServerManager.restart(command.payload()));
-                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
                     case MCP_LOGS -> {
@@ -1030,12 +1131,12 @@ public class Main {
                     }
                     case MCP_DISABLE -> {
                         printMcpCommandResult(ui, mcpServerManager.disable(command.payload()));
-                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
                     case MCP_ENABLE -> {
                         printMcpCommandResult(ui, mcpServerManager.enable(command.payload()));
-                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
                     case MCP_RESOURCES -> {
@@ -1082,12 +1183,12 @@ public class Main {
                     }
                     case SKILL_ON -> {
                         ui.println(SkillCommandHandler.enable(skillRegistry, skillStateStore, command.payload()));
-                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
                     case SKILL_OFF -> {
                         ui.println(SkillCommandHandler.disable(skillRegistry, skillStateStore, command.payload()));
-                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
                     case SKILL_RELOAD -> {
@@ -1095,7 +1196,7 @@ public class Main {
                         ui.println("🔄 已重新扫描 skill 目录");
                         ui.println(SkillCommandHandler.startupSummary(skillRegistry));
                         ui.println("✅ 下一轮 LLM 调用生效");
-                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
                     case BETTER_HARNESS -> {
@@ -1107,7 +1208,7 @@ public class Main {
                         }
                         ui.println("🔎 Better Harness 开始审查当前项目\n");
                         renderer.updateStatus(
-                                statusInfo(reactAgent, mcpServerManager, skillRegistry, "harness"));
+                                statusInfo(currentAgent, mcpServerManager, skillRegistry, "harness"));
                         boolean activityPanel = renderer.supportsActivityPanel();
                         if (activityPanel) {
                             renderer.beginActivity(
@@ -1123,8 +1224,8 @@ public class Main {
                         try {
                             BetterHarnessRunner runner = new BetterHarnessRunner(
                                     llmClient,
-                                    Path.of(reactAgent.getToolRegistry().getProjectPath()),
-                                    reactAgent.getConversationLedger(),
+                                    Path.of(currentAgent.getToolRegistry().getProjectPath()),
+                                    currentAgent.getConversationLedger(),
                                     skillRegistry);
                             runStatus = runWithCancelSupport(
                                     terminal,
@@ -1151,7 +1252,7 @@ public class Main {
                                 renderer.endActivity();
                             }
                             renderer.updateStatus(
-                                    statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                                    statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
                         }
                         BetterHarnessRunner.RunResult result = resultRef.get();
                         if (result == null) {
@@ -1174,17 +1275,17 @@ public class Main {
                         continue;
                     }
                     case EXPORT -> {
-                        handleExportCommand(ui, reactAgent);
+                        handleExportCommand(ui, currentAgent);
                         continue;
                     }
                     case INDEX_CODE -> {
                         try {
                             var parsed = new IndexCommandParser().parse(command.payload());
-                            String indexPath = parsed.path() == null ? reactAgent.getToolRegistry().getProjectPath() : parsed.path();
+                            String indexPath = parsed.path() == null ? currentAgent.getToolRegistry().getProjectPath() : parsed.path();
                             String absPath = new File(indexPath).getAbsolutePath();
-                            reactAgent.getToolRegistry().setProjectPath(absPath);
-                            reactAgent.getMemoryManager().setProjectPath(absPath);
-                            var service = reactAgent.getToolRegistry().getCodeRetrievalService();
+                            currentAgent.getToolRegistry().setProjectPath(absPath);
+                            currentAgent.getMemoryManager().setProjectPath(absPath);
+                            var service = currentAgent.getToolRegistry().getCodeRetrievalService();
                             if (parsed.action() == IndexCommandParser.IndexCommand.Action.STATUS) {
                                 ui.println("索引状态: " + service.status());
                             } else if (parsed.action() == IndexCommandParser.IndexCommand.Action.CLEAR
@@ -1212,8 +1313,8 @@ public class Main {
                         }
                         ui.println("🔍 检索: " + query);
                         try {
-                            Path root = Path.of(reactAgent.getToolRegistry().getProjectPath());
-                            var response = reactAgent.getToolRegistry().getCodeRetrievalService().search(
+                            Path root = Path.of(currentAgent.getToolRegistry().getProjectPath());
+                            var response = currentAgent.getToolRegistry().getCodeRetrievalService().search(
                                     new com.codeagent.rag.RetrievalRequest(root, query, 5, 24_000,
                                             true, com.codeagent.rag.RetrievalIntent.CHUNKS));
                             if (response.hits().isEmpty()) {
@@ -1234,8 +1335,8 @@ public class Main {
                         }
                         ui.println("🕸️ 查询类关系图谱: " + className);
                         try {
-                            Path root = Path.of(reactAgent.getToolRegistry().getProjectPath());
-                            var response = reactAgent.getToolRegistry().getCodeRetrievalService().search(
+                            Path root = Path.of(currentAgent.getToolRegistry().getProjectPath());
+                            var response = currentAgent.getToolRegistry().getCodeRetrievalService().search(
                                     new com.codeagent.rag.RetrievalRequest(root, className, 20, 24_000,
                                             false, com.codeagent.rag.RetrievalIntent.ARCHITECTURE));
                             if (response.hits().isEmpty()) {
@@ -1248,7 +1349,12 @@ public class Main {
                         }
                         continue;
                     }
-                    case NONE -> {
+                        case NONE -> {
+                        }
+                    }
+                } finally {
+                    if (commandRuntimeLocked) {
+                        sharedRuntimeLock.unlock();
                     }
                 }
 
@@ -1287,8 +1393,9 @@ public class Main {
             boolean keepSessionOpen = activeSession.get() != null
                     && hasNonTerminalQuietly(executionQueue, activeSession.get().sessionId());
             if (!keepSessionOpen) {
-                closeSessionNormally(activeSession.get(), "eof");
+                markSessionClosedQuietly(activeSession.get(), "eof");
             }
+            closeSessionContextsQuietly(sessionContexts);
             closeExecutionStoreQuietly(executionStore);
             ui.println("\n👋 再见!");
             wechatRuntime.stop();
@@ -1341,14 +1448,12 @@ public class Main {
         }
     }
 
-    private static void closeSessionNormally(SessionStore.SessionHandle handle, String reason) {
+    private static void markSessionClosedQuietly(SessionStore.SessionHandle handle, String reason) {
         if (handle == null) return;
         try {
             handle.markClosed(reason);
         } catch (Exception ignored) {
             // The event log remains recoverable as interrupted if normal close cannot be recorded.
-        } finally {
-            closeSessionQuietly(handle);
         }
     }
 
@@ -1358,6 +1463,37 @@ public class Main {
             handle.close();
         } catch (Exception ignored) {
             // Best effort during shutdown or failed prepare-then-swap.
+        }
+    }
+
+    private static void closeAbandonedSessionQuietly(
+            SessionStore store, Path workspace, String sessionId, String reason) {
+        if (store == null || sessionId == null) return;
+        try (SessionStore.SessionHandle handle = store.resumeWritable(sessionId, workspace)) {
+            handle.markClosed(reason);
+        } catch (Exception ignored) {
+            // Best effort cleanup for a new Session that never became current.
+        }
+    }
+
+    private static void closeSessionContextsQuietly(
+            SessionExecutionContextRegistry<SessionExecutionContext> contexts) {
+        if (contexts == null) return;
+        try {
+            contexts.close();
+        } catch (Exception ignored) {
+            // Best effort during JVM shutdown.
+        }
+    }
+
+    private static void evictSessionContextQuietly(
+            SessionExecutionContextRegistry<SessionExecutionContext> contexts,
+            String sessionId,
+            String currentSessionId) {
+        try {
+            contexts.evictIfIdle(sessionId, currentSessionId);
+        } catch (Exception ignored) {
+            // The inactive context remains registry-owned and can be closed on shutdown.
         }
     }
 
@@ -1420,15 +1556,6 @@ public class Main {
             // A background task should still run if its audit directory is temporarily unavailable.
         }
         return agent.run(prompt);
-    }
-
-    private static DurableTaskManager openTaskManager(AtomicReference<LlmClient> llmClientRef,
-                                                       CodeAgentConfig config) {
-        try {
-            return DurableTaskManager.openDefault(prompt -> runHeadlessTask(prompt, llmClientRef.get(), config));
-        } catch (Exception e) {
-            throw new IllegalStateException("后台任务管理器初始化失败: " + e.getMessage(), e);
-        }
     }
 
     static void configureToolRegistry(ToolRegistry registry, CodeAgentConfig config) {
@@ -1656,6 +1783,31 @@ public class Main {
         } catch (Exception e) {
             return true;
         }
+    }
+
+    private static boolean hasNonTerminalQuietly(
+            RuntimeExecutionStore store, String sessionId) {
+        try {
+            return store.hasNonTerminal(sessionId);
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private static void configureSessionAgent(
+            Agent agent,
+            ConversationLedger conversationLedger,
+            McpServerManager mcpServerManager,
+            SkillRegistry skillRegistry,
+            SkillContextBuffer skillContextBuffer,
+            Renderer renderer,
+            SwitchableHitlHandler hitlHandler) {
+        agent.setConversationLedger(conversationLedger);
+        agent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
+        agent.setSkillRegistry(skillRegistry);
+        agent.setSkillContextBuffer(skillContextBuffer);
+        agent.setRenderer(renderer);
+        agent.setHitlEnabledSupplier(hitlHandler::isEnabled);
     }
 
     private static boolean legacyPlanClaimAllowed(

@@ -1,5 +1,7 @@
 # ReAct / Plan 自动执行模式路由方案
 
+> 后续实现说明（2026-10-03）：当前 inline/plain 普通输入先持久化到统一 Execution 队列，Worker 取得 Session 写租约后再调用 Router；路由选择写入 Execution 状态。下文的入口接线和改造前源码片段属于本次 Router 设计背景。当前提交、恢复与审批输入分流见 [统一后台执行 Runtime](31-unified-background-execution-runtime.md)。Runtime API、WeChat 和 Lanterna 仍不接入自动路由。
+
 > 状态：已实现（针对性回归通过；全量回归仍受 Windows 平台现存的非 Router 用例失败阻塞）
 > 适用范围：默认终端主路径（`Main` + inline/plain Renderer）的普通顶层任务
 > 依赖前置：`docs/dev/14-plan-session-conversation-continuity.md` 已完成的 Parent Session / Top-level Conversation 统一

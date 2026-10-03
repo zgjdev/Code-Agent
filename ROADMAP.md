@@ -517,9 +517,9 @@
 
 **前置依赖**：第 13 期 Chrome DevTools MCP 已能产出截图等 image content；第 12 期长上下文工程已就绪。
 
-**目标**：用户可以在 TUI 里提交后台任务（如"重构整个模块"），关掉终端走人，回来查看结果。同时暴露 HTTP/SSE Runtime API，让 CodeAgent 可以嵌入 CI/CD、IDE 插件、Web 面板。
+**原始目标（非当前交付承诺）**：用户可以在 TUI 里提交后台任务（如"重构整个模块"），关掉终端走人，回来查看结果。同时暴露 HTTP/SSE Runtime API，让 CodeAgent 可以嵌入 CI/CD、IDE 插件、Web 面板。当前实现不支持退出进程后继续执行，Lanterna 尚未接入统一队列，详见下方已落地清单。
 
-**功能迭代**：
+**早期规划（以下旧 Task Manager / Worker Pool / 框架选型不代表当前实现）**：
 
 **后台任务（Task Manager）**：
 - `DurableTaskManager`：SQLite 持久化的任务队列，复用已有的 `VectorStore` SQLite 基础设施
@@ -549,14 +549,15 @@
 - OpenAI Assistants API 兼容层设计
 
 **当前 MVP 已落地**：
-- `DurableTaskManager`：SQLite 后台任务队列，默认 `~/.codeagent/tasks/tasks.db`
-- `/task`、`/task add`、`/task cancel`、`/task log` CLI 闭环
-- 进程启动时将残留 `running` 任务恢复为 `enqueued`
-- Worker Pool 默认 2，可用 `CODEAGENT_TASK_WORKERS` / `-Dcodeagent.task.workers` 覆盖
+- inline/plain CLI 已从独立 DurableTaskManager 改为统一 RuntimeExecutionQueue：普通输入、`/react`、`/plan`、`/task add` 共用 SQLite `runtime_executions`，默认 `~/.codeagent/tasks/tasks.db`
+- Agent 运行期间直接输入即可追加任务；Plan/HITL 等待态普通输入优先作为交互回答，`/task add` 强制追加；`/task list|cancel|log` 查询和控制同一队列
+- 当前 workspace 固定单顶层 Worker、Session FIFO；CODEAGENT_TASK_WORKERS 不控制该队列。Plan 内部保持最多 4 个无冲突 DAG 节点并行
+- Session Context Registry 管理独立 Agent/上下文与唯一 writable handle，启动期恢复 stale RUNNING；ReAct 已选模式的中断任务保持阻塞，Plan 按 execution_id 从 Task 边界恢复
+- EOF/shutdown 保留非终态任务供下次恢复，关闭终端后不继续独立后台执行；Lanterna TUI、HTTP API 和 WeChat 尚未接入该统一队列
 - `RuntimeApiServer`：基于 JDK `HttpServer`，仅监听 `127.0.0.1`
 - `RuntimeThreadStore`：SQLite 保存 thread 与 event 时间线
 - Runtime API 强制 `CODEAGENT_RUNTIME_API_KEY` / `-Dcodeagent.runtime.api.key`
-- 详细实现文档：`docs/phase-20-runtime-api.md`
+- 当前实现文档：[统一后台执行运行时](docs/dev/31-unified-background-execution-runtime.md)；[旧后台任务与 API 分析](docs/dev/05-runtime-api-tasks.md) 保留为演进记录
 
 **教程标题候选**：《不想守在终端前？后台任务 + HTTP API，Agent 可以在后台跑》
 

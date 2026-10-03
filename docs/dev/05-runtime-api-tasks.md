@@ -1,6 +1,8 @@
 # 异步任务与 Runtime API
 
-> 实现状态更新（2026-09-29）：本文对 `DurableTaskManager/runtime_tasks` 的主体分析描述的是重构前实现。inline/plain CLI 现已按 [31-unified-background-execution-runtime.md](31-unified-background-execution-runtime.md) 改为统一 `runtime_executions`：普通输入、`/react`、`/plan`、`/task add` 共用单 workspace Worker、Session FIFO、typed outcome、execution-scoped cancellation、Session execution envelope 与 InteractionBroker。旧 `runtime_tasks` 仅做非破坏迁移；Runtime HTTP API、WeChat、Lanterna TUI 仍保持原路径。下文涉及旧后台任务实现的内容保留作为演进记录，不应再作为当前 inline/plain CLI 行为说明。
+> 实现状态更新（2026-10-03）：本文对 `DurableTaskManager/runtime_tasks` 的主体分析描述的是重构前实现。inline/plain CLI 现已按 [31-unified-background-execution-runtime.md](31-unified-background-execution-runtime.md) 改为统一 `runtime_executions`：普通输入、`/react`、`/plan`、`/task add` 共用单 workspace Worker、Session FIFO、typed outcome、execution-scoped cancellation、Session execution envelope 与 InteractionBroker。SessionExecutionContextRegistry 已接入 Main，独占 Session Agent/上下文与 writable handle；旧 `runtime_tasks` 仅做非破坏迁移。Runtime HTTP API、WeChat、Lanterna TUI 仍保持原路径。下文涉及旧后台任务实现的内容、源码行号及旧缺陷列表保留作为演进记录，不应再作为当前 inline/plain CLI 行为说明。
+
+当前 CLI 可以在 Agent 运行时直接输入后续任务，无需 `/task add`；等待审批/计划评审时，普通输入优先作为回答，`/task add` 显式追加。EOF/shutdown 保留未完成任务以供恢复，进程退出后无独立后台服务继续执行。`CODEAGENT_TASK_WORKERS` 只属于旧 DurableTaskManager，不影响新队列的单 Worker。Main 的旧 `openTaskManager` 已删除，`runHeadlessTask` 仍由 Runtime API 使用；最新验证结果和环境限制见文档 31 第 7.4 节。
 
 > **本文怎么读**
 >

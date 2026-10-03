@@ -188,6 +188,16 @@ public class Agent {
         this.skillContextBuffer = skillContextBuffer;
     }
 
+    /** Rebinds session-specific collaborators when Agents share process-level tool infrastructure. */
+    public void activateSharedToolContext() {
+        toolRegistry.setContextProfile(memoryManager.getContextProfile());
+        toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
+        toolRegistry.setMemoryWriter(memoryManager::storeFactWithResult);
+        toolRegistry.setSkillRegistry(skillRegistry);
+        toolRegistry.setSkillContextBuffer(skillContextBuffer);
+        memoryManager.setProjectPath(toolRegistry.getProjectPath());
+    }
+
     public void setRenderer(Renderer renderer) {
         this.renderer = renderer;
     }

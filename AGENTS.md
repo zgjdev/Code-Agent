@@ -68,7 +68,10 @@ flowchart LR
 ```mermaid
 graph TB
     CLI[CLI / Runtime API / WeChat] --> ROUTE[命令与入口解析]
-    ROUTE --> MODE{执行模式}
+    ROUTE --> QUEUE[inline/plain: RuntimeExecutionQueue]
+    QUEUE --> WORKER[workspace 单 Worker + Session Context lease]
+    WORKER --> MODE{执行模式}
+    ROUTE -->|Runtime API / WeChat / Lanterna 原路径| MODE
     MODE --> REACT[Agent ReAct]
     MODE --> PLAN[PlanExecuteAgent 统一多 Agent 协作]
     REACT --> CORE[Prompt + Context + ConversationLedger]
@@ -103,6 +106,7 @@ graph TB
 sequenceDiagram
     participant U as 用户
     participant M as Main/Runtime
+    participant Q as inline/plain Execution 队列与 Worker
     participant A as Agent 路径
     participant P as TurnToolPolicy
     participant T as ToolRegistry
@@ -110,8 +114,10 @@ sequenceDiagram
     participant R as Renderer
     participant C as ConversationLedger
     U->>M: 输入命令或任务
-    M->>M: 解析、展开 MCP/@path、建立 prompt
-    M->>A: 执行当前 mode
+    M->>M: 解析命令与 pending interaction
+    M->>Q: 持久化 submittedInput 并返回输入循环
+    Q->>Q: claim、取得 Session lease、展开 MCP/@path、durable routing ack
+    Q->>A: 执行当前 mode（其他入口保持原路径）
     A->>C: append user/system 边界
     A->>L: 请求（完整 request snapshot）
     L-->>A: reasoning/content/tool_call/usage
@@ -144,6 +150,8 @@ sequenceDiagram
 ## 6. 必须遵守的运行时约束
 
 - 默认 inline/plain 终端的普通顶层输入、`/react <任务>`、`/plan <任务>` 与 `/task add <任务>` 先持久化为 `runtime_executions`，由当前 workspace 的单顶层 Worker 串行执行；运行中仍可继续提交后续消息。Execution 首次 RUNNING 时才展开 @path/MCP resource，Router 只读取原始 `submittedInput` 与当时 Parent Session 的 Top-level Conversation，严格返回 REACT/PLAN，非取消性失败回退 ReAct。`/react` 与 `/plan` 是 one-turn override；Lanterna TUI、Runtime API 和 WeChat 尚不接入该统一队列。
+- 运行中直接输入即追加到同一队列；等待 Plan/HITL 时，普通输入由 InteractionInputRouter 优先作为交互回答，非法审批输入不得自动批准或入队，`/task add` 可显式追加任务。CLI 输入循环是唯一终端输入所有者，Worker 经 InteractionBroker 等待回答。
+- SessionExecutionContextRegistry 独占每个 Session 的 writable SessionHandle、Agent、ParentConversationContext、MemoryManager 与 SkillContextBuffer；启动上下文收养、其他 Session 懒加载。共享 ToolRegistry/MCP/Browser/HITL 保留进程级单 writable lease，执行前重绑 Session 协作者。Worker 与 CLI Session/Runtime mutation 共用互斥锁，CLI 修改使用 tryLock 失败关闭。当前 UI 指针不负责关闭 handle；仅空闲、非当前且无 pending interaction 的 Context 可驱逐。EOF/shutdown 释放运行态并保留非终态 Execution 恢复，不提前写 SESSION_END；后台任务不在进程退出后独立运行。
 - ReAct 与 PlanExecuteAgent（`/plan` 显式入口或 Router 选择，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
 - PlanExecuteAgent 的 DAG 就绪任务先经 `ConflictAwareBatchSelector` 按任务资源声明组批；资源冲突或 `workspaceWrite` 不得进入同一批次。任务完成前必须通过确定性证据门禁和可用的 Reviewer；失败重试耗尽进入 `UNVERIFIED`，不解锁后继。DIFF 证据使用 Task 初始 workspace baseline；durable Plan 只把相对路径与 SHA-256 baseline 写入 `plans.db`，恢复时复用该 baseline，不持久化源码正文。
 - CLI/TUI 的 `/plan` 会把 DAG 与 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`；inline/plain 队列路径还通过 `execution_id` 绑定顶层 Runtime Execution。prompt 只表示任务内容，不作为恢复身份。同一 Session 同时最多一个 `CREATED/RUNNING` Plan；`/plan resume` 对 legacy active Plan 执行确定性收养并入队，`/plan abandon` 显式放弃。新 Plan 必须先严格写入 SQLite 才能进入执行和 Parent Conversation；恢复时已完成节点不重跑，上次 `RUNNING/REVIEWING` 节点转为 `INTERRUPTED` 后从 Task 边界重新执行。

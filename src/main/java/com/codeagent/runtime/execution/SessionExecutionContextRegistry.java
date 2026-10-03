@@ -10,6 +10,7 @@ public final class SessionExecutionContextRegistry<T extends AutoCloseable> impl
     private final Predicate<String> hasNonTerminalExecution;
     private final Predicate<String> hasPendingInteraction;
     private final Map<String, Entry<T>> contexts = new LinkedHashMap<>();
+    private String leasedSessionId;
     private boolean closed;
 
     public SessionExecutionContextRegistry(
@@ -23,10 +24,25 @@ public final class SessionExecutionContextRegistry<T extends AutoCloseable> impl
                 hasPendingInteraction, "hasPendingInteraction");
     }
 
+    public synchronized void adopt(String sessionId, T context) {
+        requireSessionId(sessionId);
+        Objects.requireNonNull(context, "context");
+        if (closed) {
+            throw new IllegalStateException("Session context registry is closed");
+        }
+        if (contexts.putIfAbsent(sessionId, new Entry<>(context)) != null) {
+            throw new IllegalStateException("Session context is already loaded: " + sessionId);
+        }
+    }
+
     public synchronized Lease<T> acquire(String sessionId) throws Exception {
         requireSessionId(sessionId);
         if (closed) {
             throw new IllegalStateException("Session context registry is closed");
+        }
+        if (leasedSessionId != null) {
+            throw new IllegalStateException(
+                    "Shared runtime already has a writable execution lease: " + leasedSessionId);
         }
         Entry<T> entry = contexts.get(sessionId);
         if (entry == null) {
@@ -37,6 +53,7 @@ public final class SessionExecutionContextRegistry<T extends AutoCloseable> impl
             throw new IllegalStateException("Session already has a writable execution lease: " + sessionId);
         }
         entry.leased = true;
+        leasedSessionId = sessionId;
         return new Lease<>(this, sessionId, entry.context);
     }
 
@@ -66,6 +83,7 @@ public final class SessionExecutionContextRegistry<T extends AutoCloseable> impl
             throw new IllegalStateException("Invalid or duplicate session execution lease release: " + sessionId);
         }
         entry.leased = false;
+        leasedSessionId = null;
     }
 
     @Override

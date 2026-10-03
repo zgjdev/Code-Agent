@@ -243,7 +243,7 @@ flowchart TB
     I[CLI Input Loop] --> D{Control or Task Input}
 
     D -->|control command| CTRL[Control Plane]
-    D -->|ordinary task| SUB[ExecutionSubmissionService]
+    D -->|ordinary task| SUB[RuntimeExecutionQueue.submit]
     D -->|/react payload| SUB
     D -->|/plan payload| SUB
     D -->|/task add payload| SUB
@@ -383,13 +383,14 @@ WHERE status = 'running' AND legacy_unbound = 0;
 执行：
 
 ~~~text
-ExecutionSubmissionService.enqueue(
+RuntimeExecutionQueue.submit(
   currentSessionId,
-  workspace,
   submittedInput,
   explicitMode = null
 )
 ~~~
+
+`workspace` 在构造 `RuntimeExecutionQueue` 时绑定，不是 `submit` 的参数。
 
 /react payload：
 
@@ -463,7 +464,7 @@ B1 即使属于另一 Session，也必须等待 A1。A2 还必须遵守 Session 
 
 ### 3.6 SessionExecutionContextRegistry 与 Session 生命周期
 
-当前 `Main` 只有一个长期存在的 `Agent` 和一个 `activeSession`，不能直接被多个 Execution Worker 共享。新增 `SessionExecutionContextRegistry`，它是进程内 Session 运行态的唯一所有者：
+`Main` 不再让单个长期存在的 `Agent` 在 Session 之间反复换绑。`SessionExecutionContextRegistry` 是进程内 Session 运行态的唯一所有者：
 
 ~~~text
 SessionExecutionContextRegistry
@@ -478,14 +479,16 @@ SessionExecutionContextRegistry
 
 规则：
 
-1. CLI 只持有当前 `sessionId`，不再直接拥有可变 Agent/SessionHandle；
-2. Worker claim 后按 `sessionId` 向 Registry 取得 execution lease；同一 Session 同时只能有一个 lease；
+1. CLI 的 `activeSession` / `activeAgent` 只是当前 UI 选择指针，不负责关闭对象；writable handle 与 Agent 的所有权只在 Registry；
+2. Worker claim 后按 `sessionId` 向 Registry 取得 execution lease；当前 inline/plain 进程的 ToolRegistry/MCP 注册表是共享基础设施，因此 Registry 采用进程级单 writable lease，既禁止同 Session 重入，也禁止不同 Session 同时改写共享绑定；
 3. Registry 首次访问时用 `SessionStore.resumeWritable(sessionId, workspace)` 懒加载，已加载则复用同一对象，禁止第二个 writable handle；
 4. Execution 完成只释放 lease，不立即关闭仍可能被后续 queued Execution 使用的 Session；
 5. 只有 Session 没有 RUNNING/ENQUEUED Execution、没有 pending interaction 且不再是 CLI 当前 Session 时，Registry 才可驱逐并关闭 handle；
 6. CLI EOF/正常退出先触发 Scheduler 的 `RUNTIME_SHUTDOWN`，存在非终态 Execution 的 Session 保持 unclosed，不写 `SESSION_END`；下次启动由 Session + Execution recovery 继续；
 7. `/new`、`/resume` 只切换 CLI 当前 sessionId，但源 Session 或目标 Session 存在非终态 Execution/pending interaction 时拒绝切换；状态查看继续通过只读命令完成；
 8. 第一阶段 provider/model 使用 Session 当前绑定；会改变 provider/model 的命令仅允许在该 Session 无非终态 Execution 时执行，避免 queued Execution 在等待期间被静默换模型。
+
+`SessionExecutionContext` 独占 Agent、ParentConversationContext、MemoryManager、SkillContextBuffer 和 writable SessionHandle；进程级动态 MCP/Browser/HITL 工具注册仍由共享 ToolRegistry 承载。取得 lease 时通过 `Agent.activateSharedToolContext()` 原子地重绑当前 Session 的 memory writer、context profile、provider/model 与 skill buffer，执行其他 Session 的恢复任务后再恢复 CLI 当前 Session 的绑定。Scheduler 执行和 CLI 的 Session/Runtime mutation 还共享一把进程级互斥锁：Worker 阻塞取得，CLI mutation 使用 `tryLock` fail closed，避免恢复其他 Session 时 `/model`、`/config`、`/new` 等命令并发改写共享绑定。若未来放开跨 workspace 顶层并行，必须先把动态 MCP 注册复制或拆分到各 Context，不能移除当前全局 lease 后直接并行。
 
 Registry 依赖 SessionStore、Execution Store 和执行上下文工厂；不得反向依赖 JLine 或具体 Renderer。
 
@@ -1005,20 +1008,21 @@ Workspace serialization、Session FIFO 与 Plan DAG parallelism 是三个不同�
 |---|---|
 | `runtime/execution/RuntimeExecution.java`、`ExecutionStatus.java` | immutable row model 与严格小写 status codec |
 | `runtime/execution/RuntimeExecutionStore.java` | schema migration、enqueue/ordinal、claim、routing ack、cancel request、terminal CAS、查询 |
-| `runtime/execution/ExecutionSubmissionService.java` | ordinary、`/react`、`/plan`、`/task add` 的唯一 enqueue API |
+| `runtime/execution/RuntimeExecutionQueue.java` | ordinary、`/react`、`/plan`、`/task add` 的唯一 submit API 与查询/取消适配 |
 | `runtime/execution/WorkspaceAwareExecutionScheduler.java` | workspace-bound single worker、Session FIFO、recovery、shutdown、token scope |
 | `runtime/execution/SessionExecutionContextRegistry.java` | Session runtime context/handle 的创建、lease、驱逐和关闭 |
+| `runtime/execution/SessionExecutionContext.java`、`SessionExecutionContextFactory.java` | 每 Session Agent/上下文/handle 所有权与 lazy writable resume |
 | `runtime/execution/ExecutionFinalizer.java` | execution/end 与 SQLite terminal 的唯一提交和 reconciliation |
 | `runtime/interaction/InteractionBroker.java`、`InteractionRequest.java` | keyed Plan review/HITL transport 与 allowedActions 校验 |
-| `agent/TopLevelExecutionCoordinator.java`、`TopLevelExecutionResult.java` | resolve 后的 route、durable ack、Snapshot、mode dispatch、typed outcome |
-| `cli/ExecutionInputResolver.java` | 无 UI 的 mention/path/resource expansion；不负责权限判断 |
+| `runtime/execution/TopLevelExecutionCoordinator.java`、`TopLevelExecutionResult.java` | resolve 后的 route、durable ack、Snapshot、mode dispatch、typed outcome |
+| `TopLevelExecutionCoordinator.ExecutionInputResolver` | 无 UI 的输入解析接口；Main 注入既有 mention/path expander，不负责权限判断 |
 | `cli/CliUiEventBridge.java` | Worker 生命周期/交互/队列 UI event 串行化；token streaming 复用 Renderer 既有 JLine-safe stream |
 | `history/SessionEvent.java`、`SessionReplayer.java`、`SessionProjection.java` | execution envelope required events 与 projection index |
 | `agent/Agent.java`、`PlanExecuteAgent.java`、`PlanConversationReconciler.java` | FIRST/RESUME typed entry、唯一顶层 User、executionId metadata |
 | `plan/PlanStateStore.java` | `plan_runs.execution_id` migration 与 lineage lookup |
 | `cli/Main.java`、`runtime/task/TaskCommandFormatter.java` | 输入循环/Control Plane 接线与 `/task` 兼容 adapter |
 
-对应测试放在相同 package 的 `src/test/java` 下；跨层 CLI 行为集中在 `MainExecutionQueueTest`，旧库 fixture 放在 `src/test/resources/runtime-execution/`。
+对应测试放在相同 package 的 `src/test/java` 下；CLI 分流与控制由 `InteractionInputRouterTest`、`ExecutionControlPolicyTest`、`MainSessionCommandTest` 覆盖，队列时序由 `RuntimeExecutionQueueTest`、`TopLevelExecutionCoordinatorTest`、`WorkspaceAwareExecutionSchedulerTest` 覆盖。旧库 fixture 由 `RuntimeExecutionStoreTest` 在临时目录创建；当前没有独立的 MainExecutionQueueTest 或静态 runtime-execution fixture 目录。
 
 #### Task A：先补目标行为测试
 
@@ -1177,9 +1181,9 @@ resolve
 
 ~~~bash
 mvn test -DskipTests=false -Dtest=CliCommandParserTest,ExecutionModeRouterTest,SessionStoreTest
-mvn test -DskipTests=false -Dtest=RuntimeExecutionStoreTest,SessionExecutionContextRegistryTest,WorkspaceAwareExecutionSchedulerTest,TopLevelExecutionCoordinatorTest
+mvn test -DskipTests=false -Dtest=RuntimeExecutionStoreTest,RuntimeExecutionQueueTest,SessionExecutionContextRegistryTest,SessionExecutionContextFactoryTest,SessionExecutionContextTest,WorkspaceAwareExecutionSchedulerTest,TopLevelExecutionCoordinatorTest
 mvn test -DskipTests=false -Dtest=PlanExecuteRecoveryTest,PlanStateStoreTest,MainPlanAgentFactoryTest
-mvn test -DskipTests=false -Dtest=CancellationContextTest,InteractionBrokerTest,MainExecutionQueueTest,MainInputNormalizationTest
+mvn test -DskipTests=false -Dtest=CancellationContextTest,InteractionBrokerTest,BrokerInteractionHandlersTest,InteractionInputRouterTest,ExecutionControlPolicyTest,MainSessionCommandTest,MainInputNormalizationTest
 mvn test -Pquick
 mvn test -DskipTests=false
 mvn clean package
@@ -1317,17 +1321,21 @@ ReAct / Plan
 - `execution/start` / `execution/end`、projection envelope index、Finalizer first-terminal-wins 和启动期 END -> SQLite 收敛；
 - Plan `execution_id` lineage、按 execution 恢复已有 DAG、legacy active Plan 确定性收养与 claim gate；
 - execution-scoped `CancellationContext`、InteractionBroker、Broker PlanReview/HITL handler、allowedActions 输入分流；
+- `SessionExecutionContextFactory/Registry` 已接入 Main：启动 Session 直接收养，其他 Session lazy resume；Scheduler 按 execution.sessionId 取得 lease，`/resume`、`/new`、idle eviction、EOF 与 shutdown 均由 Registry 管理 writable handle；
 - 全量 CommandType 运行中分类、`/task list|add|cancel|log` 兼容适配、README/AGENTS/旧 Runtime 文档状态说明。
 
-尚未宣称完成的边界：
+当前适用范围与验证限制：
 
-- `SessionExecutionContextRegistry` 的类型、lease 与驱逐规则已有测试，但 Main 仍由单 active Agent/Session 持有运行态；当前通过“Session 有非终态 Execution 时拒绝 `/new`/`/resume`”保证不会并发换绑，尚未完成多 Session lazy context 的最终接线；
 - `CliUiEventBridge` 已串行化队列、状态和交互提示；Agent/Plan streaming 复用 `Renderer.stream()`，`InlineRendererTest` 已验证 LineReader 读取态改走 `printAbove`。真实 Windows inline 终端的人工作业验收仍建议保留；
 - Runtime HTTP API、WeChat、Lanterna TUI 按 scope 未接队列，只做共享取消语义回归；
 - terminal Plan / Runtime 非终态窗口已补齐：按 `execution_id` 读取终态 lineage 并直接映射 typed outcome，不重新 Planner 或调用 LLM；
-- quick 首轮的增量编译残留已通过干净重建排除；修改后的 quick、全量和干净构建均已通过。
+- 早期提交阶段 quick、全量和干净构建通过记录保留在 7.4；最新 Session 接线/清理后的回归排除了本机 DNS 异常的 NetworkPolicyTest。最新 package 成功，clean 受 target/classes 删除失败阻塞，尚不能声称当前完整无排除回归与 clean package 均通过。
 
 ### 7.4 实施验证记录
+
+以下数字是各阶段实际执行记录；最终状态以本节最后的 Session 接线、清理及环境限制为准。文档联动已同步 README、AGENTS、CLAUDE、ROADMAP、agents-reference 与旧 Runtime 分析；补充直接输入排队、审批分流、Registry 所有权、共享绑定互斥及 scope，并核对实际类名/测试名。此次联动仅改文档，验证采用源码对照、相对链接/文件存在性检查和 git diff --check。
+
+代码清理：删除 Main 中已被统一队列替代、无调用者的 `openTaskManager` 私有方法和 Coordinator 的未使用 `RoutingSource` import；保留 Runtime API 使用的 `runHeadlessTask` 及有明确兼容说明的方法。三个交互测试类统一使用 try-with-resources 关闭 InteractionBroker，两个异步测试通过 finally 释放 ExecutorService，确保断言失败也能清理。目标为移除已确认的死代码与资源关闭警告，不改变执行队列和交互协议；针对性测试 15 项全部通过。`mvn test -Pquick "-Dtest=!NetworkPolicyTest"` 实际运行扩大后的测试集：1251 项，0 failure / 0 error / 10 skipped（显式 test selector 覆盖 quick 的测试筛选，排除既有 DNS 环境问题）；`git diff --check` 通过。
 
 - `RuntimeExecutionStoreTest,RuntimeExecutionQueueTest,WorkspaceAwareExecutionSchedulerTest,PlanStateStoreTest,PlanExecuteRecoveryTest,MainPlanAgentFactoryTest`：39 tests，全部通过；
 - `RuntimeExecutionStoreTest,WorkspaceAwareExecutionSchedulerTest,TopLevelExecutionCoordinatorTest,RuntimeExecutionTaskCommandFormatterTest,InteractionBrokerTest,BrokerInteractionHandlersTest,InteractionInputRouterTest,ExecutionControlPolicyTest`：25 tests，全部通过；
@@ -1339,6 +1347,9 @@ ReAct / Plan
 - `mvn test -Pphase16-smoke`：106 tests，0 failure / 0 error / 0 skipped；覆盖 inline/plain renderer、HITL、输入规范化和 TUI bootstrap；全量测试同时覆盖 Runtime API 与 WeChat 回归；
 - `mvn clean package -DskipTests`：`BUILD SUCCESS`（shade 插件仅报告既有重复资源 warning）。
 - `git diff --check`：exit 0；仅有仓库既有的 LF -> CRLF 提示。
+- Session Context 最终接线后，`SessionExecutionContextRegistryTest,SessionExecutionContextFactoryTest,SessionExecutionContextTest,MainSessionCommandTest,WorkspaceAwareExecutionSchedulerTest,RuntimeExecutionQueueTest,ExecutionFinalizerTest,ExecutionControlPolicyTest,MainExecutionModeRoutingTest,MainPlanAgentFactoryTest`：26 tests，全部通过；覆盖启动 Context 收养、lazy resume、跨 Session 全局 lease、失败释放 writable handle、idle eviction、CLI mutation 分类与 Main 路由回归；
+- 最终全量回归排除 `NetworkPolicyTest` 后：1251 tests，0 failure / 0 error / 10 skipped；`NetworkPolicyTest` 的其余 8 项已在 quick 中通过，唯一失败 `allowsPublicHttps` 可稳定复现为本机 DNS 将 `example.com` 解析到 `0.0.0.0`，与本次 Session 改动无关；
+- 最终 `mvn test -Pphase16-smoke`：106 tests，全部通过；`mvn package -DskipTests`：`BUILD SUCCESS`。`mvn clean package -DskipTests` 未进入编译，因 Windows 删除 `target/classes` 失败；观察到 VS Code Java 语言服务进程，但尚未证明具体占用来源，未终止用户进程。
 
 ---
 
@@ -1353,7 +1364,7 @@ ReAct / Plan
 - [x] 同 Session 任意时刻最多一个 RUNNING Execution。
 - [x] 同 workspace 即使不同 Session 也最多一个 RUNNING Execution。
 - [x] 当前实例不 claim 其它 workspace 的 Execution；顶层 executor 固定为单 Worker。
-- [ ] SessionExecutionContextRegistry 独占 writable SessionHandle/Agent/ParentConversationContext 生命周期。
+- [x] SessionExecutionContextRegistry 独占 writable SessionHandle/Agent/ParentConversationContext 生命周期。
 - [x] EOF 时非终态 Execution 不被误写 CANCELED，相关 Session 不被提前关闭。
 - [x] Runtime Execution 与 Plan Task 保持不同实体。
 - [x] canonical store 使用 RuntimeExecution / runtime_executions 语义。
@@ -1387,8 +1398,8 @@ ReAct / Plan
 - [x] migration 可重入、未知状态回滚、旧表保留；legacy-unbound row 使用 NULL session/ordinal 且永不 claim。
 - [x] Runtime HTTP API / WeChat / TUI 未被本次重构意外回归。
 - [x] 针对性测试通过。
-- [x] mvn test -Pquick 通过。
-- [x] 全量测试通过。
+- [x] 回归已执行并记录：早期 quick 通过，最新 quick 的 allowsPublicHttps 因 DNS 环境失败；排除 NetworkPolicyTest 后 1251 项零失败。
+- [x] 全量验证范围与限制已记录；最新无排除全量尚未通过验收，不能将排除测试的回归称为完整通过。
 - [x] 构建通过。
 - [x] git diff --check 通过。
 - [x] 本文是本任务唯一 docs/dev 设计与实施文档。

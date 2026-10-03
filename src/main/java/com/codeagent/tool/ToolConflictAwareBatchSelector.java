@@ -1,5 +1,7 @@
 package com.codeagent.tool;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -22,25 +24,38 @@ public final class ToolConflictAwareBatchSelector {
             return List.of();
         }
 
-        int limit = Math.max(1, maxConcurrency);
         List<List<ToolRegistry.ToolInvocation>> batches = new ArrayList<>();
         int index = 0;
         while (index < invocations.size()) {
-            List<ClaimedInvocation> claimedBatch = new ArrayList<>();
-            while (index < invocations.size() && claimedBatch.size() < limit) {
-                ToolRegistry.ToolInvocation invocation = invocations.get(index);
-                ToolResourceClaim claim = resolver.resolve(invocation);
-                boolean compatible = claimedBatch.stream()
-                        .noneMatch(existing -> conflicts(existing.claim(), claim));
-                if (!claimedBatch.isEmpty() && !compatible) {
-                    break;
-                }
-                claimedBatch.add(new ClaimedInvocation(invocation, claim));
-                index++;
-            }
-            batches.add(claimedBatch.stream().map(ClaimedInvocation::invocation).toList());
+            List<ToolRegistry.ToolInvocation> batch = selectNextBatch(
+                    invocations.subList(index, invocations.size()), maxConcurrency);
+            batches.add(batch);
+            index += batch.size();
         }
         return List.copyOf(batches);
+    }
+
+    public List<ToolRegistry.ToolInvocation> selectNextBatch(
+            List<ToolRegistry.ToolInvocation> invocations,
+            int maxConcurrency) {
+        if (invocations == null || invocations.isEmpty()) {
+            return List.of();
+        }
+        int limit = Math.max(1, maxConcurrency);
+        List<ClaimedInvocation> claimedBatch = new ArrayList<>();
+        for (ToolRegistry.ToolInvocation invocation : invocations) {
+            if (claimedBatch.size() >= limit) {
+                break;
+            }
+            ToolResourceClaim claim = resolver.resolve(invocation);
+            boolean compatible = claimedBatch.stream()
+                    .noneMatch(existing -> conflicts(existing.claim(), claim));
+            if (!claimedBatch.isEmpty() && !compatible) {
+                break;
+            }
+            claimedBatch.add(new ClaimedInvocation(invocation, claim));
+        }
+        return claimedBatch.stream().map(ClaimedInvocation::invocation).toList();
     }
 
     public boolean conflicts(ToolResourceClaim left, ToolResourceClaim right) {
@@ -86,9 +101,19 @@ public final class ToolConflictAwareBatchSelector {
         }
         Path normalizedLeft = left.toAbsolutePath().normalize();
         Path normalizedRight = right.toAbsolutePath().normalize();
-        return normalizedLeft.equals(normalizedRight)
+        if (normalizedLeft.equals(normalizedRight)
                 || normalizedLeft.startsWith(normalizedRight)
-                || normalizedRight.startsWith(normalizedLeft);
+                || normalizedRight.startsWith(normalizedLeft)) {
+            return true;
+        }
+        try {
+            if (Files.notExists(normalizedLeft) || Files.notExists(normalizedRight)) {
+                return false;
+            }
+            return Files.isSameFile(normalizedLeft, normalizedRight);
+        } catch (IOException | SecurityException failure) {
+            return true;
+        }
     }
 
     private record ClaimedInvocation(ToolRegistry.ToolInvocation invocation,

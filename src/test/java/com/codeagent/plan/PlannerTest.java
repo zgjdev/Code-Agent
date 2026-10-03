@@ -2,6 +2,8 @@ package com.codeagent.plan;
 
 import com.codeagent.llm.GLMClient;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.util.ArrayDeque;
@@ -219,7 +221,7 @@ class PlannerTest {
                         "workspaceWrite": false
                       },
                       "acceptanceCriteria": ["compiles", "rollback test passes"],
-                      "requiredEvidence": ["DIFF", "BUILD", "TEST", "UNKNOWN"]
+                      "requiredEvidence": ["DIFF", "BUILD", "TEST"]
                     }
                   ]
                 }
@@ -274,6 +276,154 @@ class PlannerTest {
 
         assertThrows(IOException.class, () -> new Planner(client)
                 .createPlan("analyze and update files outside the project"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"id\":123,\"description\":\"step\"}",
+            "{\"id\":\"t1\",\"description\":123}",
+            "{\"id\":true,\"description\":\"step\"}",
+            "{\"id\":\"t1\",\"description\":false}"
+    })
+    void rejectsNonTextualTaskIdentityFields(String taskJson) {
+        assertInvalidPlannerOutput("{\"summary\":\"plan\",\"tasks\":[" + taskJson + "]}");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "\"acceptanceCriteria\":\"compiles\"",
+            "\"acceptanceCriteria\":{}",
+            "\"acceptanceCriteria\":null",
+            "\"acceptanceCriteria\":[\"compiles\",123]",
+            "\"acceptanceCriteria\":[\"compiles\",false]",
+            "\"acceptanceCriteria\":[\"compiles\",null]",
+            "\"acceptanceCriteria\":[\"compiles\",{}]"
+    })
+    void rejectsInvalidAcceptanceCriteriaWithoutDroppingMembers(String fields) {
+        assertInvalidPlannerOutput(planWithTaskFields(fields));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "\"requiredEvidence\":\"TEST\"",
+            "\"requiredEvidence\":{}",
+            "\"requiredEvidence\":null",
+            "\"requiredEvidence\":[\"DIFF\",123]",
+            "\"requiredEvidence\":[\"DIFF\",false]",
+            "\"requiredEvidence\":[\"DIFF\",null]",
+            "\"requiredEvidence\":[\"DIFF\",{}]",
+            "\"requiredEvidence\":[\"DIFF\",\"UNKNOWN\"]",
+            "\"requiredEvidence\":[\"diff\"]",
+            "\"requiredEvidence\":[\" TEST \"]",
+            "\"requiredEvidence\":[\"\"]"
+    })
+    void rejectsInvalidRequiredEvidenceWithoutDroppingMembers(String fields) {
+        assertInvalidPlannerOutput(planWithTaskFields(fields));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "\"type\":null",
+            "\"type\":123",
+            "\"type\":\"command\"",
+            "\"type\":\" COMMAND \"",
+            "\"type\":\"\"",
+            "\"type\":\"PLANNING\"",
+            "\"dependencies\":null",
+            "\"dependencies\":\"t1\"",
+            "\"dependencies\":[123]",
+            "\"dependencies\":[null]"
+    })
+    void rejectsInvalidPresentTypeAndDependencies(String fields) {
+        assertInvalidPlannerOutput(planWithTaskFields(fields));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "\"resources\":null",
+            "\"resources\":[]",
+            "\"resources\":{\"workspaceWrite\":\"false\"}",
+            "\"resources\":{\"workspaceWrite\":0}",
+            "\"resources\":{\"workspaceWrite\":null}",
+            "\"resources\":{\"workspaceWrite\":{}}",
+            "\"resources\":{\"readPaths\":null}",
+            "\"resources\":{\"writePaths\":null}",
+            "\"resources\":{\"readPaths\":\"src\"}",
+            "\"resources\":{\"writePaths\":[false]}",
+            "\"resources\":{\"readPaths\":[\"src/\",123]}"
+    })
+    void rejectsInvalidPresentResourceFields(String fields) {
+        assertInvalidPlannerOutput(planWithTaskFields(fields));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"summary\":\"plan\",\"tasks\":[{\"id\":\"t1\",\"description\":\"step\"}],\"extra\":true}",
+            "{\"summary\":\"plan\",\"tasks\":[{\"id\":\"t1\",\"description\":\"step\",\"extra\":true}]}",
+            "{\"summary\":\"plan\",\"tasks\":[{\"id\":\"t1\",\"description\":\"step\",\"resources\":{\"extra\":true}}]}"
+    })
+    void rejectsAdditionalPropertiesAtEveryObjectLevel(String content) {
+        assertInvalidPlannerOutput(content);
+    }
+
+    @Test
+    void repairsInvalidEvidenceOnceAndPreservesCorrectedRequirements() throws Exception {
+        SequenceGLMClient client = new SequenceGLMClient(
+                planWithTaskFields("\"requiredEvidence\":[\"DIFF\",\"UNKNOWN\"]"),
+                planWithTaskFields("\"requiredEvidence\":[\"DIFF\",\"TEST\"]"));
+
+        Task task = new Planner(client).createPlan("analyze and verify the implementation")
+                .getTask("task_1");
+
+        assertEquals(Set.of(EvidenceType.DIFF, EvidenceType.TEST), task.getRequiredEvidence());
+        assertEquals(2, client.calls);
+    }
+
+    @Test
+    void acceptsAllOmittedLegacyFieldsWithConservativeDefaults() throws Exception {
+        StubGLMClient client = new StubGLMClient(
+                "{\"summary\":\"legacy\",\"tasks\":[{\"id\":\"t1\",\"description\":\"step\"}]}");
+
+        Task task = new Planner(client).createPlan("analyze and verify the implementation")
+                .getTask("task_1");
+
+        assertEquals(Task.TaskType.ANALYSIS, task.getType());
+        assertTrue(task.getDependencies().isEmpty());
+        assertEquals(TaskResourceClaims.conservativeDefault(Task.TaskType.ANALYSIS), task.getResourceClaims());
+        assertTrue(task.getAcceptanceCriteria().isEmpty());
+        assertTrue(task.getRequiredEvidence().isEmpty());
+        assertEquals(1, client.calls);
+    }
+
+    @Test
+    void acceptsSchemaEnumsAndEmptyOptionalCollections() throws Exception {
+        StubGLMClient client = new StubGLMClient(planWithTaskFields(
+                "\"type\":\"VERIFICATION\",\"dependencies\":[],"
+                        + "\"resources\":{\"readPaths\":[],\"writePaths\":[],\"workspaceWrite\":true},"
+                        + "\"acceptanceCriteria\":[],"
+                        + "\"requiredEvidence\":[\"DIFF\",\"BUILD\",\"TEST\",\"LSP\",\"TOOL_RESULT\"]"));
+
+        Task task = new Planner(client).createPlan("analyze and verify the implementation")
+                .getTask("task_1");
+
+        assertEquals(Task.TaskType.VERIFICATION, task.getType());
+        assertTrue(task.getResourceClaims().workspaceWrite());
+        assertTrue(task.getAcceptanceCriteria().isEmpty());
+        assertEquals(Set.of(EvidenceType.values()), task.getRequiredEvidence());
+        assertEquals(1, client.calls);
+    }
+
+    private static String planWithTaskFields(String fields) {
+        return "{\"summary\":\"plan\",\"tasks\":[{\"id\":\"t1\",\"description\":\"step\","
+                + fields + "}]}";
+    }
+
+    private static void assertInvalidPlannerOutput(String content) {
+        StubGLMClient client = new StubGLMClient(content);
+
+        assertThrows(IOException.class, () -> new Planner(client)
+                .createPlan("analyze and verify the implementation"));
+        assertEquals(2, client.calls);
     }
 
     private static int occurrences(String text, String value) {

@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -58,6 +59,23 @@ class ToolConflictAwareBatchSelectorTest {
                 batches.stream()
                         .map(batch -> batch.stream().map(ToolRegistry.ToolInvocation::id).toList())
                         .toList());
+    }
+
+    @Test
+    void hardLinkReadWriteAndWriteWriteConflictButReadReadDoesNot() throws Exception {
+        Path original = projectRoot.resolve("original.txt");
+        Files.writeString(original, "fixture");
+        Files.createLink(projectRoot.resolve("alias.txt"), original);
+
+        assertEquals(2, selector().partition(List.of(
+                call("write", "write_file", "{\"path\":\"original.txt\"}"),
+                call("read", "read_file", "{\"path\":\"alias.txt\"}")), 4).size());
+        assertEquals(2, selector().partition(List.of(
+                call("write", "write_file", "{\"path\":\"original.txt\"}"),
+                call("alias-write", "write_file", "{\"path\":\"alias.txt\"}")), 4).size());
+        assertEquals(1, selector().partition(List.of(
+                call("read", "read_file", "{\"path\":\"original.txt\"}"),
+                call("alias-read", "read_file", "{\"path\":\"alias.txt\"}")), 4).size());
     }
 
     private ToolConflictAwareBatchSelector selector() {

@@ -220,6 +220,8 @@ Schema：
 
 Schema 对齐当前 prompt 的 Plan 结构。根对象的 `summary` / `tasks` 与每个 Task 的 `id` / `description` 必须存在；为保持已有 legacy planner JSON 兼容性，`type`、`dependencies`、resources、acceptanceCriteria、requiredEvidence 继续允许省略，其中缺失 `type` 保守回退为 `ANALYSIS`。字段一旦出现则必须满足对应类型约束。
 
+本地解析在业务/DAG 校验前按同一 schema 检查对象属性、必填字段、数组元素、boolean 和枚举；显式 null、未知属性或非法证据成员拒绝并进入 bounded repair，不再通过字符串强制转换或静默忽略丢失验收要求。`type` 与 `requiredEvidence` 使用 schema 中的大写枚举值；可省略不等于允许错误类型。
+
 本地 validator / decoder 负责：
 
 - root/object 与非空 tasks/array 基础结构。
@@ -242,7 +244,7 @@ Reviewer schema：
     "issues": {"type": "array", "items": {"type": "string"}},
     "suggestions": {"type": "array", "items": {"type": "string"}}
   },
-  "required": ["approved", "summary", "issues", "suggestions"],
+  "required": ["approved"],
   "additionalProperties": false
 }
 ```

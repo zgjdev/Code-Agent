@@ -2,6 +2,8 @@ package com.codeagent.hitl;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.codeagent.browser.BrowserGuard;
@@ -9,11 +11,16 @@ import com.codeagent.browser.BrowserSession;
 import com.codeagent.browser.SensitivePagePolicy;
 import com.codeagent.mcp.protocol.McpToolDescriptor;
 import com.codeagent.tool.ToolOutput;
+import com.codeagent.tool.ToolRegistry;
+import com.codeagent.config.CodeAgentConfig;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -138,6 +145,170 @@ class HitlToolRegistryTest {
     }
 
     @Test
+    void modifiedWriteFinishesBeforeLaterReadOfEffectivePath(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("destination.txt"), "old-value");
+        CountDownLatch readFinished = new CountDownLatch(1);
+        StubHandler stub = new StubHandler(request -> {
+            try {
+                readFinished.await(300, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                return ApprovalResult.reject("interrupted");
+            }
+            return ApprovalResult.modify("{\"path\":\"destination.txt\",\"content\":\"new-value\"}");
+        });
+        HitlToolRegistry registry = new HitlToolRegistry(stub) {
+            @Override
+            public ToolOutput executeToolOutput(String name, String arguments) {
+                ToolOutput output = super.executeToolOutput(name, arguments);
+                if ("read_file".equals(name)) {
+                    readFinished.countDown();
+                }
+                return output;
+            }
+        };
+        registry.setProjectPath(tempDir.toString());
+
+        var results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("write", "write_file",
+                        "{\"path\":\"original.txt\",\"content\":\"original\"}"),
+                new ToolRegistry.ToolInvocation("read", "read_file",
+                        "{\"path\":\"destination.txt\"}")));
+
+        assertTrue(results.get(0).successful());
+        assertTrue(results.get(1).result().contains("new-value"), results.get(1).result());
+        assertEquals(List.of("write", "read"), results.stream().map(ToolRegistry.ToolExecutionResult::id).toList());
+        assertEquals(1, stub.requestCount());
+        assertFalse(Files.exists(tempDir.resolve("original.txt")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void disabledOrPreapprovedHitlKeepsIndependentWritesParallel(boolean enabled, @TempDir Path tempDir) {
+        StubHandler stub = new StubHandler(request -> {
+            throw new AssertionError("unexpected approval");
+        });
+        stub.setEnabled(enabled);
+        stub.approvedTools.add("write_file");
+        CountDownLatch bothStarted = new CountDownLatch(2);
+        HitlToolRegistry registry = new HitlToolRegistry(stub) {
+            @Override
+            public ToolOutput executeToolOutput(String name, String arguments) {
+                bothStarted.countDown();
+                try {
+                    assertTrue(bothStarted.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(failure);
+                }
+                return super.executeToolOutput(name, arguments);
+            }
+        };
+        registry.setProjectPath(tempDir.toString());
+
+        var results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("first", "write_file", "{\"path\":\"first.txt\",\"content\":\"a\"}"),
+                new ToolRegistry.ToolInvocation("second", "write_file", "{\"path\":\"second.txt\",\"content\":\"b\"}")));
+
+        assertTrue(results.stream().allMatch(ToolRegistry.ToolExecutionResult::successful));
+        assertEquals(0, stub.requestCount());
+    }
+
+    @Test
+    void approvalRevokedAfterBatchSelectionFailsClosedBeforePrompt(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("destination.txt"), "old-value");
+        AtomicInteger approvalChecks = new AtomicInteger();
+        AtomicInteger approvalRequests = new AtomicInteger();
+        HitlHandler handler = new HitlHandler() {
+            @Override
+            public ApprovalResult requestApproval(ApprovalRequest request) {
+                approvalRequests.incrementAndGet();
+                return ApprovalResult.modify("{\"path\":\"destination.txt\",\"content\":\"new-value\"}");
+            }
+
+            @Override
+            public boolean isEnabled() {
+                return true;
+            }
+
+            @Override
+            public void setEnabled(boolean enabled) {
+            }
+
+            @Override
+            public boolean isApprovedAllByTool(String toolName) {
+                return approvalChecks.incrementAndGet() == 1;
+            }
+        };
+        HitlToolRegistry registry = new HitlToolRegistry(handler);
+        registry.setProjectPath(tempDir.toString());
+
+        var results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("write", "write_file", "{\"path\":\"original.txt\",\"content\":\"x\"}"),
+                new ToolRegistry.ToolInvocation("read", "read_file", "{\"path\":\"destination.txt\"}")));
+
+        assertFalse(results.get(0).successful());
+        assertEquals(0, approvalRequests.get());
+        assertEquals("old-value", Files.readString(tempDir.resolve("destination.txt")));
+        assertFalse(Files.exists(tempDir.resolve("original.txt")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void unifiedWebMcpBackendCanRequestApprovalAlongsideRead(boolean automatic, @TempDir Path tempDir)
+            throws Exception {
+        Files.writeString(tempDir.resolve("fixture.txt"), "fixture");
+        StubHandler stub = new StubHandler(request -> ApprovalResult.approve());
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+        registerMcpTool(registry, "step_search", "web_search", arguments -> "search-result");
+        if (automatic) {
+            registry.setCurrentModel("step", "step-3.7-flash");
+        } else {
+            CodeAgentConfig.WebToolsConfig config = new CodeAgentConfig.WebToolsConfig();
+            CodeAgentConfig.WebToolRouteConfig route = new CodeAgentConfig.WebToolRouteConfig();
+            route.setBackend("mcp");
+            route.setTool("mcp__step_search__web_search");
+            config.setSearch(route);
+            registry.setWebToolsConfig(config);
+        }
+
+        var results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("search", "web_search", "{\"query\":\"fixture\"}"),
+                new ToolRegistry.ToolInvocation("read", "read_file", "{\"path\":\"fixture.txt\"}")));
+
+        assertTrue(results.get(0).successful(), results.get(0).result());
+        assertTrue(results.get(0).result().contains("search-result"));
+        assertTrue(results.get(1).successful());
+        assertEquals(1, stub.requestCount());
+        assertEquals("mcp__step_search__web_search", stub.received.get(0).toolName());
+    }
+
+    @Test
+    void unifiedFetchMcpBackendCanRequestApprovalAlongsideRead(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("fixture.txt"), "fixture");
+        StubHandler stub = new StubHandler(request -> ApprovalResult.approve());
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+        registerMcpTool(registry, "fetch", "page", arguments -> "fetch-result");
+        CodeAgentConfig.WebToolsConfig config = new CodeAgentConfig.WebToolsConfig();
+        CodeAgentConfig.WebToolRouteConfig route = new CodeAgentConfig.WebToolRouteConfig();
+        route.setBackend("mcp");
+        route.setTool("mcp__fetch__page");
+        config.setFetch(route);
+        registry.setWebToolsConfig(config);
+
+        var results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("fetch", "web_fetch", "{\"url\":\"https://8.8.8.8/fixture\"}"),
+                new ToolRegistry.ToolInvocation("read", "read_file", "{\"path\":\"fixture.txt\"}")));
+
+        assertTrue(results.get(0).successful(), results.get(0).result());
+        assertTrue(results.get(0).result().contains("fetch-result"));
+        assertEquals(1, stub.requestCount());
+        assertEquals("mcp__fetch__page", stub.received.get(0).toolName());
+    }
+
+    @Test
     void approvedAllDecisionExecutesTool(@TempDir Path tempDir) throws Exception {
         Path target = tempDir.resolve("approved-all.txt");
         StubHandler stub = new StubHandler(req -> ApprovalResult.approveAll());
@@ -217,6 +388,7 @@ class HitlToolRegistryTest {
         private final Function<ApprovalRequest, ApprovalResult> decision;
         private final List<ApprovalRequest> received = new ArrayList<>();
         private final List<String> approvedServers = new ArrayList<>();
+        private final List<String> approvedTools = new ArrayList<>();
         private boolean enabled = true;
 
         StubHandler(Function<ApprovalRequest, ApprovalResult> decision) {
@@ -245,6 +417,11 @@ class HitlToolRegistryTest {
 
         void approveServer(String serverName) {
             approvedServers.add(serverName);
+        }
+
+        @Override
+        public boolean isApprovedAllByTool(String toolName) {
+            return approvedTools.contains(toolName);
         }
 
         @Override

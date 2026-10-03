@@ -89,8 +89,7 @@ final class MemoryWriteResolver {
         }
 
         if (domainEntries.isEmpty()) {
-            longTermMemory.storeIfNovel(incoming);
-            return WriteResult.created(longTermMemory.retrieve(incoming.getId()).orElse(incoming));
+            return storeOrConfirmDuplicate(incoming, projectKey, now);
         }
 
         List<MemoryEntry> candidates = retriever.retrieveWriteCandidates(
@@ -115,22 +114,27 @@ final class MemoryWriteResolver {
             String source = submittedUserInput == null ? "" : submittedUserInput;
             if (target != null && !evidence.isEmpty() && source.contains(evidence)) {
                 if (longTermMemory.supersede(target.getId(), incoming)) {
-                    MemoryEntry stored = longTermMemory.retrieve(incoming.getId()).orElse(incoming);
+                    MemoryEntry stored = retrieveOrThrow(incoming.getId());
                     return WriteResult.superseded(stored, target);
                 }
                 throw new IllegalStateException("长期记忆更新失败，旧记忆保持有效");
             }
         }
 
-        boolean stored = longTermMemory.storeIfNovel(incoming);
-        if (!stored) {
-            MemoryEntry duplicate = longTermMemory.getActiveVisible(projectKey).stream()
-                    .filter(entry -> MemoryDeduplicator.isDuplicate(entry, incoming))
-                    .findFirst()
-                    .orElse(incoming);
-            return WriteResult.duplicate(confirmOrThrow(duplicate, now));
+        return storeOrConfirmDuplicate(incoming, projectKey, now);
+    }
+
+    private WriteResult storeOrConfirmDuplicate(MemoryEntry incoming,
+                                                String projectKey,
+                                                Instant confirmedAt) {
+        if (longTermMemory.storeIfNovel(incoming)) {
+            return WriteResult.created(retrieveOrThrow(incoming.getId()));
         }
-        return WriteResult.created(longTermMemory.retrieve(incoming.getId()).orElse(incoming));
+        MemoryEntry duplicate = longTermMemory.getActiveVisible(projectKey).stream()
+                .filter(entry -> MemoryDeduplicator.isDuplicate(entry, incoming))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("长期记忆存储失败，未找到已存储的重复记忆"));
+        return WriteResult.duplicate(confirmOrThrow(duplicate, confirmedAt));
     }
 
     private MemoryEntry validTarget(String targetId,
@@ -151,7 +155,12 @@ final class MemoryWriteResolver {
         if (!longTermMemory.confirm(target.getId(), confirmedAt)) {
             throw new IllegalStateException("长期记忆确认时间更新失败，旧记忆保持不变");
         }
-        return longTermMemory.retrieve(target.getId()).orElse(target);
+        return retrieveOrThrow(target.getId());
+    }
+
+    private MemoryEntry retrieveOrThrow(String id) {
+        return longTermMemory.retrieve(id)
+                .orElseThrow(() -> new IllegalStateException("长期记忆写入后条目不可用"));
     }
 
     private static Map<String, String> metadata(String scope, String projectKey, Instant confirmedAt) {

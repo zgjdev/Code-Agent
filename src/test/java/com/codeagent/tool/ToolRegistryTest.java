@@ -517,6 +517,42 @@ class ToolRegistryTest {
     }
 
     @Test
+    void recomputesResourceIdentityAfterEarlierBatchChangesFilesystem(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("original.txt"), "old-value");
+        CountDownLatch readFinished = new CountDownLatch(1);
+        ToolRegistry registry = new ToolRegistry() {
+            @Override
+            public String executeTool(String name, String arguments) {
+                try {
+                    if ("execute_command".equals(name)) {
+                        Files.createLink(tempDir.resolve("alias.txt"), tempDir.resolve("original.txt"));
+                        return "created link";
+                    }
+                    if ("write_file".equals(name)) {
+                        readFinished.await(300, TimeUnit.MILLISECONDS);
+                    }
+                    String result = super.executeTool(name, arguments);
+                    if ("read_file".equals(name)) {
+                        readFinished.countDown();
+                    }
+                    return result;
+                } catch (Exception failure) {
+                    throw new IllegalStateException(failure);
+                }
+            }
+        };
+        registry.setProjectPath(tempDir.toString());
+
+        var results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("link", "execute_command", "{\"command\":\"fixture\"}"),
+                new ToolRegistry.ToolInvocation("write", "write_file", "{\"path\":\"original.txt\",\"content\":\"new-value\"}"),
+                new ToolRegistry.ToolInvocation("read", "read_file", "{\"path\":\"alias.txt\"}")));
+
+        assertEquals(List.of("link", "write", "read"), results.stream().map(ToolRegistry.ToolExecutionResult::id).toList());
+        assertTrue(results.get(2).result().contains("new-value"), results.get(2).result());
+    }
+
+    @Test
     void shouldExecuteBrowserContainingBatchSequentiallyInDeclaredOrder() {
         CountDownLatch laterCallEntered = new CountDownLatch(1);
         AtomicInteger current = new AtomicInteger();

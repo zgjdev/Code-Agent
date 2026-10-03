@@ -1,11 +1,16 @@
 package com.codeagent.memory;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.time.Instant;
 import java.util.Map;
 import java.util.List;
@@ -718,6 +723,308 @@ class LongTermMemoryTest {
         assertTrue(reopened.retrieve("legacy-1").isPresent());
         assertFalse(reopened.retrieve("must-not-reimport").isPresent());
         assertEquals(1, reopened.size());
+    }
+
+    @Test
+    void legacyDuplicateMigrationMergesConfirmationAndRemapsChainsInAnyOrder() throws Exception {
+        List<List<String>> orders = List.of(
+                List.of("active-a", "active-b", "active-c"),
+                List.of("active-a", "active-c", "active-b"),
+                List.of("active-b", "active-a", "active-c"),
+                List.of("active-b", "active-c", "active-a"),
+                List.of("active-c", "active-a", "active-b"),
+                List.of("active-c", "active-b", "active-a"));
+        Map<String, Map<String, Object>> duplicates = Map.of(
+                "active-a", legacyEntry("active-a", "Java preference", Map.of(
+                        "scope", "global", "lastConfirmedAt", "2026-02-01T00:00:00Z")),
+                "active-b", legacyEntry("active-b", "Ｊａｖａ preference。", Map.of(
+                        "scope", "global", "lastConfirmedAt", "2026-04-01T00:00:00Z")),
+                "active-c", legacyEntry("active-c", "java preference", Map.of(
+                        "scope", "global", "lastConfirmedAt", "2026-03-01T00:00:00Z",
+                        "supersedes", "history-1")));
+
+        for (int index = 0; index < orders.size(); index++) {
+            List<String> order = orders.get(index);
+            Path legacyDir = tempDir.resolve("duplicate-order-" + index);
+            Files.createDirectories(legacyDir);
+            var entries = new java.util.ArrayList<Map<String, Object>>();
+            entries.add(duplicates.get(order.get(0)));
+            entries.add(legacyEntry("history-0", "earliest preference", Map.of(
+                    "scope", "global", "status", "superseded", "supersededBy", "history-1")));
+            entries.add(duplicates.get(order.get(1)));
+            entries.add(duplicates.get(order.get(2)));
+            entries.add(legacyEntry("history-1", "older preference", Map.of(
+                    "scope", "global", "status", "superseded", "supersedes", "history-0",
+                    "supersededBy", "active-c")));
+            Files.writeString(legacyDir.resolve("long_term_memory.json"),
+                    new ObjectMapper().writeValueAsString(entries));
+
+            LongTermMemory migrated = new LongTermMemory(legacyDir.toFile());
+            assertEquals(3, migrated.size(), order.toString());
+            assertEquals(1, migrated.getActiveVisible(null).size());
+            MemoryEntry retained = migrated.getActiveVisible(null).get(0);
+            assertEquals(Instant.parse("2026-04-01T00:00:00Z"),
+                    LongTermMemory.lastConfirmedAtOf(retained), order.toString());
+            assertEquals("history-1", retained.getMetadata().get("supersedes"), order.toString());
+            assertEquals(retained.getId(), migrated.retrieve("history-1").orElseThrow()
+                    .getMetadata().get("supersededBy"), order.toString());
+            assertEquals("history-0", migrated.retrieve("history-1").orElseThrow()
+                    .getMetadata().get("supersedes"));
+            assertEquals("history-1", migrated.retrieve("history-0").orElseThrow()
+                    .getMetadata().get("supersededBy"));
+            assertMigrationReferencesResolve(migrated);
+            assertTrue(Files.exists(legacyDir.resolve("long_term_memory.json.migrated.bak")));
+            assertEquals("migrated", migrationMarker(legacyDir));
+
+            LongTermMemory reopened = new LongTermMemory(legacyDir.toFile());
+            assertEquals(retained.getMetadata(), reopened.retrieve(retained.getId())
+                    .orElseThrow().getMetadata());
+            assertMigrationReferencesResolve(reopened);
+        }
+    }
+
+    @Test
+    void legacyDuplicateMigrationMustNotCreateSelfReferences() throws Exception {
+        Path legacyDir = tempDir.resolve("duplicate-self-reference");
+        Files.createDirectories(legacyDir);
+        Files.writeString(legacyDir.resolve("long_term_memory.json"),
+                new ObjectMapper().writeValueAsString(List.of(
+                        legacyEntry("active-a", "Java preference", Map.of(
+                                "scope", "global", "supersedes", "active-b",
+                                "supersededBy", "active-c")),
+                        legacyEntry("active-b", "java preference", Map.of(
+                                "scope", "global", "supersedes", "active-c",
+                                "supersededBy", "active-a")),
+                        legacyEntry("active-c", "Ｊａｖａ preference。", Map.of(
+                                "scope", "global", "supersedes", "active-a",
+                                "supersededBy", "active-b")))));
+
+        LongTermMemory migrated = new LongTermMemory(legacyDir.toFile());
+
+        assertEquals(1, migrated.size());
+        MemoryEntry retained = migrated.getActiveVisible(null).get(0);
+        assertFalse(retained.getMetadata().containsKey("supersedes"));
+        assertFalse(retained.getMetadata().containsKey("supersededBy"));
+        assertMigrationReferencesResolve(migrated);
+    }
+
+    @Test
+    void legacyDuplicateMigrationPrefersExistingHistoryOverDanglingRelation() throws Exception {
+        Path legacyDir = tempDir.resolve("duplicate-valid-history");
+        Files.createDirectories(legacyDir);
+        Files.writeString(legacyDir.resolve("long_term_memory.json"),
+                new ObjectMapper().writeValueAsString(List.of(
+                        legacyEntry("active-a", "Java preference", Map.of(
+                                "scope", "global", "supersedes", "missing-history")),
+                        legacyEntry("active-b", "java preference", Map.of(
+                                "scope", "global", "supersedes", "history")),
+                        legacyEntry("history", "older preference", Map.of(
+                                "scope", "global", "status", "superseded",
+                                "supersededBy", "active-b")))));
+
+        LongTermMemory migrated = new LongTermMemory(legacyDir.toFile());
+
+        assertEquals(2, migrated.size());
+        MemoryEntry retained = migrated.getActiveVisible(null).get(0);
+        assertEquals("history", retained.getMetadata().get("supersedes"));
+        assertEquals(retained.getId(), migrated.retrieve("history").orElseThrow()
+                .getMetadata().get("supersededBy"));
+        assertMigrationReferencesResolve(migrated);
+    }
+
+    @Test
+    void legacyDuplicateMigrationRemapsRelationsBetweenDuplicateGroups() throws Exception {
+        Path legacyDir = tempDir.resolve("duplicate-group-relations");
+        Files.createDirectories(legacyDir);
+        Files.writeString(legacyDir.resolve("long_term_memory.json"),
+                new ObjectMapper().writeValueAsString(List.of(
+                        legacyEntry("current-b", "Java preference", Map.of(
+                                "scope", "global", "supersedes", "previous-b")),
+                        legacyEntry("previous-a", "Python preference", Map.of("scope", "global")),
+                        legacyEntry("current-a", "java preference", Map.of("scope", "global")),
+                        legacyEntry("previous-b", "python preference", Map.of(
+                                "scope", "global", "supersededBy", "current-b")))));
+
+        LongTermMemory migrated = new LongTermMemory(legacyDir.toFile());
+
+        assertEquals(2, migrated.size());
+        assertEquals("previous-a", migrated.retrieve("current-a").orElseThrow()
+                .getMetadata().get("supersedes"));
+        assertEquals("current-a", migrated.retrieve("previous-a").orElseThrow()
+                .getMetadata().get("supersededBy"));
+        assertMigrationReferencesResolve(migrated);
+    }
+
+    @Test
+    void legacyMigrationFailureRollsBackRowsAndMarkerAndCanRetry() throws Exception {
+        Path legacyDir = tempDir.resolve("migration-rollback");
+        LongTermMemory existing = new LongTermMemory(legacyDir.toFile());
+        existing.store(new MemoryEntry("preexisting", "unrelated existing fact",
+                MemoryEntry.MemoryType.FACT, Map.of("scope", "global"), 5));
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + legacyDir.resolve("memory.db").toAbsolutePath());
+             Statement statement = connection.createStatement()) {
+            statement.executeUpdate("DELETE FROM memory_meta WHERE key='legacy_json_migration'");
+            statement.execute("""
+                    CREATE TRIGGER fail_legacy_insert BEFORE INSERT ON long_term_memories
+                    WHEN NEW.id='fail-import'
+                    BEGIN SELECT RAISE(ABORT, 'test migration failure'); END
+                    """);
+        }
+        Path legacyJson = legacyDir.resolve("long_term_memory.json");
+        Files.writeString(legacyJson, new ObjectMapper().writeValueAsString(List.of(
+                legacyEntry("first-import", "first imported fact", Map.of("scope", "global")),
+                legacyEntry("fail-import", "second imported fact", Map.of("scope", "global")))));
+
+        assertThrows(IllegalStateException.class, () -> new LongTermMemory(legacyDir.toFile()));
+        assertEquals(1, existing.size());
+        assertTrue(existing.retrieve("first-import").isEmpty());
+        assertNull(migrationMarker(legacyDir));
+        assertTrue(Files.exists(legacyJson));
+        assertFalse(Files.exists(legacyDir.resolve("long_term_memory.json.migrated.bak")));
+
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + legacyDir.resolve("memory.db").toAbsolutePath());
+             Statement statement = connection.createStatement()) {
+            statement.execute("DROP TRIGGER fail_legacy_insert");
+        }
+        LongTermMemory migrated = new LongTermMemory(legacyDir.toFile());
+        assertEquals(3, migrated.size());
+        assertEquals("migrated", migrationMarker(legacyDir));
+        assertTrue(Files.exists(legacyDir.resolve("long_term_memory.json.migrated.bak")));
+    }
+
+    @Test
+    void legacyDuplicateMigrationRejectsConflictingHistoryWithoutCommitting() throws Exception {
+        Path legacyDir = tempDir.resolve("duplicate-conflicting-history");
+        Files.createDirectories(legacyDir);
+        Path legacyJson = legacyDir.resolve("long_term_memory.json");
+        Files.writeString(legacyJson, new ObjectMapper().writeValueAsString(List.of(
+                legacyEntry("active-a", "Java preference", Map.of(
+                        "scope", "global", "supersedes", "history-a")),
+                legacyEntry("active-b", "java preference", Map.of(
+                        "scope", "global", "supersedes", "history-b")),
+                legacyEntry("history-a", "older Java preference", Map.of(
+                        "scope", "global", "status", "superseded", "supersededBy", "active-a")),
+                legacyEntry("history-b", "older Python preference", Map.of(
+                        "scope", "global", "status", "superseded", "supersededBy", "active-b")))));
+
+        assertThrows(IllegalStateException.class, () -> new LongTermMemory(legacyDir.toFile()));
+
+        assertNull(migrationMarker(legacyDir));
+        assertTrue(Files.exists(legacyJson));
+        assertFalse(Files.exists(legacyDir.resolve("long_term_memory.json.migrated.bak")));
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + legacyDir.resolve("memory.db").toAbsolutePath());
+             Statement statement = connection.createStatement();
+             ResultSet result = statement.executeQuery("SELECT COUNT(*) FROM long_term_memories")) {
+            assertTrue(result.next());
+            assertEquals(0, result.getInt(1));
+        }
+    }
+
+    @Test
+    void legacySameIdContentConflictMustPreserveDatabaseFactsAndRemainUnmigrated() throws Exception {
+        Path legacyDir = tempDir.resolve("same-id-content-conflict");
+        LongTermMemory existing = new LongTermMemory(legacyDir.toFile());
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        assertTrue(existing.storeIfNovel(new MemoryEntry("a", "Java preference",
+                MemoryEntry.MemoryType.FACT, createdAt, Map.of("scope", "global"), 5)));
+        assertTrue(existing.storeIfNovel(new MemoryEntry("b", "Python preference",
+                MemoryEntry.MemoryType.FACT, createdAt, Map.of("scope", "global"), 5)));
+        MemoryEntry originalJava = existing.retrieve("a").orElseThrow();
+        MemoryEntry originalPython = existing.retrieve("b").orElseThrow();
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + legacyDir.resolve("memory.db").toAbsolutePath());
+             Statement statement = connection.createStatement()) {
+            statement.executeUpdate("DELETE FROM memory_meta WHERE key='legacy_json_migration'");
+        }
+        Path legacyJson = legacyDir.resolve("long_term_memory.json");
+        String legacyContent = new ObjectMapper().writeValueAsString(List.of(
+                legacyEntry("a", "Python preference", Map.of("scope", "global"))));
+        Files.writeString(legacyJson, legacyContent);
+
+        assertThrows(IllegalStateException.class, () -> new LongTermMemory(legacyDir.toFile()));
+
+        assertEquals(2, existing.size());
+        MemoryEntry preservedJava = existing.retrieve("a").orElseThrow();
+        MemoryEntry preservedPython = existing.retrieve("b").orElseThrow();
+        assertEquals(originalJava.getContent(), preservedJava.getContent());
+        assertEquals(originalJava.getMetadata(), preservedJava.getMetadata());
+        assertEquals(originalJava.getTimestamp(), preservedJava.getTimestamp());
+        assertEquals(originalPython.getContent(), preservedPython.getContent());
+        assertEquals(originalPython.getMetadata(), preservedPython.getMetadata());
+        assertEquals(originalPython.getTimestamp(), preservedPython.getTimestamp());
+        assertEquals(10, existing.getTokenCount());
+        assertNull(migrationMarker(legacyDir));
+        assertTrue(Files.exists(legacyJson));
+        assertEquals(legacyContent, Files.readString(legacyJson));
+        assertFalse(Files.exists(legacyDir.resolve("long_term_memory.json.migrated.bak")));
+    }
+
+    @Test
+    void legacySameIdConfirmationConflictMustPreserveDatabaseConfirmationAndRemainUnmigrated()
+            throws Exception {
+        Path legacyDir = tempDir.resolve("same-id-confirmation-conflict");
+        LongTermMemory existing = new LongTermMemory(legacyDir.toFile());
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        Instant confirmedAt = Instant.parse("2026-09-25T00:00:00Z");
+        assertTrue(existing.storeIfNovel(new MemoryEntry("a", "Java preference",
+                MemoryEntry.MemoryType.FACT, createdAt,
+                Map.of("scope", "global", "lastConfirmedAt", confirmedAt.toString()), 5)));
+        MemoryEntry original = existing.retrieve("a").orElseThrow();
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + legacyDir.resolve("memory.db").toAbsolutePath());
+             Statement statement = connection.createStatement()) {
+            statement.executeUpdate("DELETE FROM memory_meta WHERE key='legacy_json_migration'");
+        }
+        Path legacyJson = legacyDir.resolve("long_term_memory.json");
+        String legacyContent = new ObjectMapper().writeValueAsString(List.of(
+                legacyEntry("a", "Java preference", Map.of("scope", "global",
+                        "lastConfirmedAt", "2026-02-01T00:00:00Z"))));
+        Files.writeString(legacyJson, legacyContent);
+
+        assertThrows(IllegalStateException.class, () -> new LongTermMemory(legacyDir.toFile()));
+
+        assertEquals(1, existing.size());
+        MemoryEntry preserved = existing.retrieve("a").orElseThrow();
+        assertEquals(original.getContent(), preserved.getContent());
+        assertEquals(original.getMetadata(), preserved.getMetadata());
+        assertEquals(original.getTimestamp(), preserved.getTimestamp());
+        assertEquals(confirmedAt, LongTermMemory.lastConfirmedAtOf(preserved));
+        assertEquals(5, existing.getTokenCount());
+        assertNull(migrationMarker(legacyDir));
+        assertTrue(Files.exists(legacyJson));
+        assertEquals(legacyContent, Files.readString(legacyJson));
+        assertFalse(Files.exists(legacyDir.resolve("long_term_memory.json.migrated.bak")));
+    }
+
+    private static Map<String, Object> legacyEntry(String id, String content,
+                                                   Map<String, String> metadata) {
+        return Map.of("id", id, "content", content, "type", "FACT",
+                "timestamp", "2026-01-01T00:00:00Z", "metadata", metadata, "tokenCount", 5);
+    }
+
+    private static void assertMigrationReferencesResolve(LongTermMemory migrated) {
+        for (MemoryEntry entry : migrated.getAll()) {
+            for (String relation : List.of("supersedes", "supersededBy")) {
+                String target = entry.getMetadata().get(relation);
+                if (target != null) {
+                    assertNotEquals(entry.getId(), target);
+                    assertTrue(migrated.retrieve(target).isPresent(), entry.getId() + " -> " + target);
+                }
+            }
+        }
+    }
+
+    private static String migrationMarker(Path storageDir) throws Exception {
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + storageDir.resolve("memory.db").toAbsolutePath());
+             Statement statement = connection.createStatement();
+             ResultSet result = statement.executeQuery(
+                     "SELECT value FROM memory_meta WHERE key='legacy_json_migration'")) {
+            return result.next() ? result.getString(1) : null;
+        }
     }
 
     @Test

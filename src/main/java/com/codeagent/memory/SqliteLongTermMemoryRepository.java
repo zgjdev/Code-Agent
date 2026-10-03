@@ -19,10 +19,15 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.TreeMap;
 
 final class SqliteLongTermMemoryRepository {
     private static final Logger log = LoggerFactory.getLogger(SqliteLongTermMemoryRepository.class);
@@ -304,12 +309,7 @@ final class SqliteLongTermMemoryRepository {
                 return false;
             }
             if (legacyExists) {
-                for (MemoryEntry entry : entriesToMigrate) {
-                    MemoryEntry normalized = normalizeLegacyEntry(entry);
-                    if (!hasExactDuplicate(connection, normalized)) {
-                        upsert(connection, normalized);
-                    }
-                }
+                migrateLegacyEntries(connection, entriesToMigrate);
                 putMeta(connection, META_LEGACY_MIGRATION, "migrated");
             } else {
                 putMeta(connection, META_LEGACY_MIGRATION, "absent");
@@ -390,6 +390,101 @@ final class SqliteLongTermMemoryRepository {
                 LongTermMemorySemantics.LAST_CONFIRMED_AT,
                 LongTermMemorySemantics.lastConfirmedAtOf(entry).toString());
         return LongTermMemorySemantics.copyWithMetadata(entry, metadata);
+    }
+
+    private void migrateLegacyEntries(Connection connection, List<MemoryEntry> legacyEntries)
+            throws SQLException {
+        Map<String, MemoryEntry> existing = new HashMap<>();
+        try (Statement statement = connection.createStatement();
+             ResultSet result = statement.executeQuery("SELECT * FROM long_term_memories")) {
+            while (result.next()) {
+                MemoryEntry entry = fromRow(result);
+                existing.put(entry.getId(), entry);
+            }
+        }
+        Map<String, MemoryEntry> entries = new TreeMap<>(existing);
+        Set<String> legacyIds = new HashSet<>();
+        for (MemoryEntry entry : legacyEntries) {
+            if (existing.containsKey(entry.getId())) {
+                throw new SQLException("Legacy memory migration has a cross-source ID conflict");
+            }
+            entries.put(entry.getId(), normalizeLegacyEntry(entry));
+            legacyIds.add(entry.getId());
+        }
+
+        List<MemoryEntry> ordered = entries.values().stream()
+                .sorted(Comparator.comparing((MemoryEntry entry) -> !existing.containsKey(entry.getId()))
+                        .thenComparing(MemoryEntry::getId))
+                .toList();
+        Map<String, List<MemoryEntry>> groups = new LinkedHashMap<>();
+        Map<String, String> retainedIds = new HashMap<>();
+        for (MemoryEntry entry : ordered) {
+            String retainedId = entry.getId();
+            if (LongTermMemorySemantics.isActive(entry)) {
+                retainedId = groups.values().stream()
+                        .map(group -> group.get(0))
+                        .filter(LongTermMemorySemantics::isActive)
+                        .filter(candidate -> MemoryDeduplicator.isDuplicate(candidate, entry))
+                        .map(MemoryEntry::getId)
+                        .findFirst()
+                        .orElse(retainedId);
+            }
+            groups.computeIfAbsent(retainedId, ignored -> new ArrayList<>()).add(entry);
+            retainedIds.put(entry.getId(), retainedId);
+        }
+
+        List<MemoryEntry> mergedEntries = new ArrayList<>();
+        for (List<MemoryEntry> group : groups.values()) {
+            MemoryEntry retained = group.get(0);
+            Map<String, String> metadata = new HashMap<>(retained.getMetadata());
+            Instant confirmedAt = group.stream()
+                    .map(LongTermMemorySemantics::lastConfirmedAtOf)
+                    .max(Instant::compareTo)
+                    .orElseThrow();
+            metadata.put(LongTermMemorySemantics.LAST_CONFIRMED_AT, confirmedAt.toString());
+            mergeLegacyRelation(group, "supersedes", retainedIds, metadata);
+            mergeLegacyRelation(group, "supersededBy", retainedIds, metadata);
+            mergedEntries.add(LongTermMemorySemantics.copyWithMetadata(retained, metadata));
+        }
+
+        for (MemoryEntry entry : mergedEntries) {
+            MemoryEntry previous = existing.get(entry.getId());
+            if (legacyIds.contains(entry.getId()) || previous == null
+                    || !previous.getMetadata().equals(entry.getMetadata())) {
+                upsert(connection, entry);
+            }
+        }
+    }
+
+    private void mergeLegacyRelation(List<MemoryEntry> group,
+                                     String relation,
+                                     Map<String, String> retainedIds,
+                                     Map<String, String> metadata) throws SQLException {
+        String retainedId = group.get(0).getId();
+        Set<String> targets = new HashSet<>();
+        Set<String> unresolvedTargets = new HashSet<>();
+        for (MemoryEntry entry : group) {
+            String originalTarget = blankToNull(entry.getMetadata().get(relation));
+            if (originalTarget == null) {
+                continue;
+            }
+            String target = retainedIds.get(originalTarget);
+            if (target == null) {
+                unresolvedTargets.add(originalTarget);
+            } else if (!retainedId.equals(target)) {
+                targets.add(target);
+            }
+        }
+        if (targets.isEmpty()) {
+            targets.addAll(unresolvedTargets);
+        }
+        if (targets.size() > 1) {
+            throw new SQLException("Legacy memory migration has conflicting " + relation + " relations");
+        }
+        metadata.remove(relation);
+        if (!targets.isEmpty()) {
+            metadata.put(relation, targets.iterator().next());
+        }
     }
 
     private boolean hasExactDuplicate(Connection connection, MemoryEntry entry)

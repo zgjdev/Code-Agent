@@ -150,6 +150,7 @@ public class Planner {
      * StructuredJsonExecutor 做一次 bounded repair。
      */
     private ExecutionPlan parsePlan(String goal, JsonNode root) throws IOException {
+        validatePlanSchema(root, PLAN_OUTPUT.schema(), "plan");
         if (root == null || !root.isObject()) {
             throw new IOException("Planner response must be a JSON object");
         }
@@ -185,18 +186,11 @@ public class Planner {
                 throw new IOException("Planner task description must be non-empty: " + originalId);
             }
             JsonNode typeNode = taskNode.get("type");
-            if (typeNode != null && !typeNode.isNull() && !typeNode.isTextual()) {
-                throw new IOException("Planner task type must be textual: " + originalId);
-            }
-            JsonNode depsNode = taskNode.get("dependencies");
-            if (depsNode != null && !depsNode.isNull() && !depsNode.isArray()) {
-                throw new IOException("Planner task dependencies must be an array: " + originalId);
-            }
 
             String newId = "task_" + taskIndex++;
             idMapping.put(originalId, newId);
 
-            String typeStr = typeNode == null ? "" : typeNode.asText();
+            String typeStr = typeNode == null ? null : typeNode.asText();
             Task.TaskType type = parseTaskType(typeStr, originalId);
 
             try {
@@ -241,6 +235,59 @@ public class Planner {
         }
 
         return plan;
+    }
+
+    private static void validatePlanSchema(JsonNode node, JsonNode schema, String fieldPath) throws IOException {
+        String expectedType = schema.path("type").asText();
+        boolean validType = node != null && switch (expectedType) {
+            case "object" -> node.isObject();
+            case "array" -> node.isArray();
+            case "string" -> node.isTextual();
+            case "boolean" -> node.isBoolean();
+            default -> false;
+        };
+        if (!validType) {
+            throw new IOException("Planner " + fieldPath + " must be of type " + expectedType);
+        }
+
+        JsonNode allowedValues = schema.get("enum");
+        if (allowedValues != null) {
+            boolean allowed = false;
+            for (JsonNode allowedValue : allowedValues) {
+                if (allowedValue.equals(node)) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (!allowed) {
+                throw new IOException("Planner " + fieldPath + " must match a schema enum value");
+            }
+        }
+
+        if (node.isObject()) {
+            for (JsonNode requiredField : schema.path("required")) {
+                if (!node.has(requiredField.asText())) {
+                    throw new IOException("Planner " + fieldPath + " missing required field " + requiredField.asText());
+                }
+            }
+            JsonNode properties = schema.path("properties");
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                JsonNode fieldSchema = properties.get(field.getKey());
+                if (fieldSchema == null) {
+                    if (!schema.path("additionalProperties").asBoolean(true)) {
+                        throw new IOException("Planner " + fieldPath + " has unknown property " + field.getKey());
+                    }
+                } else {
+                    validatePlanSchema(field.getValue(), fieldSchema, fieldPath + "." + field.getKey());
+                }
+            }
+        } else if (node.isArray()) {
+            for (int itemIndex = 0; itemIndex < node.size(); itemIndex++) {
+                validatePlanSchema(node.get(itemIndex), schema.path("items"), fieldPath + "[" + itemIndex + "]");
+            }
+        }
     }
 
     private static JsonNode buildPlanSchema() {
@@ -297,10 +344,10 @@ public class Planner {
      * 解析任务类型
      */
     private Task.TaskType parseTaskType(String typeStr, String taskId) throws IOException {
-        if (typeStr == null || typeStr.isBlank()) {
+        if (typeStr == null) {
             return Task.TaskType.ANALYSIS;
         }
-        return switch (typeStr.trim().toUpperCase(Locale.ROOT)) {
+        return switch (typeStr) {
             case "FILE_READ" -> Task.TaskType.FILE_READ;
             case "FILE_WRITE" -> Task.TaskType.FILE_WRITE;
             case "COMMAND" -> Task.TaskType.COMMAND;
@@ -329,14 +376,7 @@ public class Planner {
         }
         Set<EvidenceType> evidence = new LinkedHashSet<>();
         for (JsonNode item : node) {
-            if (!item.isTextual()) {
-                continue;
-            }
-            try {
-                evidence.add(EvidenceType.valueOf(item.asText().trim().toUpperCase(Locale.ROOT)));
-            } catch (IllegalArgumentException e) {
-                log.warn("Ignoring unknown planner evidence type: {}", item.asText());
-            }
+            evidence.add(EvidenceType.valueOf(item.asText()));
         }
         return Collections.unmodifiableSet(evidence);
     }

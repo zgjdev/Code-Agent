@@ -1397,6 +1397,26 @@ public class ToolRegistry {
         return auditLog;
     }
 
+    protected boolean requiresIsolatedExecution(ToolInvocation invocation) {
+        return false;
+    }
+
+    protected String executionBackendToolName(String toolName) {
+        if (toolName == null) {
+            return null;
+        }
+        WebToolBackendRouter.Route route = switch (toolName) {
+            case "web_search" -> webToolBackendRouter.searchRoute(currentProvider, currentModel);
+            case "web_fetch" -> webToolBackendRouter.fetchRoute(currentProvider, currentModel);
+            default -> null;
+        };
+        return route != null && route.valid() && route.usesMcp() ? route.tool() : toolName;
+    }
+
+    protected ToolOutput executeBatchedToolOutput(ToolInvocation invocation, boolean concurrentBatch) {
+        return executeToolOutput(invocation.name(), invocation.argumentsJson());
+    }
+
     /**
      * 执行同一轮 LLM 返回的多个工具调用。
      *
@@ -1438,13 +1458,25 @@ public class ToolRegistry {
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(toolBatchTimeoutSeconds);
         ToolConflictAwareBatchSelector batchSelector = new ToolConflictAwareBatchSelector(
                 new ToolResourceClaimResolver(pathGuard));
-        List<List<ToolInvocation>> batches = batchSelector.partition(invocations, MAX_PARALLEL_TOOLS);
         List<ToolExecutionResult> results = new ArrayList<>(invocations.size());
 
-        for (List<ToolInvocation> batch : batches) {
+        while (results.size() < invocations.size()) {
             if (CancellationContext.isCancelled()) {
                 appendFailedRemainder(invocations, results, "用户取消了此次工具调用");
                 break;
+            }
+
+            List<ToolInvocation> remaining = invocations.subList(results.size(), invocations.size());
+            List<ToolInvocation> batch;
+            if (requiresIsolatedExecution(remaining.get(0))) {
+                batch = List.of(remaining.get(0));
+            } else {
+                int candidateCount = 1;
+                while (candidateCount < Math.min(remaining.size(), MAX_PARALLEL_TOOLS)
+                        && !requiresIsolatedExecution(remaining.get(candidateCount))) {
+                    candidateCount++;
+                }
+                batch = batchSelector.selectNextBatch(remaining.subList(0, candidateCount), MAX_PARALLEL_TOOLS);
             }
 
             long remainingNanos = deadlineNanos - System.nanoTime();
@@ -1478,7 +1510,7 @@ public class ToolRegistry {
                             return ToolExecutionResult.failed(invocation, "用户取消了此次工具调用");
                         }
                         long startedAt = System.nanoTime();
-                        ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
+                        ToolOutput output = executeBatchedToolOutput(invocation, invocations.size() > 1);
                         return ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt));
                     })
                     .toList();

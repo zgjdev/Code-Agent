@@ -4,6 +4,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -17,6 +20,97 @@ class MemoryWriteResolverTest {
             Instant.parse("2026-09-25T00:00:00Z"), ZoneOffset.UTC);
 
     @TempDir Path tempDir;
+
+    @Test
+    void emptyDomainWriteLockTimeoutMustNotReportCreated() throws Exception {
+        LongTermMemory memory = new LongTermMemory(tempDir.toFile());
+        MemoryTestLlmClient client = new MemoryTestLlmClient("{\"action\":\"create\"}");
+        MemoryWriteResolver resolver = resolver(memory,
+                new MemoryTestEmbeddingProvider().fail(true), client);
+
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + tempDir.resolve("memory.db").toAbsolutePath());
+             Statement statement = connection.createStatement()) {
+            statement.execute("BEGIN IMMEDIATE");
+            try {
+                assertThrows(IllegalStateException.class, () -> resolver.resolveAndStore(
+                        "用户偏好使用 Java", "global", "/repo/current", "记住这个偏好"));
+                assertEquals(0, memory.size());
+                assertEquals(0, client.calls());
+            } finally {
+                statement.execute("ROLLBACK");
+            }
+        }
+        assertEquals(0, new LongTermMemory(tempDir.toFile()).size());
+    }
+
+    @Test
+    void emptyDomainConcurrentDuplicateConfirmsPersistedEntry() {
+        assertConcurrentDuplicateConfirmed(false);
+    }
+
+    @Test
+    void createFallbackConcurrentDuplicateConfirmsPersistedEntry() {
+        assertConcurrentDuplicateConfirmed(true);
+    }
+
+    @Test
+    void createFallbackWriteFailureMustNotConfirmUnstoredIncoming() {
+        LongTermMemory memory = new LongTermMemory(tempDir.toFile()) {
+            @Override
+            public synchronized boolean storeIfNovel(MemoryEntry entry) {
+                return false;
+            }
+
+            @Override
+            public synchronized boolean confirm(String targetId, Instant confirmedAt) {
+                fail("写入失败且无真实重复项时不得确认未存储的 incoming: " + targetId);
+                return false;
+            }
+        };
+        LongTermMemory other = new LongTermMemory(tempDir.toFile());
+        other.store(new MemoryEntry("unrelated", "用户偏好使用 Python",
+                MemoryEntry.MemoryType.FACT, Map.of("scope", "global"), 5));
+        MemoryWriteResolver resolver = resolver(memory,
+                new MemoryTestEmbeddingProvider().fail(true),
+                new MemoryTestLlmClient("{\"action\":\"create\"}"));
+
+        assertThrows(IllegalStateException.class, () -> resolver.resolveAndStore(
+                "用户偏好使用 Java", "global", "/repo/current", "记住这个偏好"));
+        assertEquals(1, other.size());
+    }
+
+    private void assertConcurrentDuplicateConfirmed(boolean nonEmptyDomain) {
+        LongTermMemory other = new LongTermMemory(tempDir.toFile());
+        String fact = "用户偏好使用 Java";
+        LongTermMemory memory = new LongTermMemory(tempDir.toFile()) {
+            @Override
+            public synchronized boolean storeIfNovel(MemoryEntry incoming) {
+                assertTrue(other.storeIfNovel(new MemoryEntry("concurrent-existing", fact,
+                        MemoryEntry.MemoryType.FACT,
+                        Instant.parse("2026-01-01T00:00:00Z"),
+                        Map.of("scope", "global"), 5)));
+                return super.storeIfNovel(incoming);
+            }
+        };
+        if (nonEmptyDomain) {
+            other.store(new MemoryEntry("unrelated", "用户偏好使用 Python",
+                    MemoryEntry.MemoryType.FACT, Map.of("scope", "global"), 5));
+        }
+        MemoryTestLlmClient client = new MemoryTestLlmClient("{\"action\":\"create\"}");
+        MemoryWriteResolver resolver = resolver(memory,
+                new MemoryTestEmbeddingProvider().fail(true), client);
+
+        var result = resolver.resolveAndStore(fact, "global", "/repo/current", "记住这个偏好");
+
+        assertEquals(MemoryWriteResolver.Action.DUPLICATE, result.action());
+        assertEquals("concurrent-existing", result.memory().getId());
+        assertEquals(CLOCK.instant(), LongTermMemory.lastConfirmedAtOf(result.memory()));
+        assertEquals(CLOCK.instant(), LongTermMemory.lastConfirmedAtOf(
+                other.retrieve("concurrent-existing").orElseThrow()));
+        assertEquals(nonEmptyDomain ? 2 : 1, other.size());
+        assertEquals(nonEmptyDomain ? 1 : 0, client.calls());
+    }
 
     @Test
     void exactEquivalentUsesDeterministicFastPathWithoutLlm() {

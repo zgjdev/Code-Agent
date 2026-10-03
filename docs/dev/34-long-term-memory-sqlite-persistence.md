@@ -199,6 +199,8 @@ PRAGMA busy_timeout=5000;
 
 SQLite 是唯一事实源后，不再先改内存再尝试落盘，因此不存在“方法返回成功但进程重启后数据消失”的 Map/磁盘分叉。写事务失败时回滚并返回失败；`storeIfNovel` 的 duplicate 与写失败都会保持数据库不变，错误会记录日志。
 
+`MemoryWriteResolver` 的空域与普通 CREATE 使用相同的结果处理：只有真实写入成功才返回 CREATED。写入返回 false 后重新读取当前域的确定性重复项，存在则确认并返回该持久化条目的 DUPLICATE；不存在则明确失败，不返回未存储的候选，也不尝试确认其 ID。
+
 #### Embedding
 
 `MemoryEmbeddingCache` 完全不改：
@@ -224,6 +226,7 @@ embedding 仍是可重建派生数据，不属于本次事实源迁移。
 2. 无标记且 `long_term_memory.json` 不存在：写入 `absent` 标记。
 3. 无标记且 JSON 存在：
    - 完整解析 legacy JSON；
+   - 合并同域 active exact-duplicate，保留最新确认时间并重映射 `supersedes` / `supersededBy` 到保留条目；合并产生的自引用移除；
    - 在单个 SQLite 写事务中导入合法条目；
    - 写入 `migrated` 标记；
    - COMMIT 后尝试把旧文件重命名为 `long_term_memory.json.migrated.bak`。
@@ -231,6 +234,12 @@ embedding 仍是可重建派生数据，不属于本次事实源迁移。
 若 JSON 解析或数据库导入失败，不写迁移完成标记，启动失败或保持可重试状态，不能静默切换到空数据库。
 
 迁移只导入文本、metadata、生命周期与 token 计数，不生成 embedding。
+
+同一重复集合若包含多个无法合并的有效历史目标，不能用任意文件顺序丢弃关系：迁移明确失败，事务回滚，不写完成标记，旧 JSON 保留以便人工处理后重试。
+
+若无迁移标记的数据库与 legacy JSON 存在相同 ID，采用明确冲突而非覆盖：迁移回滚，保留数据库事实与确认时间、原 JSON 和未完成标记状态，避免把数据库新事实替换为旧快照。既有 legacy 数据本身的唯一悬空引用不在本次自动修复范围内。
+
+上述去重修复只用于首次迁移。已经记录迁移标记的数据库不会自动重放旧 JSON；升级前已经出现的断链或确认时间丢失，需要在用户确认后单独审计与恢复。
 
 #### 兼容语义
 

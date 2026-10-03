@@ -21,10 +21,35 @@ import java.util.concurrent.TimeUnit;
 public class HitlToolRegistry extends ToolRegistry {
 
     private final HitlHandler hitlHandler;
+    private final ThreadLocal<Boolean> concurrentExecution = new ThreadLocal<>();
 
     public HitlToolRegistry(HitlHandler hitlHandler) {
         super();
         this.hitlHandler = hitlHandler;
+    }
+
+    @Override
+    protected boolean requiresIsolatedExecution(ToolInvocation invocation) {
+        String toolName = executionBackendToolName(invocation.name());
+        return hitlHandler.isEnabled()
+                && ApprovalPolicy.requiresApproval(toolName)
+                && !hitlHandler.isApprovedAllByTool(toolName)
+                && !hitlHandler.isApprovedAllByServer(ApprovalPolicy.mcpServerName(toolName));
+    }
+
+    @Override
+    protected ToolOutput executeBatchedToolOutput(ToolInvocation invocation, boolean concurrentBatch) {
+        Boolean previous = concurrentExecution.get();
+        concurrentExecution.set(concurrentBatch || Boolean.TRUE.equals(previous));
+        try {
+            return executeToolOutput(invocation.name(), invocation.argumentsJson());
+        } finally {
+            if (previous == null) {
+                concurrentExecution.remove();
+            } else {
+                concurrentExecution.set(previous);
+            }
+        }
     }
 
     @Override
@@ -55,6 +80,12 @@ public class HitlToolRegistry extends ToolRegistry {
 
     private ToolOutput executeAfterExplicitApproval(String name, String argumentsJson, String sensitiveNotice) {
         long start = System.nanoTime();
+        if (Boolean.TRUE.equals(concurrentExecution.get())) {
+            String reason = "审批状态已变更，请重新发起工具调用以进行独占审批";
+            getAuditLog().record(AuditLog.AuditEntry.denyByHitl(
+                    name, argumentsJson, reason, elapsedMillis(start)));
+            return ToolOutput.failure(ToolOutput.FailureKind.HITL_REJECTED, "[HITL] " + reason);
+        }
         ApprovalRequest request = ApprovalRequest.of(name, argumentsJson, null, null, sensitiveNotice);
         ApprovalResult result = hitlHandler.requestApproval(request);
 

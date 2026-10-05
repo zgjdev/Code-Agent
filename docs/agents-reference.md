@@ -77,7 +77,7 @@ AnySearchResultParser验证完整Markdown结果包络；StepSearchResultParser�
 3. 按 server 名 merge，项目级覆盖用户级
 
 格式兼容 Claude Code：`command` + `args` = stdio，`url` + `headers` = Streamable HTTP。内置变量：`${PROJECT_DIR}`、`${HOME}`；其他 `${VAR}` 从系统环境变量、系统属性、项目 `.env`、用户 `~/.env` 读取。
-检测到 `STEP_API_KEY` 时自动内置 `step_search` 远程 MCP（显式同名配置优先）。作为所有模型搜索和抓取的降级后端，搜索需要有效 Step Plan 订阅；底层 `mcp__step_search__web_search` / `web_fetch` 不进入模型 Tool definitions。
+检测到 `STEP_API_KEY` 时自动内置 `step_search` 远程 MCP（显式同名配置优先）。作为所有模型搜索和抓取的降级后端，使用 `https://api.stepfun.com/v1/mcp/web_search/mcp` 与 `Bearer STEP_API_KEY` 接入普通 API 搜索和抓取；底层 `mcp__step_search__web_search` / `web_fetch` 不进入模型 Tool definitions。
 
 ---
 

@@ -85,7 +85,7 @@ class McpConfigLoaderTest {
         Map<String, McpServerConfig> configs = loader.load();
 
         assertTrue(configs.containsKey("step_search"));
-        assertEquals("https://api.stepfun.com/step_plan/v1/mcp/web_search/mcp",
+        assertEquals("https://api.stepfun.com/v1/mcp/web_search/mcp",
                 configs.get("step_search").getUrl());
         assertEquals("Bearer test-step-key", configs.get("step_search").getHeaders().get("Authorization"));
     }

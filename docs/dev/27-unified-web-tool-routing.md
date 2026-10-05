@@ -16,7 +16,7 @@ ToolRegistry 的稳定门面统一经过 Policy/HITL/Audit。WebToolBackendRoute
 
 ### 2.2 数据/状态模型
 
-2026-10-05 真实 tools/list 验证：AnySearch search 参数 query/max_results，extract 参数只有 url，抓取成功同时返回 JSON 文本和 structuredContent={url,title,content}。Step web_search 参数 query/n（1–20），web_fetch 只有 url。Step真实抓取成功，structuredContent={code:0,page:{url,title,markdown,...}}；搜索HTTP400返回无有效Step Plan订阅，不能从schema发现写成完整搜索链路已通过。
+2026-10-05 真实 tools/list 验证：AnySearch search 参数 query/max_results，extract 参数只有 url，抓取成功同时返回 JSON 文本和 structuredContent={url,title,content}。Step web_search 参数 query/n（1–20），web_fetch 只有 url。Step普通 API MCP 搜索成功，返回 structuredContent.results[].url；抓取成功，返回 structuredContent.page.markdown。此前 Step Plan 地址的搜索 HTTP400 是该入口的订阅限制，已由末节的普通 API 入口修正取代。
 
 [官方 AnySearch MCP 文档](https://github.com/anysearch-ai/anysearch-mcp-server)说明抽取正文为 Markdown。搜索返回 Markdown摘要，现有 AnySearchResultParser 完整格式校验保持。Step 搜索只接受实际 MCP structuredContent 的明确结果字段产生 URL 元数据，普通正文不授信；实测格式未核对前不扩展 Markdown例外。
 
@@ -78,7 +78,7 @@ AnySearch Markdown严格包络解析例外沿用用户已批准契约，仍有�
 ## 5. 验收清单
 
 - [x] 目标、非目标、默认链路及降级范围经用户确认。
-- [x] 两个门面的两套MCP路径实现与针对性测试通过（Step真实搜索验收受订阅限制）。
+- [x] 两个门面的两套MCP路径实现与针对性测试通过（普通 API MCP 的真实搜索和抓取已验证，见末节）。
 - [x] 错误分类、启动失败、取消、审批、URL授权边界验证。
 - [x] 配置、文档和提示词一致。
 - [x] 回归、构建和diff结果真实记录；后续按用户明确授权分批本地提交。
@@ -95,12 +95,12 @@ mvn test -DskipTests=false "-Dtest=WebToolBackendRouterTest,CodeAgentWebToolsCon
 ```
 
 3. `mvn test -Pquick -DskipTests=false`：1301项，1失败、0错误、4跳过。唯一失败既有NetworkPolicyTest.allowsPublicHttps，本机example.com DNS解析失败；没有放宽生产策略或改既有测试隐藏失败。
-4. Python公开协议探测确认AnySearch extract结构化正文成功、Step web_fetch实际成功且含page.markdown；Step search HTTP400脱敏原因是没有有效Step Plan订阅。Step真实搜索与results结构尚不能验证，仅实现严格结构化适配并用本地夹具覆盖，形状不符停止授权。
+4. 当时使用 Step Plan 入口的 Python公开协议探测确认AnySearch extract结构化正文成功、Step web_fetch实际成功且含page.markdown；Step search HTTP400脱敏原因是没有有效Step Plan订阅。Step真实搜索与results结构尚不能验证，仅实现严格结构化适配并用本地夹具覆盖，形状不符停止授权。
 5. 当前Java17项目McpClient+ToolRegistry实测：AnySearch search成功，discovered_urls=2；example.com两套抓取门面均被本机DNS策略拒绝；固定公网IP https://1.1.1.1/cdn-cgi/trace 的AnySearch抓取门面成功（0新授权），Step同链接EXECUTION_ERROR。没有将原始Step抓取成功等同于完整门面链路验收，也不把服务单次成功推为长期稳定。
 6. 独立只读审查发现改参后缺失工具降级丢参、业务code整数截断、抓取来源错标；均有红测和修复，最终复核无阻塞问题。ToolOutput结构化数据防御拷贝保持，抓取实际参数复核网络策略。
 7. `mvn test -DskipTests=false`：1372项，1失败、0错误、10跳过。唯一失败同样为NetworkPolicyTest.allowsPublicHttps的example.com DNS解析，不宣称全绿。
 8. `mvn package -DskipTests`：BUILD SUCCESS。`git diff --check`通过；临时Java公开验证源码已删除，测试日志留在忽略的target中；没有提交密钥、raw session或构建产物。验证完成时refactor/anysearch-mcp-search保留未提交；后续用户授权的提交记录见下节。
-9. 交付仍有外部验收限制：当前Step密钥无有效搜索订阅，不能实测搜索结果及授权链；需有效订阅后验证实际structuredContent形状，若不是results[]则保持不授信并按真实契约更新适配，不允许从正文猜链接。Runtime/headless无MCP仍不可用；远端抓取重定向/DNS由服务负责。下列为上一阶段历史证据。
+9. 当时 Step Plan 入口的外部验收限制：该入口无有效搜索订阅，不能实测搜索结果及授权链；需有效订阅后验证实际structuredContent形状，若不是results[]则保持不授信并按真实契约更新适配，不允许从正文猜链接。Runtime/headless无MCP仍不可用；远端抓取重定向/DNS由服务负责。下列为上一阶段历史证据。
 
 ### 分批提交记录
 
@@ -110,7 +110,7 @@ mvn test -DskipTests=false "-Dtest=WebToolBackendRouterTest,CodeAgentWebToolsCon
 2. `22eccca`：AnySearch默认搜索/抓取、Step一次降级、错误生命周期、审批及URL授权、旧Provider删除与对应测试。
 3. 文档与配置示例同步：README、AGENTS、agents-reference、.env.example及本文件。
 
-提交前逐批检查暂存范围与 `git diff --cached --check`。`.env`被Git忽略，候选文件密钥扫描没有实际AnySearch密钥；未跟踪临时验证文件。代码自上述169项针对性验证及回归构建后未改动；DNS失败和Step订阅限制保持原记录，不将提交描述成全量测试通过。
+提交前逐批检查暂存范围与 `git diff --cached --check`。`.env`被Git忽略，候选文件密钥扫描没有实际AnySearch密钥；未跟踪临时验证文件。代码自上述169项针对性验证及回归构建后未改动；DNS失败和当时 Step Plan 入口的订阅限制保持历史记录（普通 API 入口修正见末节），不将提交描述成全量测试通过。
 
 ### 实施记录与验证证据
 
@@ -128,3 +128,21 @@ mvn test -DskipTests=false "-Dtest=WebToolBackendRouterTest,CodeAgentWebToolsCon
 - Markdown没有不可伪造字段边界，依赖AnySearch结果格式契约；异常格式不授信，完整格式伪造的剩余风险不能宣称完全消除。
 - 匿名访问受服务限额约束；认证失败不退回匿名，也不自动注册账户。
 - 全量/quick的DNS失败和clean目录删除失败未通过修改无关代码掩盖。
+
+### Step 普通 API Key MCP 入口修正
+
+目标：内置 `step_search` 改为 `https://api.stepfun.com/v1/mcp/web_search/mcp`，沿用 `Bearer STEP_API_KEY`，使普通 API Key 可以提供降级搜索和抓取。非目标：不改 LLM 的 Step Plan 配置，不改路由、授权或错误降级规则，不覆盖用户显式 MCP 配置。影响面为 McpConfigLoader、现有配置测试及配置说明。
+
+此前订阅限制是 `/step_plan/v1/mcp/web_search/mcp` 的实测结果，不适用于普通 API 入口。普通入口已用同一 Key 完成 initialize、tools/list、web_search 和 web_fetch：搜索返回 `structuredContent.results[].url`，抓取返回 `structuredContent.page.markdown`，现有适配器可以消费。官方 StepDeepResearch 的 [搜索实现](https://github.com/stepfun-ai/StepDeepResearch/blob/main/demo/tools/search.py) 使用普通 `/v1/search` 与 API Key；MCP 入口另经实际 JSON-RPC 调用验证，不能仅凭 HTTP 搜索接口推断。上述单次公开查询验证不代表长期可用性或账户计费承诺。
+
+设计评审：仅替换内置地址，已有项目/用户 MCP 覆盖仍优先；权限、并发及错误分类不变。现有主备流程图继续适用。先将配置测试的预期地址改为普通入口，观察旧实现失败，再修改常量。验收包括配置测试（地址、Bearer、显式覆盖）、MCP/Web 回归、quick 与 diff 检查；本机 DNS 限制单独记录。重启 CLI 后重新加载内置配置。
+
+本次验证：
+
+- `mvn test -DskipTests=false "-Dtest=McpConfigLoaderTest"`：先改预期地址，8 项中 1 项因旧默认地址失败，确认测试覆盖本次修正。
+- 上方完整 MCP/Web 针对性命令：169 项，0 失败、0 错误、0 跳过；覆盖新地址、Bearer、显式配置覆盖和既有路由/权限契约。
+- `mvn test -Pquick -DskipTests=false`：1301 项，1 失败、0 错误、4 跳过；唯一失败仍为 `NetworkPolicyTest.allowsPublicHttps` 的本机 `example.com` DNS 解析失败。
+- `git diff --check` 通过。本次仅修改默认地址、对应测试及联动文档，未修改密钥或私有配置，保留未提交状态。
+
+本地 `.env` 同步最小方案：以最新 `.env.example` 的章节、说明与可选项为模板，将已有启用配置逐项原样移回相应位置；不新增有效密钥，不覆盖已有值。弃用搜索项的注释示例移除；额外启用项保留。验收为全部启用配置原样一致、示例配置项覆盖、无重复启用项及 Git 忽略检查，无需运行代码回归。
+同步结果：11 个启用配置原样保留，最新示例全部配置项已覆盖且没有重复启用项；配置值未输出到日志。`git check-ignore .env` 确认忽略，`git diff --check` 通过。

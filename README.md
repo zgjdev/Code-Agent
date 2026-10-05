@@ -286,7 +286,7 @@ shared 模式不会自动取得任意标签页的操作权限；敏感页面上�
 
 显式 `backend=mcp` 可指定对应 AnySearch 或 Step 工具；`onUnavailable=fail` 禁止降级，旧 `default` 是 `step` 兼容别名。旧 provider/direct 或自定义 Web MCP 配置返回迁移错误。旧 SEARCH_PROVIDER/SERPAPI_KEY/SEARXNG_URL 不再参与搜索；GLM_API_KEY 仍用于 LLM。
 
-交互式 CLI 默认内置 `anysearch`；`ANYSEARCH_API_KEY` 可选，无密钥使用受限匿名访问。设置 `STEP_API_KEY` 后内置 `step_search`，完整搜索降级还需有效 Step Plan 订阅。用户/项目 `mcp.json` 的同名配置优先，包括 disabled。两家原始 Web 工具保留内部注册，不发给模型；没有 MCP Manager 的 Runtime/headless 入口返回不可用。不自动注册账户或更换密钥。
+交互式 CLI 默认内置 `anysearch`；`ANYSEARCH_API_KEY` 可选，无密钥使用受限匿名访问。设置 `STEP_API_KEY` 后内置 `step_search`，通过普通 API MCP 地址 `https://api.stepfun.com/v1/mcp/web_search/mcp` 提供搜索和抓取降级。用户/项目 `mcp.json` 的同名配置优先，包括 disabled。两家原始 Web 工具保留内部注册，不发给模型；没有 MCP Manager 的 Runtime/headless 入口返回不可用。不自动注册账户或更换密钥。
 
 AnySearch 搜索返回标题、链接和摘要，专用解析器仅在完整包络校验后发布结果 URL；Step 仅接受 MCP `structuredContent.results[].url`。摘要链接、异常格式和抓取正文不生成授权。AnySearch 的 Markdown 契约改变会停止授信；完整格式伪造仍是已知风险。抓取按 `max_chars` 本地截断正文。
 

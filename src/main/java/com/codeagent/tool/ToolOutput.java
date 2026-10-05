@@ -10,15 +10,16 @@ import java.util.Objects;
  * Typed result returned by a tool implementation.
  *
  * <p>{@code discoveredUrls} is deliberately separate from the human-readable
- * text. Only tools that own a structured URL source (currently the built-in
- * {@code web_search} provider) may populate it; callers must never recover URL
+ * text. Only the stable web_search facade and its validated AnySearch/Step result
+ * adapter may populate it; generic callers must never recover URL
  * authority by scraping {@link #text()}.</p>
  */
 public record ToolOutput(String text,
                          List<LlmClient.ContentPart> imageParts,
                          boolean successful,
                          List<String> discoveredUrls,
-                         FailureKind failureKind) {
+                         FailureKind failureKind,
+                         com.fasterxml.jackson.databind.JsonNode structuredContent) {
     public enum FailureKind {
         NONE,
         INVALID_CONFIGURATION,
@@ -30,7 +31,18 @@ public record ToolOutput(String text,
         EXECUTION_ERROR
     }
 
+    public ToolOutput(String text, List<LlmClient.ContentPart> imageParts, boolean successful,
+                      List<String> discoveredUrls, FailureKind failureKind) {
+        this(text, imageParts, successful, discoveredUrls, failureKind, null);
+    }
+
+    @Override
+    public com.fasterxml.jackson.databind.JsonNode structuredContent() {
+        return structuredContent == null ? null : structuredContent.deepCopy();
+    }
+
     public ToolOutput {
+        structuredContent = structuredContent == null ? null : structuredContent.deepCopy();
         text = text == null ? "" : text;
         imageParts = imageParts == null ? List.of() : List.copyOf(imageParts);
         discoveredUrls = discoveredUrls == null

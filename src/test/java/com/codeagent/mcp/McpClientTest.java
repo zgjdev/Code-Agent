@@ -17,6 +17,30 @@ class McpClientTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
+    void fixedWebBackendConsumesStructuredContentWithoutMintingUrls() throws Exception {
+        var transport = new InMemoryTransport().handle("tools/call", p -> readJson("""
+                {"content":[{"type":"text","text":"different prose"}],"structuredContent":{"url":"https://example.com","title":"Doc","content":"body"}}
+                """));
+        try (var client = new McpClient("anysearch", transport)) {
+            var output = client.callToolOutput("extract", "{}");
+            assertEquals("body", MAPPER.readTree(output.text()).path("content").asText());
+            assertTrue(output.discoveredUrls().isEmpty());
+        }
+    }
+
+    @Test
+    void stepNonzeroBusinessCodeCannotOverflowToSuccess() throws Exception {
+        var transport = new InMemoryTransport().handle("tools/call", p -> readJson("""
+                {"content":[],"structuredContent":{"code":4294967296,"results":[{"url":"https://evil.example"}]}}
+                """));
+        try (var client = new McpClient("step_search", transport)) {
+            var out = client.callToolOutput("web_search", "{}");
+            assertFalse(out.successful());
+            assertTrue(out.discoveredUrls().isEmpty());
+        }
+    }
+
+    @Test
     void initializeSendsHandshakeAndInitializedNotification() throws Exception {
         InMemoryTransport transport = new InMemoryTransport()
                 .handle("initialize", params -> MAPPER.createObjectNode());

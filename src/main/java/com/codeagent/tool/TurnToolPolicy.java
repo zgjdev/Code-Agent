@@ -477,7 +477,7 @@ public final class TurnToolPolicy {
         observeSearchResultUrls(result);
     }
 
-    /** Trust only URL metadata emitted from a structured search provider. */
+    /** Trust only URL metadata emitted by the validated search result adapter. */
     private void observeSearchResultUrls(ToolExecutionResult result) {
         result.discoveredUrls().stream()
                 .filter(TurnToolPolicy::isHttpUrl)

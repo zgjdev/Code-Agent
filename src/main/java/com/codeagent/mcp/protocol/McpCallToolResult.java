@@ -10,7 +10,12 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
-public record McpCallToolResult(List<McpContent> content, boolean isError) {
+public record McpCallToolResult(List<McpContent> content, boolean isError,
+                                com.fasterxml.jackson.databind.JsonNode structuredContent) {
+    public McpCallToolResult(List<McpContent> content, boolean isError) {
+        this(content, isError, null);
+    }
+
     public String formatForLlm() {
         return toToolOutput().text();
     }

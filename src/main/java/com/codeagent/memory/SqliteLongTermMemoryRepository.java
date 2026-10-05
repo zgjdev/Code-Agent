@@ -351,7 +351,6 @@ final class SqliteLongTermMemoryRepository {
         return List.copyOf(entries);
     }
 
-    @SuppressWarnings("unchecked")
     private MemoryEntry legacyMapToEntry(Map<String, Object> map) {
         try {
             String id = (String) map.get("id");

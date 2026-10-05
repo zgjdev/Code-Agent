@@ -56,20 +56,19 @@ SSE 流式下 readTimeout 是两次 read 间最大间隔，GLM-5.1 生成大段 
 DeepSeek 流式调用默认使用 HTTP/1.1，避免部分 HTTP/2 网关在长 SSE 响应中重置 stream，表现为 `stream was reset: INTERNAL_ERROR`。
 DeepSeek 当前不发送图片输入：`supportsImageInput()` 返回 false，含图片的 `ContentPart` 会在 OpenAI-compatible 请求序列化时替换成文本提示，避免不支持多模态的 DeepSeek API 收到 `image_url` block。
 
-### Web Search Provider Config
+### Web Search MCP Config
 
-模型侧只存在 `web_search` / `web_fetch`。`~/.codeagent/config.json` 的 `webTools` 决定内部实现：
+统一 `web_search` / `web_fetch` 默认 AnySearch MCP `search` / `extract`，与模型无关。query/top_k 映射 query/max_results，Step降级映射query/n，top_k为1–10。抓取两家均传url，成功后统一max_chars本地截断。auto默认允许AnySearch→Step；显式mcp对应两家工具，fail禁止降级，step/default允许一次降级；provider/direct/其他工具配置失败关闭。
 
-1. 默认 `backend=auto`：Step 3.7 Flash 使用 StepSearch MCP，其他模型使用 SearchProvider/direct；
-2. search 可固定 `provider`（zhipu/serpapi/searxng）或 `mcp`；fetch 可固定 `direct` 或 `mcp`；
-3. provider 未指定时，`SEARCH_PROVIDER` 优先，其次按 `GLM_API_KEY` → `SERPAPI_KEY` → `SEARXNG_URL` 自动判断；
-4. 显式 MCP 路由缺省 `onUnavailable=fail`；`default` 只对 `BACKEND_UNAVAILABLE` 回退。
+仅已知基础设施不可用触发降级：HTTP5xx、连接、超时、未就绪。HTTP4xx、RPC/isError或结构化业务码失败、拒绝和取消不可降级。Manager将启动失败类型传给Registry，缺失工具不得把认证失败误判为未就绪；disable/restart清理当前失败。HITL同时检查两家候选是否需要独占；主后端审批改参后失败要求重新发起，不用旧参数降级。
 
-各 provider：zhipu(`GLM_API_KEY` + 可选 `ZHIPU_SEARCH_ENGINE`) / serpapi(`SERPAPI_KEY`) / searxng(`SEARXNG_URL`)
+AnySearchResultParser验证完整Markdown结果包络；StepSearchResultParser仅读取实际MCP structuredContent.results[].url，不扫描摘要或JSON文本。抓取不产生新URL授权。AnySearch完整格式伪造无法从Markdown证明来源，保留服务契约风险；格式不匹配仍返回搜索正文，不授信。
+
+默认内置AnySearch，ANYSEARCH_API_KEY可选；Step配置及订阅见下节。同名显式server覆盖内置（含disabled）。两家原始Web工具不进入模型definitions。没有MCP Manager的headless/Runtime搜索抓取不可用。
 
 ### Web Fetch Security (NetworkPolicy)
 
-scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/site-local) / 响应体上限 5MB / 超时 30s / 限流 30次/60s
+请求URL仅http/https，拒绝localhost/loopback/link-local/site-local，30次/60s限流；审批修改url后再次网络校验。远程MCP发起真正的页面请求，本地不能约束其重定向/DNS。max_chars为本地输出截断；HTTP MCP transport沿用30s连接、60s读取/总请求超时，不宣称旧WebFetcher的5MB响应上限仍适用于远程MCP。
 
 ### MCP Config
 
@@ -78,7 +77,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 3. 按 server 名 merge，项目级覆盖用户级
 
 格式兼容 Claude Code：`command` + `args` = stdio，`url` + `headers` = Streamable HTTP。内置变量：`${PROJECT_DIR}`、`${HOME}`；其他 `${VAR}` 从系统环境变量、系统属性、项目 `.env`、用户 `~/.env` 读取。
-检测到 `STEP_API_KEY` 时自动内置 `step_search` 远程 MCP（显式同名配置优先）。默认 auto 路由用于 Step 3.7 Flash；底层 `mcp__step_search__web_search` / `web_fetch` 不进入模型 Tool definitions。
+检测到 `STEP_API_KEY` 时自动内置 `step_search` 远程 MCP（显式同名配置优先）。作为所有模型搜索和抓取的降级后端，使用 `https://api.stepfun.com/v1/mcp/web_search/mcp` 与 `Bearer STEP_API_KEY` 接入普通 API 搜索和抓取；底层 `mcp__step_search__web_search` / `web_fetch` 不进入模型 Tool definitions。
 
 ---
 
@@ -156,12 +155,12 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ### Web Capabilities
 
 - `web_search` / `web_fetch` 是模型可见的稳定门面；原始 MCP 同名工具和显式绑定的 MCP 后端仍可内部执行、诊断和审计，但不发送给模型。
-- 默认 `auto` 保留模型感知路由：provider=`step` 且 model 以 `step-3.7-flash` 开头时使用 StepSearch MCP，否则搜索走 SearchProvider、抓取走 NetworkPolicy → WebFetcher → HtmlExtractor。显式路由覆盖 auto。
+- 搜索/抓取均默认 AnySearch MCP，基础设施不可用时各自最多一次 Step MCP 降级；无模型感知或 direct 路由。
 - Prompt 不包含 Freshness Policy，也不对“最新/当前/今天”等关键词做自动 `web_search` 预检。模型只能在顶层用户目标明确时主动选择联网工具；明确“不要联网”始终优先。
 - 顶层输入只是裸标题、主题或摘录，且无动作、问题或目标时，当前轮只做澄清，不调用任何工具。模型不得根据标题、记忆或自己的 reasoning 猜测 URL。
-- 用户明确要求查找但没有 URL 时，先 `web_search`；`web_fetch` 或 Chrome / MCP 导航 URL 只能来自用户实际提交的顶层原文（不能是 `@path` / MCP resource 展开正文），或同一执行分支由搜索 provider 返回的结构化 `discoveredUrls`。搜索正文、snippet、query 回显、错误提示、`web_fetch` 正文、浏览器导航/快照/网络列表、普通本地工具结果、assistant reasoning、回复文本和 tool arguments 都不能建立 URL provenance；当前 StepSearch MCP 的非结构化文本不会生成凭据。
-- `TurnToolPolicy` 是运行时确定性边界：ReAct 与 Plan 的每个执行分支都必须单独传入用户提交原文与展开后的执行内容，不能让 planner / task 派生的“搜索”子任务自行获得联网授权。Plan 审阅补充会重建策略；Plan 并行任务使用 fork 后的独立 URL 集合，避免跨分支扩权。只有 DAG 中声明的后继依赖会继承前置分支不可伪造的 `TrustedUrlContext`；任务结果文本不作为授权来源。grounded URL 先只曝光导航，成功导航只建立当前页读取上下文，读取结果不产生新 URL 授权；交互工具必须有顶层原文明确授权。shared Chrome 的真实模式与 CodeAgent-owned 当前页从 `BrowserSession` 跨轮注入策略；非 owned 标签页只在用户明确要求时开放只读，导航/写入/关闭会硬拒绝，导航结果的全量 `# Pages` 会在回灌模型前裁成单页回执。策略在 StepSearch、内置 SearchProvider / WebFetcher 和 Chrome / MCP 路由之前执行，拒绝结果不得用 fallback 绕过。
-- StepSearch auto 路由：稳定门面先通过一次 `TurnToolPolicy`，内部完整 MCP 名称继续经过 HITL、Registry、BrowserGuard 和 AuditLog，但不重复作为模型调用做策略授权。工具未注册或 transport 不可用时归类为 `BACKEND_UNAVAILABLE` 并回退默认实现；JSON-RPC 业务错误仍为 `EXECUTION_ERROR`。显式 MCP 路由只有配置 `onUnavailable=default` 才做同类回退。通用 MCP 搜索结果不传播 `discoveredUrls`。
+- 用户明确要求查找但没有 URL 时，先 `web_search`；`web_fetch` 或 Chrome / MCP 导航 URL 只能来自用户实际提交的顶层原文（不能是 `@path` / MCP resource 展开正文），或同一执行分支由搜索适配器返回的结构化 `discoveredUrls`。搜索正文、snippet、query 回显、错误提示、`web_fetch` 正文、浏览器导航/快照/网络列表、普通本地工具结果、assistant reasoning、回复文本和 tool arguments 都不能建立 URL provenance；仅 AnySearch 完整包络的URL行与Step实际structuredContent结果URL经专用适配可生成凭据，其他MCP文本不授信。
+- `TurnToolPolicy` 是运行时确定性边界：ReAct 与 Plan 的每个执行分支都必须单独传入用户提交原文与展开后的执行内容，不能让 planner / task 派生的“搜索”子任务自行获得联网授权。Plan 审阅补充会重建策略；Plan 并行任务使用 fork 后的独立 URL 集合，避免跨分支扩权。只有 DAG 中声明的后继依赖会继承前置分支不可伪造的 `TrustedUrlContext`；任务结果文本不作为授权来源。grounded URL 先只曝光导航，成功导航只建立当前页读取上下文，读取结果不产生新 URL 授权；交互工具必须有顶层原文明确授权。shared Chrome 的真实模式与 CodeAgent-owned 当前页从 `BrowserSession` 跨轮注入策略；非 owned 标签页只在用户明确要求时开放只读，导航/写入/关闭会硬拒绝，导航结果的全量 `# Pages` 会在回灌模型前裁成单页回执。策略在 AnySearch/Step MCP 和 Chrome / MCP 路由之前执行，拒绝结果不得用 fallback 绕过。
+- AnySearch 搜索先经过稳定门面的 TurnToolPolicy，内部 MCP 仍经 HITL、Registry 和 AuditLog；搜索和抓取仅在配置允许且BACKEND_UNAVAILABLE时降级Step；拒绝、取消和业务错误不可回退。
 - 本地“当前项目/当前 README/当前文件/当前代码”属于代码库任务，应选择 `glob_files` / `grep_code` / `read_file`，而不是联网工具。
 - JS 渲染 fallback 到 Chrome DevTools MCP
 
@@ -385,4 +384,4 @@ EMBEDDING_MODE=local
 
 不覆盖：真实 LLM 联调、真实 Embedding API、真实 MCP server 联调、终端完整手工体验。
 
-完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / SessionMemoryCompactorTest / AutoCompactionManagerTest / ConversationHistoryCompactorTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryEmbeddingCacheTest / MemoryEmbeddingGoldenTest / MemoryWriteResolverTest / MemoryRelationClassifierTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentWebSearchDecisionTest / AgentRoleTest / AgentMessageTest / PipelineOptionsTest / StepReviewDecisionTest / StepBriefingTest / ReviewResponseParserTest / SubAgentStepReviewerTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / TurnToolPolicyTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest / BetterHarnessOptionsTest / BetterHarnessEvidenceCollectorTest / BetterHarnessRunnerTest
+完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / SessionMemoryCompactorTest / AutoCompactionManagerTest / ConversationHistoryCompactorTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryEmbeddingCacheTest / MemoryEmbeddingGoldenTest / MemoryWriteResolverTest / MemoryRelationClassifierTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentWebSearchDecisionTest / AgentRoleTest / AgentMessageTest / PipelineOptionsTest / StepReviewDecisionTest / StepBriefingTest / ReviewResponseParserTest / SubAgentStepReviewerTest / EmbeddingClientTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / AnySearchResultParserTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / TurnToolPolicyTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest / BetterHarnessOptionsTest / BetterHarnessEvidenceCollectorTest / BetterHarnessRunnerTest

@@ -9,8 +9,10 @@ import java.util.Set;
 /** Resolves stable Web tools to configured backends and controls model visibility. */
 public final class WebToolBackendRouter {
     private static final Set<String> RESERVED_MCP_TOOL_NAMES = Set.of("web_search", "web_fetch");
-    private static final String STEP_SEARCH_TOOL = "mcp__step_search__web_search";
-    private static final String STEP_FETCH_TOOL = "mcp__step_search__web_fetch";
+    public static final String ANYSEARCH_TOOL = "mcp__anysearch__search";
+    public static final String ANYSEARCH_FETCH_TOOL = "mcp__anysearch__extract";
+    public static final String STEP_SEARCH_TOOL = "mcp__step_search__web_search";
+    public static final String STEP_FETCH_TOOL = "mcp__step_search__web_fetch";
 
     private final Route searchRoute;
     private final Route fetchRoute;
@@ -24,18 +26,34 @@ public final class WebToolBackendRouter {
     }
 
     public Route searchRoute(String provider, String model) {
-        return resolveAuto(searchRoute, provider, model);
+        return resolve(searchRoute, ANYSEARCH_TOOL);
     }
 
     public Route fetchRoute(String provider, String model) {
-        return resolveAuto(fetchRoute, provider, model);
+        return resolve(fetchRoute, ANYSEARCH_FETCH_TOOL);
+    }
+
+    private static Route resolve(Route configured, String defaultTool) {
+        return new Route(configured.logicalTool(), "mcp", null,
+                configured.usesAuto() ? defaultTool : configured.tool(),
+                configured.onUnavailable(), configured.validationError());
+    }
+
+    public String fallbackTool(Route route) {
+        return "web_search".equals(route.logicalTool()) ? STEP_SEARCH_TOOL : STEP_FETCH_TOOL;
+    }
+
+    public java.util.List<String> executionTools(Route route) {
+        if (!route.valid()) return java.util.List.of();
+        return route.fallbackToStep() && !fallbackTool(route).equals(route.tool())
+                ? java.util.List.of(route.tool(), fallbackTool(route)) : java.util.List.of(route.tool());
     }
 
     public boolean isModelVisible(String registeredName, McpToolDescriptor descriptor) {
         if (descriptor == null) {
             return true;
         }
-        if (RESERVED_MCP_TOOL_NAMES.contains(descriptor.name())) {
+        if ("anysearch".equals(descriptor.serverName()) || RESERVED_MCP_TOOL_NAMES.contains(descriptor.name())) {
             return false;
         }
         return !isConfiguredMcpBackend(registeredName, searchRoute)
@@ -46,29 +64,11 @@ public final class WebToolBackendRouter {
         return route.usesMcp() && registeredName.equals(route.tool());
     }
 
-    private Route resolveAuto(Route configured, String provider, String model) {
-        if (!configured.usesAuto()) {
-            return configured;
-        }
-        if (isStepSearchModel(provider, model)) {
-            return new Route(configured.logicalTool(), "mcp", null,
-                    "web_search".equals(configured.logicalTool()) ? STEP_SEARCH_TOOL : STEP_FETCH_TOOL,
-                    "default", null);
-        }
-        return new Route(configured.logicalTool(),
-                "web_search".equals(configured.logicalTool()) ? "provider" : "direct",
-                configured.provider(), null, "fail", null);
-    }
-
-    private static boolean isStepSearchModel(String provider, String model) {
-        return provider != null && "step".equalsIgnoreCase(provider.trim())
-                && model != null && model.trim().toLowerCase(java.util.Locale.ROOT)
-                .startsWith("step-3.7-flash");
-    }
-
     public boolean mayFallback(Route route, ToolOutput output) {
         return route != null
-                && route.fallbackToDefault()
+                && route.valid()
+                && !fallbackTool(route).equals(route.tool())
+                && route.fallbackToStep()
                 && output != null
                 && output.failureKind() == ToolOutput.FailureKind.BACKEND_UNAVAILABLE;
     }
@@ -95,8 +95,8 @@ public final class WebToolBackendRouter {
             return "auto".equals(backend);
         }
 
-        public boolean fallbackToDefault() {
-            return "default".equals(onUnavailable);
+        public boolean fallbackToStep() {
+            return "step".equals(onUnavailable) || "default".equals(onUnavailable);
         }
 
         public boolean valid() {

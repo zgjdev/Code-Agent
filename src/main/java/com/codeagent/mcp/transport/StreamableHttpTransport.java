@@ -58,7 +58,7 @@ public class StreamableHttpTransport implements McpTransport {
                 sessionId = newSession;
             }
             if (!response.isSuccessful()) {
-                throw new IOException("HTTP " + response.code() + " " + response.message());
+                throw new McpHttpException(response.code());
             }
             ResponseBody responseBody = response.body();
             if (responseBody == null) {

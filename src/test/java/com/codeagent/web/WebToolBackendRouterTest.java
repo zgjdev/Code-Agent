@@ -17,11 +17,11 @@ class WebToolBackendRouterTest {
         WebToolBackendRouter router = new WebToolBackendRouter(new CodeAgentConfig.WebToolsConfig());
 
         assertEquals("mcp", router.searchRoute("step", "step-3.7-flash").backend());
-        assertEquals("mcp__step_search__web_search",
+        assertEquals("mcp__anysearch__search",
                 router.searchRoute("step", "step-3.7-flash").tool());
         assertEquals("mcp", router.fetchRoute("step", "step-3.7-flash-202609").backend());
-        assertEquals("provider", router.searchRoute("glm", "glm-4.5").backend());
-        assertEquals("direct", router.fetchRoute("glm", "glm-4.5").backend());
+        assertEquals("mcp", router.searchRoute("glm", "glm-4.5").backend());
+        assertEquals("mcp__anysearch__extract", router.fetchRoute("glm", "glm-4.5").tool());
     }
 
     @Test
@@ -33,8 +33,7 @@ class WebToolBackendRouterTest {
         config.setSearch(search);
         WebToolBackendRouter router = new WebToolBackendRouter(config);
 
-        assertEquals("provider", router.searchRoute("step", "step-3.7-flash").backend());
-        assertEquals("searxng", router.searchRoute("step", "step-3.7-flash").provider());
+        assertFalse(router.searchRoute("step", "step-3.7-flash").valid());
     }
 
     @Test
@@ -46,7 +45,7 @@ class WebToolBackendRouterTest {
         config.setSearch(search);
         WebToolBackendRouter router = new WebToolBackendRouter(config);
 
-        assertFalse(router.isModelVisible("mcp__step_search__web_search",
+        assertFalse(router.isModelVisible("mcp__anysearch__search",
                 descriptor("step_search", "web_search")));
         assertFalse(router.isModelVisible("mcp__custom__lookup",
                 descriptor("custom", "lookup")));
@@ -61,7 +60,7 @@ class WebToolBackendRouterTest {
         CodeAgentConfig.WebToolsConfig config = new CodeAgentConfig.WebToolsConfig();
         CodeAgentConfig.WebToolRouteConfig search = new CodeAgentConfig.WebToolRouteConfig();
         search.setBackend("mcp");
-        search.setTool("mcp__step_search__web_search");
+        search.setTool("mcp__anysearch__search");
         search.setOnUnavailable("default");
         config.setSearch(search);
         WebToolBackendRouter router = new WebToolBackendRouter(config);

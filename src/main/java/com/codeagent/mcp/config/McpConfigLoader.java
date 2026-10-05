@@ -18,7 +18,7 @@ public class McpConfigLoader {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Pattern VAR_PATTERN = Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*|PROJECT_DIR|HOME)}");
     private static final String STEP_SEARCH_SERVER = "step_search";
-    private static final String STEP_SEARCH_URL = "https://api.stepfun.com/step_plan/v1/mcp/web_search/mcp";
+    private static final String STEP_SEARCH_URL = "https://api.stepfun.com/v1/mcp/web_search/mcp";
 
     private final Path userConfig;
     private final Path projectConfig;
@@ -50,6 +50,7 @@ public class McpConfigLoader {
         if (Files.exists(projectConfig)) {
             merged.putAll(read(projectConfig));
         }
+        addBuiltInAnySearch(merged);
         addBuiltInStepSearchIfAvailable(merged);
         return merged;
     }
@@ -66,6 +67,18 @@ public class McpConfigLoader {
     private Map<String, McpServerConfig> read(Path file) throws IOException {
         McpConfigFile configFile = MAPPER.readValue(file.toFile(), McpConfigFile.class);
         return configFile.getMcpServers();
+    }
+
+    private void addBuiltInAnySearch(Map<String, McpServerConfig> merged) {
+        if (merged.containsKey("anysearch")) return;
+        McpServerConfig config = new McpServerConfig();
+        config.setUrl("https://api.anysearch.com/mcp");
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put("X-Anysearch-Client", "mcp/1.0.0");
+        String key = readConfiguredValue("ANYSEARCH_API_KEY");
+        if (key != null && !key.isBlank()) headers.put("Authorization", "Bearer " + key.trim());
+        config.setHeaders(headers);
+        merged.put("anysearch", config);
     }
 
     private void addBuiltInStepSearchIfAvailable(Map<String, McpServerConfig> merged) {

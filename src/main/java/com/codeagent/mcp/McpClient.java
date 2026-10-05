@@ -111,6 +111,15 @@ public class McpClient implements AutoCloseable {
         if (callResult.isError()) {
             return ToolOutput.failure("MCP 工具返回错误: " + output.text(), output.imageParts());
         }
+        boolean fixedWebTool = ("anysearch".equals(serverName) && "extract".equals(toolName))
+                || ("step_search".equals(serverName) && ("web_search".equals(toolName) || "web_fetch".equals(toolName)));
+        if (fixedWebTool && callResult.structuredContent() != null && callResult.structuredContent().isObject()) {
+            JsonNode structured = callResult.structuredContent();
+            if ("step_search".equals(serverName) && structured.has("code")
+                    && (!structured.path("code").isIntegralNumber() || structured.path("code").bigIntegerValue().signum() != 0))
+                return ToolOutput.failure("Step MCP 返回业务错误");
+            return new ToolOutput(structured.toString(), output.imageParts(), true, List.of(), ToolOutput.FailureKind.NONE, structured);
+        }
         return output;
     }
 

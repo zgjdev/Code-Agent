@@ -261,14 +261,14 @@ class HitlToolRegistryTest {
         StubHandler stub = new StubHandler(request -> ApprovalResult.approve());
         HitlToolRegistry registry = new HitlToolRegistry(stub);
         registry.setProjectPath(tempDir.toString());
-        registerMcpTool(registry, "step_search", "web_search", arguments -> "search-result");
+        registerMcpTool(registry, "anysearch", "search", arguments -> "search-result");
         if (automatic) {
             registry.setCurrentModel("step", "step-3.7-flash");
         } else {
             CodeAgentConfig.WebToolsConfig config = new CodeAgentConfig.WebToolsConfig();
             CodeAgentConfig.WebToolRouteConfig route = new CodeAgentConfig.WebToolRouteConfig();
             route.setBackend("mcp");
-            route.setTool("mcp__step_search__web_search");
+            route.setTool("mcp__anysearch__search");
             config.setSearch(route);
             registry.setWebToolsConfig(config);
         }
@@ -281,6 +281,61 @@ class HitlToolRegistryTest {
         assertTrue(results.get(0).result().contains("search-result"));
         assertTrue(results.get(1).successful());
         assertEquals(1, stub.requestCount());
+        assertEquals("mcp__anysearch__search", stub.received.get(0).toolName());
+    }
+
+    @Test
+    void approvedPublicFetchUrlIsDisplayedAsItsActualSource() {
+        var stub = new StubHandler(req -> ApprovalResult.modify("{\"url\":\"https://203.0.113.11/changed\"}"));
+        var registry = new HitlToolRegistry(stub);
+        registerMcpTool(registry, "anysearch", "extract", args -> {
+            assertTrue(args.contains("203.0.113.11"));
+            return "{\"url\":\"https://203.0.113.11/changed\",\"title\":\"Doc\",\"content\":\"changed page\"}";
+        });
+        var out = registry.executeToolOutput("web_fetch", "{\"url\":\"https://203.0.113.10/original\"}");
+        assertTrue(out.successful(), out.text());
+        assertTrue(out.text().contains("203.0.113.11/changed"));
+        assertFalse(out.text().contains("抓取: https://203.0.113.10/original"));
+        assertTrue(out.discoveredUrls().isEmpty());
+    }
+
+    @Test
+    void approvalEditedFetchStillRejectsPrivateNetwork() {
+        var stub = new StubHandler(req -> ApprovalResult.modify("{\"url\":\"http://127.0.0.1/private\"}"));
+        var registry = new HitlToolRegistry(stub);
+        AtomicInteger calls = new AtomicInteger();
+        registerMcpTool(registry, "anysearch", "extract", args -> { calls.incrementAndGet(); return "{}"; });
+        var out = registry.executeToolOutput("web_fetch", "{\"url\":\"https://203.0.113.10/page\"}");
+        assertEquals(ToolOutput.FailureKind.POLICY_DENIED, out.failureKind());
+        assertEquals(0, calls.get());
+    }
+
+    @Test
+    void modifiedApprovalForMissingPrimaryCannotFallbackWithOldParameters() {
+        var stub = new StubHandler(req -> ApprovalResult.modify("{\"query\":\"approved replacement\"}"));
+        var registry = new HitlToolRegistry(stub);
+        AtomicInteger stepCalls = new AtomicInteger();
+        registerMcpTool(registry, "step_search", "web_search", args -> { stepCalls.incrementAndGet(); return "unexpected"; });
+        var out = registry.executeToolOutput("web_search", "{\"query\":\"old query\"}");
+        assertFalse(out.successful());
+        assertEquals(0, stepCalls.get());
+    }
+
+    @Test
+    void fallbackApprovalIsIsolatedEvenWhenPrimaryIsPreapproved(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("fixture.txt"), "fixture");
+        var stub = new StubHandler(req -> ApprovalResult.approve());
+        stub.approveServer("anysearch");
+        var registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+        registry.registerMcpToolOutput(new McpToolDescriptor("anysearch", "search", "mcp__anysearch__search", "search",
+                JsonNodeFactory.instance.objectNode()), args -> ToolOutput.failure(ToolOutput.FailureKind.BACKEND_UNAVAILABLE, "offline"));
+        registerMcpTool(registry, "step_search", "web_search", args -> "step-result");
+        var out = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("search", "web_search", "{\"query\":\"docs\"}"),
+                new ToolRegistry.ToolInvocation("read", "read_file", "{\"path\":\"fixture.txt\"}")));
+        assertTrue(out.get(0).successful(), out.get(0).result());
+        assertEquals(1, stub.requestCount());
         assertEquals("mcp__step_search__web_search", stub.received.get(0).toolName());
     }
 
@@ -290,11 +345,11 @@ class HitlToolRegistryTest {
         StubHandler stub = new StubHandler(request -> ApprovalResult.approve());
         HitlToolRegistry registry = new HitlToolRegistry(stub);
         registry.setProjectPath(tempDir.toString());
-        registerMcpTool(registry, "fetch", "page", arguments -> "fetch-result");
+        registerMcpTool(registry, "anysearch", "extract", arguments -> "{\"url\":\"https://8.8.8.8/fixture\",\"title\":\"Doc\",\"content\":\"fetch-result\"}");
         CodeAgentConfig.WebToolsConfig config = new CodeAgentConfig.WebToolsConfig();
         CodeAgentConfig.WebToolRouteConfig route = new CodeAgentConfig.WebToolRouteConfig();
         route.setBackend("mcp");
-        route.setTool("mcp__fetch__page");
+        route.setTool("mcp__anysearch__extract");
         config.setFetch(route);
         registry.setWebToolsConfig(config);
 
@@ -305,7 +360,7 @@ class HitlToolRegistryTest {
         assertTrue(results.get(0).successful(), results.get(0).result());
         assertTrue(results.get(0).result().contains("fetch-result"));
         assertEquals(1, stub.requestCount());
-        assertEquals("mcp__fetch__page", stub.received.get(0).toolName());
+        assertEquals("mcp__anysearch__extract", stub.received.get(0).toolName());
     }
 
     @Test

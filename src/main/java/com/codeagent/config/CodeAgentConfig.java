@@ -155,14 +155,6 @@ public class CodeAgentConfig {
             return new WebToolRouteConfig("auto");
         }
 
-        public static WebToolRouteConfig providerDefault() {
-            return new WebToolRouteConfig("provider");
-        }
-
-        public static WebToolRouteConfig directDefault() {
-            return new WebToolRouteConfig("direct");
-        }
-
         public String getBackend() { return normalize(backend); }
         public void setBackend(String backend) { this.backend = backend; }
         public String getProvider() { return normalize(provider); }
@@ -171,43 +163,34 @@ public class CodeAgentConfig {
         public void setTool(String tool) { this.tool = tool; }
         public String getOnUnavailable() {
             String normalized = normalize(onUnavailable);
-            return normalized == null ? "fail" : normalized;
+            return normalized == null ? ("auto".equals(getBackend()) ? "step" : "fail") : normalized;
         }
         public void setOnUnavailable(String onUnavailable) { this.onUnavailable = onUnavailable; }
 
         public String validationError(String logicalTool) {
             String logical = logicalTool == null ? "" : logicalTool.trim().toLowerCase();
             String selectedBackend = getBackend();
+            String anyTool;
+            String stepTool;
             if ("web_search".equals(logical)) {
-                if (!"auto".equals(selectedBackend)
-                        && !"provider".equals(selectedBackend) && !"mcp".equals(selectedBackend)) {
-                    return "web_search backend 必须是 auto、provider 或 mcp";
-                }
-                String selectedProvider = getProvider();
-                if ("provider".equals(selectedBackend) && selectedProvider != null
-                        && !java.util.Set.of("zhipu", "serpapi", "searxng").contains(selectedProvider)) {
-                    return "web_search provider 必须是 zhipu、serpapi 或 searxng";
-                }
+                anyTool = "mcp__anysearch__search";
+                stepTool = "mcp__step_search__web_search";
             } else if ("web_fetch".equals(logical)) {
-                if (!"auto".equals(selectedBackend)
-                        && !"direct".equals(selectedBackend) && !"mcp".equals(selectedBackend)) {
-                    return "web_fetch backend 必须是 auto、direct 或 mcp";
-                }
+                anyTool = "mcp__anysearch__extract";
+                stepTool = "mcp__step_search__web_fetch";
             } else {
                 return "未知 Web 逻辑工具: " + logicalTool;
             }
-            if ("mcp".equals(selectedBackend)) {
-                String selectedTool = getTool();
-                if (!isNamespacedMcpTool(selectedTool)) {
-                    return logical + " 的 MCP tool 必须使用 mcp__{server}__{tool} 完整名称";
-                }
-                if (logical.equals(selectedTool)) {
-                    return logical + " 不能递归绑定自身";
-                }
+            if ((!"auto".equals(selectedBackend) && !"mcp".equals(selectedBackend))
+                    || getProvider() != null
+                    || (getTool() != null && !anyTool.equals(getTool()) && !stepTool.equals(getTool()))
+                    || ("mcp".equals(selectedBackend) && getTool() == null)
+                    || ("auto".equals(selectedBackend) && getTool() != null)) {
+                return logical + " 已统一为 AnySearch/Step MCP：使用 auto 或 mcp 工具 " + anyTool + " / " + stepTool;
             }
             String unavailable = getOnUnavailable();
-            if (!"fail".equals(unavailable) && !"default".equals(unavailable)) {
-                return logical + " onUnavailable 必须是 fail 或 default";
+            if (!"fail".equals(unavailable) && !"step".equals(unavailable) && !"default".equals(unavailable)) {
+                return logical + " onUnavailable 必须是 fail 或 step（default 为兼容别名）";
             }
             return null;
         }
@@ -221,13 +204,7 @@ public class CodeAgentConfig {
             return value == null || value.isBlank() ? null : value.trim();
         }
 
-        private static boolean isNamespacedMcpTool(String value) {
-            if (value == null || !value.startsWith("mcp__")) return false;
-            String remainder = value.substring("mcp__".length());
-            int delimiter = remainder.indexOf("__");
-            return delimiter > 0 && delimiter < remainder.length() - 2
-                    && value.chars().noneMatch(Character::isWhitespace);
-        }
+
     }
 
     public String getDefaultProvider() { return defaultProvider; }

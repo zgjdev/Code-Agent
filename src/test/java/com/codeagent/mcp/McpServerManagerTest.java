@@ -52,6 +52,53 @@ class McpServerManagerTest {
     }
 
     @Test
+    void anySearchInitializationErrorCannotExposeCredentials() throws Exception {
+        webServer.enqueue(new MockResponse().setHeader("Content-Type", "application/json")
+                .setBody("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"api_key=secret-value\"}}"));
+        loadServersFromMap(Map.of("anysearch", httpConfig(webServer)));
+        manager.startAll();
+        McpServer server = manager.servers().iterator().next();
+        assertEquals(McpServerStatus.ERROR, server.status());
+        assertFalse(server.errorMessage().contains("secret-value"));
+        assertTrue(server.errorMessage().contains("AnySearch"));
+    }
+
+    @Test
+    void httpAuthenticationAndQuotaErrorsNeverCountAsUnavailable() throws Exception {
+        enqueueInitialize();
+        enqueueToolsList(toolJson("echo", "Echo"));
+        loadServersFromMap(Map.of("demo", httpConfig(webServer)));
+        manager.startAll();
+        for (int code : new int[]{400, 401, 402, 403, 429}) {
+            webServer.enqueue(new MockResponse().setResponseCode(code));
+            assertEquals(ToolOutput.FailureKind.EXECUTION_ERROR,
+                    registry.executeToolOutput("mcp__demo__echo", "{}").failureKind(), "HTTP " + code);
+        }
+    }
+
+    @Test
+    void startupAuthenticationFailureCannotTriggerStepFallback() throws Exception {
+        webServer.enqueue(new MockResponse().setResponseCode(401));
+        loadServersFromMap(Map.of("anysearch", httpConfig(webServer)));
+        manager.startAll();
+        assertEquals(ToolOutput.FailureKind.EXECUTION_ERROR,
+                registry.executeToolOutput("web_search", "{\"query\":\"docs\"}").failureKind());
+    }
+
+    @Test
+    void toolsDiscoveryFailureClosesInitializedSession() throws Exception {
+        enqueueInitialize();
+        webServer.enqueue(new MockResponse().setResponseCode(401));
+        webServer.enqueue(new MockResponse().setResponseCode(204));
+        loadServersFromMap(Map.of("anysearch", httpConfig(webServer)));
+        manager.startAll();
+        for (int i = 0; i < 3; i++) assertNotNull(webServer.takeRequest(1, TimeUnit.SECONDS));
+        var close = webServer.takeRequest(1, TimeUnit.SECONDS);
+        assertNotNull(close, "failed initialization must close its transport session");
+        assertEquals("DELETE", close.getMethod());
+    }
+
+    @Test
     void startAllStartsHttpServerAndRegistersTools() throws Exception {
         enqueueInitialize();
         enqueueToolsList(toolJson("echo", "Echo back text"));

@@ -17,13 +17,13 @@ class MainConfigBootstrapTest {
         CodeAgentConfig config = new CodeAgentConfig();
         CodeAgentConfig.WebToolRouteConfig search = new CodeAgentConfig.WebToolRouteConfig();
         search.setBackend("mcp");
-        search.setTool("mcp__step_search__web_search");
+        search.setTool("mcp__anysearch__search");
         config.getWebTools().setSearch(search);
         ToolRegistry registry = new ToolRegistry();
 
         Main.configureToolRegistry(registry, config);
 
-        assertEquals("mcp__step_search__web_search",
+        assertEquals("mcp__anysearch__search",
                 registry.getWebToolsConfig().getSearch().getTool());
     }
 

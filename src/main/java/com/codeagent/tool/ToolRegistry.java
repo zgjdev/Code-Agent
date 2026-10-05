@@ -37,13 +37,8 @@ import com.codeagent.snapshot.SnapshotService;
 import com.codeagent.skill.Skill;
 import com.codeagent.skill.SkillContextBuffer;
 import com.codeagent.skill.SkillRegistry;
-import com.codeagent.web.FetchResult;
-import com.codeagent.web.HtmlExtractor;
 import com.codeagent.web.NetworkPolicy;
-import com.codeagent.web.SearchProvider;
-import com.codeagent.web.SearchProviderFactory;
-import com.codeagent.web.SearchResult;
-import com.codeagent.web.WebFetcher;
+import com.codeagent.web.AnySearchResultParser;
 import com.codeagent.web.WebToolBackendRouter;
 
 import java.io.File;
@@ -95,9 +90,6 @@ public class ToolRegistry {
     private String projectPath = System.getProperty("user.dir");
     private PathGuard pathGuard = new PathGuard(projectPath);
     private final AuditLog auditLog = new AuditLog();
-    private SearchProvider searchProvider;
-    private WebFetcher webFetcher;
-    private HtmlExtractor htmlExtractor;
     private NetworkPolicy networkPolicy;
     private ContextProfile contextProfile = ContextProfile.from(null);
     private BrowserGuard browserGuard;
@@ -218,7 +210,6 @@ public class ToolRegistry {
     public synchronized void setWebToolsConfig(CodeAgentConfig.WebToolsConfig config) {
         this.webToolsConfig = config == null ? new CodeAgentConfig.WebToolsConfig() : config;
         this.webToolBackendRouter = new WebToolBackendRouter(this.webToolsConfig);
-        this.searchProvider = null;
     }
 
     public CodeAgentConfig.WebToolsConfig getWebToolsConfig() {
@@ -698,7 +689,7 @@ public class ToolRegistry {
         tools.put("web_search", new Tool(
                 "web_search",
                 "搜索互联网，获取实时信息（最新版本、官方文档、技术资讯等）。" +
-                        "具体搜索后端由 CodeAgent 根据 webTools 配置和当前模型选择。",
+                        "搜索由 AnySearch MCP 执行，摘要不足时按需使用 web_fetch。",
                 createParameters(
                         new Param("query", "string", "搜索关键词，例如'Java 21 新特性'、'Spring Boot 3.3 release notes'", true),
                         new Param("top_k", "integer", "返回结果数量（默认5）", false)
@@ -897,32 +888,6 @@ public class ToolRegistry {
         }
     }
 
-    private synchronized SearchProvider searchProvider() {
-        if (searchProvider == null) {
-            searchProvider = SearchProviderFactory.create(
-                    webToolBackendRouter.searchRoute(currentProvider, currentModel).provider());
-        }
-        return searchProvider;
-    }
-
-    void setSearchProvider(SearchProvider searchProvider) {
-        this.searchProvider = Objects.requireNonNull(searchProvider, "searchProvider");
-    }
-
-    private synchronized WebFetcher webFetcher() {
-        if (webFetcher == null) {
-            webFetcher = new WebFetcher();
-        }
-        return webFetcher;
-    }
-
-    private synchronized HtmlExtractor htmlExtractor() {
-        if (htmlExtractor == null) {
-            htmlExtractor = new HtmlExtractor();
-        }
-        return htmlExtractor;
-    }
-
     private synchronized NetworkPolicy networkPolicy() {
         if (networkPolicy == null) {
             networkPolicy = new NetworkPolicy();
@@ -943,46 +908,38 @@ public class ToolRegistry {
             return ToolOutput.failure(ToolOutput.FailureKind.INVALID_CONFIGURATION,
                     "Web Tool 配置无效: " + route.validationError());
         }
-        if (route.usesMcp()) {
-            ToolOutput output = executeConfiguredMcpSearch(route, query, topK);
-            if (output.successful()) {
-                return new ToolOutput("🔍 [MCP] " + query.trim() + "\n\n" + output.text().trim(),
-                        output.imageParts(), true, List.of(), ToolOutput.FailureKind.NONE);
-            }
-            if (!webToolBackendRouter.mayFallback(route, output)) {
-                return output;
-            }
+        if (topK < 1 || topK > 10) {
+            return ToolOutput.failure("top_k 必须在 1–10 之间");
         }
-        return providerWebSearch(query, topK);
+        String backend = route.tool();
+        ToolOutput output = executeMcpSearch(backend, query, topK);
+        if (webToolBackendRouter.mayFallback(route, output) && !CancellationContext.isCancelled()) {
+            backend = webToolBackendRouter.fallbackTool(route);
+            output = executeMcpSearch(backend, query, topK);
+        }
+        if (!output.successful()) return safeWebFailure(output, "搜索");
+        List<String> urls = WebToolBackendRouter.ANYSEARCH_TOOL.equals(backend)
+                ? AnySearchResultParser.discoveredUrls(output.text())
+                : com.codeagent.web.StepSearchResultParser.discoveredUrls(output.structuredContent());
+        return new ToolOutput("🔍 [MCP] [" + webBackendLabel(backend) + "] " + query.trim() + "\n\n" + output.text().trim(),
+                output.imageParts(), true, urls, ToolOutput.FailureKind.NONE);
     }
 
-    private ToolOutput executeConfiguredMcpSearch(WebToolBackendRouter.Route route, String query, int topK) {
+    private ToolOutput executeMcpSearch(String backend, String query, int topK) {
         ObjectNode args = mapper.createObjectNode();
         args.put("query", query.trim());
-        putIfMcpToolAccepts(route.tool(), args, topK,
-                "top_k", "topK", "max_results", "num_results", "limit", "count");
-        return executeConfiguredMcpBackend(route.tool(), args.toString());
+        if (WebToolBackendRouter.ANYSEARCH_TOOL.equals(backend)) args.put("max_results", topK);
+        else putIfMcpToolAccepts(backend, args, topK, "n");
+        return executeConfiguredMcpBackend(backend, args.toString());
     }
 
-    private ToolOutput providerWebSearch(String query, int topK) {
-        SearchProvider provider = searchProvider();
-        if (!provider.isReady()) {
-            return ToolOutput.failure("⚠️ " + provider.unavailableHint());
-        }
-        try {
-            List<SearchResult> results = provider.search(query.trim(), topK);
-            List<String> discoveredUrls = results == null
-                    ? List.of()
-                    : results.stream()
-                    .map(SearchResult::url)
-                    .filter(ToolRegistry::isHttpUrl)
-                    .distinct()
-                    .toList();
-            return ToolOutput.discovered(
-                    formatSearchResults(provider.name(), query, results), discoveredUrls);
-        } catch (Exception e) {
-            return ToolOutput.failure("搜索失败 (" + provider.name() + "): " + e.getMessage());
-        }
+    private static String webBackendLabel(String backend) {
+        return backend.startsWith("mcp__anysearch__") ? "AnySearch" : "Step";
+    }
+
+    private static ToolOutput safeWebFailure(ToolOutput output, String action) {
+        return ToolOutput.failure(output.failureKind(), "MCP " + action + "失败（" + output.failureKind()
+                + "），请检查 /mcp 状态、认证及配额");
     }
 
     /*
@@ -1006,20 +963,6 @@ public class ToolRegistry {
         }
     }
 
-    private static boolean isHttpUrl(String value) {
-        if (value == null || value.isBlank()) {
-            return false;
-        }
-        try {
-            java.net.URI uri = java.net.URI.create(value.trim());
-            return ("http".equalsIgnoreCase(uri.getScheme())
-                    || "https".equalsIgnoreCase(uri.getScheme()))
-                    && uri.getHost() != null;
-        } catch (IllegalArgumentException e) {
-            return false;
-        }
-    }
-
     private void runPostEditLspHook(String displayPath, Path safePath) {
         try {
             if (lspManager != null) {
@@ -1028,33 +971,6 @@ public class ToolRegistry {
         } catch (Exception ignored) {
             // LSP 诊断是 post-edit 辅助信号，失败不能影响工具主结果。
         }
-    }
-
-    private String formatSearchResults(String providerName, String query, List<SearchResult> results) {
-        if (results == null || results.isEmpty()) {
-            return "🔍 [" + providerName + "] " + query + "\n\n未找到相关结果。";
-        }
-        StringBuilder sb = new StringBuilder();
-        sb.append("🔍 [").append(providerName).append("] ").append(query).append("\n\n");
-        for (SearchResult r : results) {
-            sb.append(r.position()).append(". ").append(r.title()).append("\n");
-            if (!r.snippet().isBlank()) {
-                String snippet = r.snippet();
-                if (snippet.length() > 200) {
-                    snippet = snippet.substring(0, 200) + "...";
-                }
-                sb.append("   ").append(snippet).append("\n");
-            }
-            if (!r.url().isBlank()) {
-                sb.append("   🔗 ").append(r.url());
-                if (!r.source().isBlank()) {
-                    sb.append("  (").append(r.source()).append(")");
-                }
-                sb.append("\n");
-            }
-            sb.append("\n");
-        }
-        return sb.toString().trim();
     }
 
     String webFetch(String url, int maxChars) {
@@ -1080,71 +996,61 @@ public class ToolRegistry {
         if (rateReason != null) {
             return ToolOutput.failure("❌ " + rateReason);
         }
-        if (route.usesMcp()) {
-            ToolOutput output = executeConfiguredMcpFetch(route, url, maxChars);
-            if (output.successful()) {
-                return new ToolOutput("🌐 [MCP] 抓取: " + url.trim() + "\n\n" + output.text().trim(),
-                        output.imageParts(), true, List.of(), ToolOutput.FailureKind.NONE);
+        String backend = route.tool();
+        ToolOutput output = executeConfiguredMcpFetch(backend, url, maxChars);
+        if (webToolBackendRouter.mayFallback(route, output) && !CancellationContext.isCancelled()) {
+            backend = webToolBackendRouter.fallbackTool(route);
+            output = executeConfiguredMcpFetch(backend, url, maxChars);
+        }
+        if (!output.successful()) return safeWebFailure(output, "抓取");
+        String body = output.text();
+        String returnedUrl = null;
+        if (WebToolBackendRouter.ANYSEARCH_FETCH_TOOL.equals(backend)) {
+            try {
+                JsonNode extracted = mapper.readTree(body);
+                if (extracted == null || !extracted.path("content").isTextual())
+                    return ToolOutput.failure("AnySearch extract 返回格式无效");
+                body = extracted.path("content").asText();
+                if (extracted.path("url").isTextual()) returnedUrl = extracted.path("url").asText();
+            } catch (Exception e) {
+                return ToolOutput.failure("AnySearch extract 返回格式无效");
             }
-            if (!webToolBackendRouter.mayFallback(route, output)) {
-                return output;
+        } else {
+            try {
+                JsonNode extracted = mapper.readTree(body);
+                if (extracted != null && extracted.path("page").path("markdown").isTextual()) {
+                    body = extracted.path("page").path("markdown").asText();
+                    if (extracted.path("page").path("url").isTextual()) returnedUrl = extracted.path("page").path("url").asText();
+                }
+            } catch (Exception ignored) {
+                // Older Step responses may provide only readable text.
             }
         }
-        return directWebFetch(url, maxChars);
+        boolean truncated = maxChars > 0 && body.length() > maxChars;
+        if (truncated) body = body.substring(0, maxChars);
+        return new ToolOutput("🌐 [MCP] [" + webBackendLabel(backend) + "] 请求 URL: " + url.trim()
+                + (returnedUrl == null || returnedUrl.isBlank() ? "" : "\n返回 URL: " + returnedUrl)
+                + (truncated ? "（已截断）" : "") + "\n\n" + body,
+                output.imageParts(), true, List.of(), ToolOutput.FailureKind.NONE);
     }
 
-    private ToolOutput executeConfiguredMcpFetch(WebToolBackendRouter.Route route, String url, int maxChars) {
+    private ToolOutput executeConfiguredMcpFetch(String backend, String url, int maxChars) {
         ObjectNode args = mapper.createObjectNode();
         args.put("url", url.trim());
-        putIfMcpToolAccepts(route.tool(), args, maxChars,
-                "max_chars", "maxChars", "limit", "max_length", "maxLength");
-        return executeConfiguredMcpBackend(route.tool(), args.toString());
+        putIfMcpToolAccepts(backend, args, maxChars, "max_chars", "maxChars");
+        return executeConfiguredMcpBackend(backend, args.toString());
     }
 
     private ToolOutput executeConfiguredMcpBackend(String toolName, String argumentsJson) {
+        if (CancellationContext.isCancelled()) return ToolOutput.failure(ToolOutput.FailureKind.CANCELLED, "用户取消");
         ToolOutput output = executeToolOutput(toolName, argumentsJson);
+        if (CancellationContext.isCancelled()) return ToolOutput.failure(ToolOutput.FailureKind.CANCELLED, "用户取消");
         if (output.failureKind() == ToolOutput.FailureKind.TOOL_NOT_FOUND) {
-            return ToolOutput.failure(ToolOutput.FailureKind.BACKEND_UNAVAILABLE,
+            String server = toolName.split("__", 3)[1];
+            return ToolOutput.failure(mcpServerFailures.getOrDefault(server, ToolOutput.FailureKind.BACKEND_UNAVAILABLE),
                     "配置的 MCP 后端尚未就绪: " + toolName);
         }
         return output;
-    }
-
-    private ToolOutput directWebFetch(String url, int maxChars) {
-        try {
-            WebFetcher.RawResponse raw = webFetcher().fetch(url.trim());
-            HtmlExtractor.Extracted extracted = htmlExtractor().extract(raw.body(), raw.url());
-            String markdown = extracted.markdown();
-            int originalLength = markdown.length();
-            boolean truncated = false;
-            if (maxChars > 0 && markdown.length() > maxChars) {
-                markdown = markdown.substring(0, maxChars);
-                truncated = true;
-            }
-            FetchResult result = FetchResult.ok(raw.url(), extracted.title(), markdown, originalLength, truncated);
-            return ToolOutput.text(formatFetchResult(result));
-        } catch (Exception e) {
-            return ToolOutput.failure("抓取失败: " + e.getMessage());
-        }
-    }
-
-    private String formatFetchResult(FetchResult result) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("🌐 抓取: ").append(result.url()).append("\n");
-        if (!result.title().isBlank()) {
-            sb.append("📄 标题: ").append(result.title()).append("\n");
-        }
-        if (result.bodyEmpty()) {
-            sb.append("\n⚠️ ").append(result.hint()).append("\n");
-            return sb.toString();
-        }
-        sb.append("📏 正文 ").append(result.contentLength()).append(" 字符");
-        if (result.truncated()) {
-            sb.append("（已截断）");
-        }
-        sb.append("\n\n---\n\n");
-        sb.append(result.markdown());
-        return sb.toString();
     }
 
     /**
@@ -1282,6 +1188,12 @@ public class ToolRegistry {
                 if (browserCheck.blocked()) {
                     throw new PolicyException(browserCheck.reason());
                 }
+                if (WebToolBackendRouter.ANYSEARCH_FETCH_TOOL.equals(name) || WebToolBackendRouter.STEP_FETCH_TOOL.equals(name)) {
+                    JsonNode args = mapper.readTree(argumentsJson);
+                    String requestedUrl = args == null ? "" : args.path("url").asText("");
+                    String denial = networkPolicy().checkUrl(requestedUrl);
+                    if (denial != null) throw new PolicyException(denial);
+                }
                 ToolOutput output = mcpTool.invoker().apply(argumentsJson);
                 if (output == null) {
                     output = ToolOutput.text("");
@@ -1299,7 +1211,7 @@ public class ToolRegistry {
                                 output.imageParts(),
                                 output.successful(),
                                 output.discoveredUrls(),
-                                output.failureKind());
+                                output.failureKind(), output.structuredContent());
                     }
                 }
                 if (shouldAudit) {
@@ -1401,16 +1313,21 @@ public class ToolRegistry {
         return false;
     }
 
-    protected String executionBackendToolName(String toolName) {
-        if (toolName == null) {
-            return null;
-        }
+    private final java.util.concurrent.ConcurrentMap<String, ToolOutput.FailureKind> mcpServerFailures =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    public void setMcpServerFailure(String server, ToolOutput.FailureKind failure) {
+        if (failure == null) mcpServerFailures.remove(server);
+        else mcpServerFailures.put(server, failure);
+    }
+
+    protected List<String> executionBackendToolNames(String toolName) {
         WebToolBackendRouter.Route route = switch (toolName) {
             case "web_search" -> webToolBackendRouter.searchRoute(currentProvider, currentModel);
             case "web_fetch" -> webToolBackendRouter.fetchRoute(currentProvider, currentModel);
             default -> null;
         };
-        return route != null && route.valid() && route.usesMcp() ? route.tool() : toolName;
+        return route != null && route.valid() ? webToolBackendRouter.executionTools(route) : List.of(toolName);
     }
 
     protected ToolOutput executeBatchedToolOutput(ToolInvocation invocation, boolean concurrentBatch) {

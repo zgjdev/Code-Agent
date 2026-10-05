@@ -14,13 +14,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CodeAgentWebToolsConfigTest {
 
     @Test
-    void defaultsToModelAwareAutomaticRouting(@TempDir Path tempDir) {
+    void defaultsToAnySearchAndAutomaticFetch(@TempDir Path tempDir) {
         CodeAgentConfig config = CodeAgentConfig.load(tempDir.resolve("missing.json"), Map.of());
 
         assertEquals("auto", config.getWebTools().getSearch().getBackend());
         assertEquals("auto", config.getWebTools().getFetch().getBackend());
-        assertEquals("fail", config.getWebTools().getSearch().getOnUnavailable());
-        assertEquals("fail", config.getWebTools().getFetch().getOnUnavailable());
+        assertEquals("step", config.getWebTools().getSearch().getOnUnavailable());
+        assertEquals("step", config.getWebTools().getFetch().getOnUnavailable());
         assertNull(config.getWebTools().getSearch().validationError("web_search"));
         assertNull(config.getWebTools().getFetch().validationError("web_fetch"));
     }
@@ -33,8 +33,8 @@ class CodeAgentWebToolsConfigTest {
                   "webTools": {
                     "search": {
                       "backend": "mcp",
-                      "tool": "mcp__step_search__web_search",
-                      "onUnavailable": "default"
+                      "tool": "mcp__anysearch__search",
+                      "onUnavailable": "fail"
                     },
                     "fetch": {
                       "backend": "mcp",
@@ -47,8 +47,8 @@ class CodeAgentWebToolsConfigTest {
         CodeAgentConfig config = CodeAgentConfig.load(configFile, Map.of());
 
         assertEquals("mcp", config.getWebTools().getSearch().getBackend());
-        assertEquals("mcp__step_search__web_search", config.getWebTools().getSearch().getTool());
-        assertEquals("default", config.getWebTools().getSearch().getOnUnavailable());
+        assertEquals("mcp__anysearch__search", config.getWebTools().getSearch().getTool());
+        assertEquals("fail", config.getWebTools().getSearch().getOnUnavailable());
         assertEquals("mcp", config.getWebTools().getFetch().getBackend());
         assertEquals("mcp__step_search__web_fetch", config.getWebTools().getFetch().getTool());
         assertEquals("fail", config.getWebTools().getFetch().getOnUnavailable());

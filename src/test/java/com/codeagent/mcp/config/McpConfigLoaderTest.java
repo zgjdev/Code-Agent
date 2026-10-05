@@ -12,6 +12,16 @@ import static org.junit.jupiter.api.Assertions.*;
 class McpConfigLoaderTest {
 
     @Test
+    void defaultAnySearchAndExplicitDisabledOverride(@TempDir Path tempDir) throws Exception {
+        Path user = tempDir.resolve("mcp.json");
+        McpConfigLoader loader = new McpConfigLoader(user, tempDir.resolve("missing.json"), tempDir);
+        assertEquals("https://api.anysearch.com/mcp", loader.load().get("anysearch").getUrl());
+        Files.writeString(user, "{\"mcpServers\":{\"anysearch\":{\"url\":\"https://example.com\",\"disabled\":true}}}");
+        assertTrue(loader.load().get("anysearch").isDisabled());
+        assertEquals("https://example.com", loader.load().get("anysearch").getUrl());
+    }
+
+    @Test
     void projectConfigOverridesUserConfig(@TempDir Path tempDir) throws Exception {
         Path user = tempDir.resolve("user-mcp.json");
         Path project = tempDir.resolve("project-mcp.json");

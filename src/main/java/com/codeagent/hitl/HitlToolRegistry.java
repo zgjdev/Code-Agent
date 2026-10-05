@@ -30,11 +30,10 @@ public class HitlToolRegistry extends ToolRegistry {
 
     @Override
     protected boolean requiresIsolatedExecution(ToolInvocation invocation) {
-        String toolName = executionBackendToolName(invocation.name());
-        return hitlHandler.isEnabled()
-                && ApprovalPolicy.requiresApproval(toolName)
-                && !hitlHandler.isApprovedAllByTool(toolName)
-                && !hitlHandler.isApprovedAllByServer(ApprovalPolicy.mcpServerName(toolName));
+        return hitlHandler.isEnabled() && executionBackendToolNames(invocation.name()).stream()
+                .anyMatch(toolName -> ApprovalPolicy.requiresApproval(toolName)
+                        && !hitlHandler.isApprovedAllByTool(toolName)
+                        && !hitlHandler.isApprovedAllByServer(ApprovalPolicy.mcpServerName(toolName)));
     }
 
     @Override
@@ -108,7 +107,14 @@ public class HitlToolRegistry extends ToolRegistry {
 
         // 批准（含修改参数）- 使用 effectiveArguments 获取最终参数；父类执行路径会负责 allow audit
         String effectiveArgs = result.effectiveArguments(argumentsJson);
-        return super.doExecuteTool(name, effectiveArgs);
+        ToolOutput output = super.doExecuteTool(name, effectiveArgs);
+        if (!effectiveArgs.equals(argumentsJson) && name.startsWith("mcp__anysearch__")
+                && (output.failureKind() == ToolOutput.FailureKind.BACKEND_UNAVAILABLE
+                    || output.failureKind() == ToolOutput.FailureKind.TOOL_NOT_FOUND)) {
+            return ToolOutput.failure(ToolOutput.FailureKind.EXECUTION_ERROR,
+                    "审批已修改参数且主后端不可用，请重新发起调用");
+        }
+        return output;
     }
 
     private static long elapsedMillis(long startNanos) {

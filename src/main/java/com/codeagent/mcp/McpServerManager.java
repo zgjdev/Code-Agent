@@ -183,6 +183,7 @@ public class McpServerManager implements AutoCloseable {
             return "未找到 MCP server: " + name;
         }
         unregisterTools(server);
+        toolRegistry.setMcpServerFailure(server.name(), null);
         server.close();
         server.config().setDisabled(false);
         start(server);
@@ -210,6 +211,7 @@ public class McpServerManager implements AutoCloseable {
             return "未找到 MCP server: " + name;
         }
         unregisterTools(server);
+        toolRegistry.setMcpServerFailure(server.name(), null);
         server.close();
         server.config().setDisabled(true);
         server.status(McpServerStatus.DISABLED);
@@ -402,6 +404,7 @@ public class McpServerManager implements AutoCloseable {
 
     private void start(McpServer server) {
         unregisterTools(server);
+        toolRegistry.setMcpServerFailure(server.name(), null);
         server.close();
         if (server.config().isDisabled()) {
             server.status(McpServerStatus.DISABLED);
@@ -415,6 +418,7 @@ public class McpServerManager implements AutoCloseable {
             configLoader.prepare(server.config());
             McpTransport transport = createTransport(server.config());
             McpClient client = new McpClient(server.name(), transport);
+            server.client(client); // Adopt before handshake so every failure closes the transport.
             client.initialize();
             registerNotificationHandlers(server, client);
             List<McpToolDescriptor> tools = buildToolList(server, client);
@@ -425,7 +429,8 @@ public class McpServerManager implements AutoCloseable {
             server.status(McpServerStatus.READY);
         } catch (Exception e) {
             server.close();
-            server.errorMessage(e.getMessage());
+            toolRegistry.setMcpServerFailure(server.name(), McpFailureClassifier.classify(e));
+            server.errorMessage(safeServerError(server, e));
             server.status(McpServerStatus.ERROR);
         }
     }
@@ -461,7 +466,7 @@ public class McpServerManager implements AutoCloseable {
                 replaceTools(server, client, tools);
                 server.tools(tools);
             } catch (Exception e) {
-                server.errorMessage("tools/list_changed 处理失败: " + e.getMessage());
+                server.errorMessage("tools/list_changed 处理失败: " + safeServerError(server, e));
             }
         });
         router.on("notifications/resources/list_changed", ignored -> resourceCache.invalidateServer(server.name()));
@@ -489,19 +494,16 @@ public class McpServerManager implements AutoCloseable {
      */
     private static ToolOutput invokeMcpToolOutput(McpClient client, McpToolDescriptor descriptor, String argumentsJson) {
         try {
-            return client.callToolOutput(descriptor.name(), argumentsJson);
-        } catch (JsonRpcException e) {
-            return ToolOutput.failure(ToolOutput.FailureKind.EXECUTION_ERROR,
-                    "MCP 工具返回错误 (" + descriptor.serverName() + "/" + descriptor.name() + "): "
-                            + e.getMessage());
-        } catch (IOException e) {
-            return ToolOutput.failure(ToolOutput.FailureKind.BACKEND_UNAVAILABLE,
-                    "MCP 后端不可用 (" + descriptor.serverName() + "/" + descriptor.name() + "): "
-                            + e.getMessage());
+            ToolOutput output = client.callToolOutput(descriptor.name(), argumentsJson);
+            if (!output.successful() && ("anysearch".equals(descriptor.serverName()) || "step_search".equals(descriptor.serverName())))
+                return ToolOutput.failure(output.failureKind(), "MCP Web 后端返回错误，请检查认证及配额");
+            return output;
         } catch (Exception e) {
-            return ToolOutput.failure(ToolOutput.FailureKind.EXECUTION_ERROR,
-                    "MCP 工具调用失败 (" + descriptor.serverName() + "/" + descriptor.name() + "): "
-                            + e.getMessage());
+            ToolOutput.FailureKind kind = McpFailureClassifier.classify(e);
+            String message = ("anysearch".equals(descriptor.serverName()) || "step_search".equals(descriptor.serverName()))
+                    ? "MCP Web 后端失败（" + kind + "），请检查 /mcp 状态、认证及配额"
+                    : "MCP 工具调用失败 (" + descriptor.serverName() + "/" + descriptor.name() + "): " + e.getMessage();
+            return ToolOutput.failure(kind, message);
         }
     }
 
@@ -510,6 +512,12 @@ public class McpServerManager implements AutoCloseable {
             return new StreamableHttpTransport(config.getUrl(), config.getHeaders());
         }
         return new StdioTransport(config.getCommand(), config.getArgs(), config.getEnv(), projectDir);
+    }
+
+    private static String safeServerError(McpServer server, Exception error) {
+        return ("anysearch".equals(server.name()) || "step_search".equals(server.name()))
+                ? ("anysearch".equals(server.name()) ? "AnySearch" : "Step") + " MCP 连接或协议失败，请检查配置、认证和配额"
+                : error.getMessage();
     }
 
     private void validateNoDuplicateTools(String serverName, List<McpToolDescriptor> tools) {

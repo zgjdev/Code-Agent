@@ -276,28 +276,21 @@ shared 模式不会自动取得任意标签页的操作权限；敏感页面上�
 
 ### Web 访问
 
-模型只会看到稳定的 `web_search` 和 `web_fetch`，不会看到底层 `mcp__*__web_search`、`mcp__*__web_fetch` 或被路由引用的其他 MCP 实现。默认 `backend=auto`：Step 3.7 Flash 使用内部 StepSearch MCP，MCP 未就绪时回退；其他模型使用 SearchProvider 和直接 HTTP。显式配置始终优先于模型自动选择。
+模型只会看到 `web_search` 和 `web_fetch`。所有模型默认调用 AnySearch MCP 的 `search` / `extract`；连接失败、超时、HTTP 5xx 或服务未就绪时，各自最多降级一次到 Step MCP 的 `web_search` / `web_fetch`。认证、额度、业务错误、策略/HITL拒绝及取消不触发降级。SearchProvider 和 direct HTTP 门面已移除。
 
-在 `~/.codeagent/config.json` 中可固定后端：
+默认无需配置后端，等价于：
 
 ```json
-{
-  "webTools": {
-    "search": {
-      "backend": "mcp",
-      "tool": "mcp__step_search__web_search",
-      "onUnavailable": "default"
-    },
-    "fetch": {
-      "backend": "direct"
-    }
-  }
-}
+{"webTools":{"search":{"backend":"auto","onUnavailable":"step"},"fetch":{"backend":"auto","onUnavailable":"step"}}}
 ```
 
-`web_search.backend` 支持 `auto|provider|mcp`，`web_fetch.backend` 支持 `auto|direct|mcp`。`provider` 可指定 `zhipu|serpapi|searxng`；省略时继续使用 `SEARCH_PROVIDER` 和密钥自动检测。显式 MCP 路由默认 `onUnavailable=fail`，只有设为 `default` 且后端尚未就绪时才回退。策略拒绝、人工拒绝、取消和执行错误都不会换通道。
+显式 `backend=mcp` 可指定对应 AnySearch 或 Step 工具；`onUnavailable=fail` 禁止降级，旧 `default` 是 `step` 兼容别名。旧 provider/direct 或自定义 Web MCP 配置返回迁移错误。旧 SEARCH_PROVIDER/SERPAPI_KEY/SEARXNG_URL 不再参与搜索；GLM_API_KEY 仍用于 LLM。
 
-内置 SearchProvider 都需要外部服务：智谱 Web Search、SerpAPI 或可访问的 SearXNG；它们不是离线本地搜索引擎。`web_fetch` 的 direct 后端由 CodeAgent 直接发起 HTTP 请求并提取正文，适合静态或 SSR 页面。Chrome DevTools MCP 是浏览器自动化工具，适用于 JS 页面和交互，不等同于搜索 Provider。
+交互式 CLI 默认内置 `anysearch`；`ANYSEARCH_API_KEY` 可选，无密钥使用受限匿名访问。设置 `STEP_API_KEY` 后内置 `step_search`，完整搜索降级还需有效 Step Plan 订阅。用户/项目 `mcp.json` 的同名配置优先，包括 disabled。两家原始 Web 工具保留内部注册，不发给模型；没有 MCP Manager 的 Runtime/headless 入口返回不可用。不自动注册账户或更换密钥。
+
+AnySearch 搜索返回标题、链接和摘要，专用解析器仅在完整包络校验后发布结果 URL；Step 仅接受 MCP `structuredContent.results[].url`。摘要链接、异常格式和抓取正文不生成授权。AnySearch 的 Markdown 契约改变会停止授信；完整格式伪造仍是已知风险。抓取按 `max_chars` 本地截断正文。
+
+抓取继续校验请求 URL 的协议与私网地址，审批改参后再次校验。页面请求由远程 MCP 服务发出，本地无法约束其重定向或验证远端 DNS；`max_chars` 约束返回给模型的正文，不是网络响应上限。Chrome DevTools MCP 保留独立浏览器能力。
 
 URL 授权只来自：
 

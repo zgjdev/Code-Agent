@@ -2,7 +2,6 @@ package com.codeagent.mcp;
 
 import com.codeagent.mcp.config.McpConfigLoader;
 import com.codeagent.mcp.config.McpServerConfig;
-import com.codeagent.mcp.jsonrpc.JsonRpcException;
 import com.codeagent.mcp.notifications.NotificationRouter;
 import com.codeagent.mcp.protocol.McpToolDescriptor;
 import com.codeagent.mcp.resources.McpResourceCache;

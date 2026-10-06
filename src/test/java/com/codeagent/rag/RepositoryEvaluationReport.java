@@ -12,7 +12,7 @@ final class RepositoryEvaluationReport {
     record Row(String mode, String id, String category, String query,
                List<RetrievalEvaluationMetrics.Evidence> evidence,
                RetrievalEvaluationMetrics.Scores at5, RetrievalEvaluationMetrics.Scores at10,
-               List<Long> latencyNanos, int graphSeedCount, Map<RetrievalSource, Integer> stageCandidates,
+               List<Long> latencyNanos, Map<RetrievalSource, Integer> stageCandidates,
                List<Hit> hits) {}
 
     static void write(Path output, Map<String, Object> metadata, List<Row> rows) throws Exception {
@@ -27,26 +27,16 @@ final class RepositoryEvaluationReport {
                 .append("Metrics refer to annotated evidence, not exhaustive relevance or answer correctness.\n")
                 .append("P@5 counts relevant returned chunks / 5. Discounted evidence coverage is a custom metric, NOT nDCG.\n")
                 .append("Latency: warm component pipeline, one warmup then three serial measurements; service overhead and indexing excluded.\n")
-                .append("Relation probes are separate from the frozen 72-query main set.\n\n")
+                .append("69-query main set; six callee lookup probes are separate. Three deleted Graph-target queries were retired.\n\n")
                 .append("| Mode / category | N positive | P@5 | R@5 | R@10 | Hit@1 | Hit@5 | Hit@10 | MRR@10 | Discounted coverage@10 | Complete@10 | No-result rate | No-answer false return | P50 ms | P95 ms |\n")
                 .append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for (String mode : rows.stream().map(Row::mode).distinct().toList()) {
             var group = rows.stream().filter(r -> r.mode().equals(mode)).toList();
             appendSummary(text, mode + " / main", group.stream()
-                    .filter(r -> !r.category().equals("relation_probe")).toList());
+                    .filter(r -> !r.category().equals("symbol_reference")).toList());
             for (String category : group.stream().map(Row::category).distinct().toList())
                 appendSummary(text, mode + " / " + category,
                         group.stream().filter(r -> r.category().equals(category)).toList());
-        }
-        text.append("\n## Graph activation\n\n");
-        for (String category : List.of("main", "relation_probe")) {
-            var group = rows.stream().filter(r -> r.mode().equals("full")
-                    && r.category().equals("relation_probe") == category.equals("relation_probe")).toList();
-            text.append("- ").append(category).append(": ").append(group.size()).append(" queries; nonempty seeds=")
-                    .append(group.stream().filter(r -> r.graphSeedCount() > 0).count())
-                    .append("; nonempty GRAPH candidates=")
-                    .append(group.stream().filter(r -> r.stageCandidates().getOrDefault(RetrievalSource.GRAPH, 0) > 0).count())
-                    .append("\n");
         }
         text.append("\n## Full-mode failures (no evidence in first 10)\n\n");
         for (Row row : rows) {

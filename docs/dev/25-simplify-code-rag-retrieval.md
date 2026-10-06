@@ -1,5 +1,7 @@
 # 精简代码 RAG 三路检索设计
 
+> 历史设计：Graph 已退出 RAG，当前仅保留词法与语义两路；本文件的三路列表与验收项不代表当前行为。后续设计、实现和复测统一见 [36-rag-repository-evaluation.md](36-rag-repository-evaluation.md)。
+
 ## 1. 背景、目标与非目标
 
 ### 1.1 背景

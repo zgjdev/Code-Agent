@@ -226,7 +226,17 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
 
     public List<RetrievalCandidate> searchTerms(
             Path projectRoot, String normalizedQuery, int limit) throws SQLException {
-        String match = ftsMatch(normalizedQuery);
+        return searchTerms(projectRoot, normalizedQuery, limit, false);
+    }
+
+    public List<RetrievalCandidate> searchAnyTerms(
+            Path projectRoot, String normalizedQuery, int limit) throws SQLException {
+        return searchTerms(projectRoot, normalizedQuery, limit, true);
+    }
+
+    private List<RetrievalCandidate> searchTerms(
+            Path projectRoot, String normalizedQuery, int limit, boolean anyTerm) throws SQLException {
+        String match = ftsMatch(normalizedQuery, anyTerm);
         if (match.isBlank() || limit <= 0) return List.of();
         String sql = """
                 SELECT c.id, c.file_path, c.start_line, c.end_line, c.chunk_type,
@@ -598,9 +608,9 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         return relativePath.normalize().toString().replace('\\', '/');
     }
 
-    private static String ftsMatch(String query) {
+    private static String ftsMatch(String query, boolean anyTerm) {
         if (query == null) return "";
-        return query.trim().isEmpty() ? "" : String.join(" AND ",
+        return query.trim().isEmpty() ? "" : String.join(anyTerm ? " OR " : " AND ",
                 java.util.Arrays.stream(query.trim().split("\\s+"))
                         .filter(token -> !token.isBlank()).map(SqliteRetrievalIndex::quoteFts).toList());
     }

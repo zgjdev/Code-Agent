@@ -3,7 +3,6 @@ package com.codeagent.rag;
 import com.codeagent.rag.embedding.EmbeddingProvider;
 import com.codeagent.rag.embedding.EmbeddingResolution;
 import com.codeagent.rag.stage.CodeRetrieverStage;
-import com.codeagent.rag.stage.GraphRetriever;
 import com.codeagent.rag.stage.SemanticRetriever;
 import com.codeagent.rag.stage.TermFtsRetriever;
 import com.codeagent.search.CodeSearchService;
@@ -28,8 +27,7 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
         this.embeddingResolution = embeddingResolution == null
                 ? new EmbeddingResolution(Optional.empty(), "embedding_disabled", false)
                 : embeddingResolution;
-        this.stages = List.of(new TermFtsRetriever(), new GraphRetriever(),
-                new SemanticRetriever());
+        this.stages = List.of(new TermFtsRetriever(), new SemanticRetriever());
     }
 
     /**

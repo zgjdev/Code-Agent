@@ -32,7 +32,6 @@ public final class RetrievalFusion {
             RetrievalCandidate candidate = value.candidate;
             double factor = 1.0;
             if ("class".equals(candidate.chunkType()) || "method".equals(candidate.chunkType())) factor *= 1.05;
-            if (value.sources.contains(RetrievalSource.GRAPH) && value.sources.size() > 1) factor *= 1.03;
             if (value.sources.size() >= 2) factor *= 1.05;
             hits.add(new RetrievalHit(candidate.filePath(), candidate.startLine(), candidate.endLine(),
                     candidate.chunkType(), candidate.symbol(), candidate.content(), value.score * factor,
@@ -62,7 +61,6 @@ public final class RetrievalFusion {
         values.put(RetrievalSource.FTS_TERMS, 1.2);
         values.put(RetrievalSource.SEMANTIC_LOCAL, 1.0);
         values.put(RetrievalSource.SEMANTIC_REMOTE, 1.0);
-        values.put(RetrievalSource.GRAPH, 0.8);
         return Map.copyOf(values);
     }
 

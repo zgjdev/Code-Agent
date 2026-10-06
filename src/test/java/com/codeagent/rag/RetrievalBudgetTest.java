@@ -36,4 +36,26 @@ class RetrievalBudgetTest {
         return new RetrievalHit(file, line, line, "file", file, "content", 1,
                 Set.of(RetrievalSource.FTS_TERMS));
     }
+
+    @Test
+    void skipsEmptyContentWithoutBlockingUsefulHits() {
+        RetrievalHit empty = new RetrievalHit("Empty.java", 1, 1, "file", "empty", "", 2,
+                Set.of(RetrievalSource.FTS_TERMS));
+        RetrievalHit useful = hit("Useful.java", 1);
+        var result = new RetrievalBudget().apply(List.of(empty, useful), 5, 1_000);
+        assertEquals(List.of(useful), result.hits());
+        assertTrue(result.partial());
+    }
+
+    @Test
+    void clipsLongSingleLineAfterAnEarlierHitWithinRemainingBudget() {
+        RetrievalHit first = hit("A.java", 1);
+        RetrievalHit longLine = new RetrievalHit("B.java", 1, 1, "file", "b", "0123456789", 1,
+                Set.of(RetrievalSource.FTS_TERMS));
+        var result = new RetrievalBudget().apply(List.of(first, longLine), 5, 10);
+        assertEquals(2, result.hits().size());
+        assertEquals("012", result.hits().get(1).content());
+        assertEquals(10, result.hits().stream().mapToInt(h -> h.content().length()).sum());
+        assertTrue(result.partial());
+    }
 }

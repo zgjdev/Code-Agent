@@ -309,9 +309,9 @@ LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖�
 `ExecutionPlan` 负责 DAG 拓扑排序 / 可执行任务判定 / 进度可视化；`PlanStateStore` 负责 SQLite DAG checkpoint 与 Task 边界恢复。active Plan 按 workspace + `session_id` 关联，终态 Plan 不参与 active lookup；`findById` / `findActiveRecord` 提供 reconciliation 所需的只读持久化视图。COMPLETED Task 的 result 会恢复并继续进入下游 StepBriefing；要求 DIFF 的 durable Task 会在首次执行前把仅含相对路径与 SHA-256 的 baseline 写入 `plan_tasks.diff_baseline_json`，恢复时复用且不保存源码正文；旧版仅有 `resume_key` 且没有 `session_id` 的记录视为 legacy unbound plan，不做猜测式绑定。
 
 ### ToolRegistry.java
-11 个核心内置工具 + MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult。代码理解默认路径是 `glob_files` / `grep_code` / `read_file` 现用现查，`grep_code` 优先走 ripgrep 并按 `max_results` / `head_limit` / `max_chars` 渐进返回，且不依赖 RAG index。`search_code` 只组合 Term FTS（SQLite FTS5 + BM25）、Semantic（BGE + cosine）和 Graph 三类召回；Graph 内部使用 Symbol Index 找 seed，Symbol 不独立进入 Weighted RRF。确定性搜索链路的回归样例见 `docs/code-search-golden-set.md`，三路 RAG 设计见 `docs/dev/25-simplify-code-rag-retrieval.md`。
+11 个核心内置工具 + MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult。代码理解默认路径是 `glob_files` / `grep_code` / `read_file` 现用现查，`grep_code` 优先走 ripgrep 并按 `max_results` / `head_limit` / `max_chars` 渐进返回，且不依赖 RAG index。`search_code` 只组合 Term FTS（SQLite FTS5 + BM25）与 Semantic（BGE + cosine）。词法查询过滤问句词，严格交集的 BM25 结果优先，候选不足时补充并集并按 chunk 去重；文档规范化与 SQLite schema 不变。Graph 已退出 Weighted RRF，符号/关系索引保留用于结构地图与 `/graph`。预算跳过空正文，单行片段可按剩余字符截断。确定性搜索链路的回归样例见 `docs/code-search-golden-set.md`，双路修复设计见 [36-rag-repository-evaluation.md](dev/36-rag-repository-evaluation.md)。
 
-真实生产 Java 语料的离线 RAG 评测、指标口径、五组消融及运行命令见 [36-rag-repository-evaluation.md](dev/36-rag-repository-evaluation.md)。重实验需显式设置 `-Drag.repository.eval=true`，日常 quick 跳过；结果只表示固定标注集上的检索质量，不代表最终回答正确率。
+真实生产 Java 语料的离线 RAG 评测、指标口径、历史五组消融和当前双路复测见 [36-rag-repository-evaluation.md](dev/36-rag-repository-evaluation.md)。重实验需显式设置 `-Drag.repository.eval=true`，日常 quick 跳过；`-Drag.repository.corpus=<仓库内源码快照根目录>` 可固定语料作前后比较。结果只表示固定标注集上的检索质量，不代表最终回答正确率。
 
 ### MCP Package
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/

@@ -82,7 +82,7 @@ class ToolRegistryTest {
                 "{\"query\":\"router\",\"intent\":\"architecture\"}");
 
         assertTrue(chunks.contains("Router.java:4-8"));
-        assertTrue(chunks.contains("sources=[GRAPH]"));
+        assertTrue(chunks.contains("sources=[FTS_TERMS]"));
         assertTrue(chunks.contains("partial: true"));
         assertTrue(chunks.contains("degraded: [semantic_unavailable]"));
         assertFalse(chunks.contains("repository_map:"));
@@ -98,7 +98,7 @@ class ToolRegistryTest {
                     : Optional.empty();
             return new RetrievalResponse(
                     List.of(new RetrievalHit("Router.java", 4, 8, "class", "Router",
-                            "class Router {}", 0.75, Set.of(RetrievalSource.GRAPH))),
+                            "class Router {}", 0.75, Set.of(RetrievalSource.FTS_TERMS))),
                     map,
                     new RetrievalDiagnostics("off", Map.of(), Map.of(),
                             List.of("semantic_unavailable"), 2),

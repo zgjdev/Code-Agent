@@ -13,17 +13,16 @@ class RetrievalFusionTest {
     @Test
     void fusesIndependentSourcesDeterministicallyAndLimitsPerFile() {
         RetrievalCandidate consensus = candidate("A.java", 10, "run", "id-a");
-        RetrievalCandidate graphOnly = candidate("B.java", 5, "Exact", "id-b");
+        RetrievalCandidate semanticOnly = candidate("B.java", 5, "Exact", "id-b");
         Map<RetrievalSource, List<RetrievalCandidate>> rankings = new LinkedHashMap<>();
         rankings.put(RetrievalSource.FTS_TERMS, List.of(consensus));
-        rankings.put(RetrievalSource.SEMANTIC_LOCAL, List.of(consensus));
-        rankings.put(RetrievalSource.GRAPH, List.of(graphOnly));
+        rankings.put(RetrievalSource.SEMANTIC_LOCAL, List.of(consensus, semanticOnly));
 
         List<RetrievalHit> result = new RetrievalFusion().fuse(rankings, "Exact", 10);
 
         assertEquals("A.java", result.get(0).filePath(), "source consensus should beat one exact boost");
         assertEquals(2, result.get(0).sources().size());
-        assertEquals(java.util.Set.of(RetrievalSource.GRAPH), result.get(1).sources());
+        assertEquals(java.util.Set.of(RetrievalSource.SEMANTIC_LOCAL), result.get(1).sources());
         assertTrue(result.get(0).score() > result.get(1).score());
         for (int i = 0; i < 20; i++) {
             assertEquals(result, new RetrievalFusion().fuse(rankings, "Exact", 10));
@@ -34,18 +33,15 @@ class RetrievalFusionTest {
     void appliesConfiguredSourceWeights() {
         RetrievalCandidate lexical = fileCandidate("Lexical.java", 1, "lexical");
         RetrievalCandidate semantic = fileCandidate("Semantic.java", 1, "semantic");
-        RetrievalCandidate graph = fileCandidate("Graph.java", 1, "graph");
         Map<RetrievalSource, List<RetrievalCandidate>> rankings = new LinkedHashMap<>();
         rankings.put(RetrievalSource.FTS_TERMS, List.of(lexical));
         rankings.put(RetrievalSource.SEMANTIC_LOCAL, List.of(semantic));
-        rankings.put(RetrievalSource.GRAPH, List.of(graph));
 
         Map<String, Double> scores = new RetrievalFusion().fuse(rankings, "query", 10).stream()
                 .collect(java.util.stream.Collectors.toMap(RetrievalHit::filePath, RetrievalHit::score));
 
         assertEquals(1.2 / 61.0, scores.get("Lexical.java"), 0.000_000_1);
         assertEquals(1.0 / 61.0, scores.get("Semantic.java"), 0.000_000_1);
-        assertEquals(0.8 / 61.0, scores.get("Graph.java"), 0.000_000_1);
     }
 
     @Test

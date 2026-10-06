@@ -23,12 +23,15 @@ class RepositoryRetrievalEvaluationTest {
     @Test void reportsRealRepositoryAblations() throws Exception {
         Path repository = Path.of("").toAbsolutePath().normalize();
         Path output = Files.createDirectories(repository.resolve("target/rag-evaluation"));
+        Path sourceRoot = Path.of(System.getProperty("rag.repository.corpus", repository.toString()))
+                .toAbsolutePath().normalize();
+        assertTrue(sourceRoot.startsWith(repository), "evaluation corpus must stay within the workspace");
         Map<String, String> files = new TreeMap<>();
-        try (var paths = Files.walk(repository.resolve("src/main/java"))) {
+        try (var paths = Files.walk(sourceRoot.resolve("src/main/java"))) {
             for (Path path : paths.filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)
                     && p.toString().endsWith(".java")).sorted().toList()) {
                 assertFalse(Files.isSymbolicLink(path));
-                files.put(repository.relativize(path).toString().replace('\\', '/'),
+                files.put(sourceRoot.relativize(path).toString().replace('\\', '/'),
                         hash(Files.readAllBytes(path)));
             }
         }
@@ -38,17 +41,25 @@ class RepositoryRetrievalEvaluationTest {
         for (var entry : files.entrySet()) {
             Path destination = corpus.resolve(entry.getKey());
             Files.createDirectories(destination.getParent());
-            Files.copy(repository.resolve(entry.getKey()), destination, StandardCopyOption.REPLACE_EXISTING);
+            Path source = sourceRoot.resolve(entry.getKey());
+            if (!source.equals(destination)) Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING);
             assertEquals(entry.getValue(), hash(Files.readAllBytes(destination)), "source changed during snapshot");
         }
         var cases = RepositoryEvaluationDatasetTest.load();
         // Validate before the expensive experiment even when invoked without the dataset unit test.
-        new RepositoryEvaluationDatasetTest().validatesRealSourceEvidenceAndBalancedCategories();
+        RepositoryEvaluationDatasetTest.validate(sourceRoot);
         List<RepositoryEvaluationReport.Row> rows = new ArrayList<>();
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("startedAt", Instant.now().toString());
         metadata.put("status", "IN_PROGRESS");
         metadata.put("gitHead", gitHead(repository));
+        metadata.put("frozenCorpus", !sourceRoot.equals(repository));
+        Map<String, String> pipelineSources = new TreeMap<>();
+        try (var paths = Files.walk(repository.resolve("src/main/java/com/codeagent/rag"))) {
+            for (Path path : paths.filter(p -> p.toString().endsWith(".java")).sorted().toList())
+                pipelineSources.put(repository.relativize(path).toString().replace('\\', '/'), hash(Files.readAllBytes(path)));
+        }
+        metadata.put("pipelineSourcesSha256", hash(JSON.writeValueAsBytes(pipelineSources)));
         metadata.put("corpusScope", "all src/main/java/**/*.java, excluding docs/tests/evaluation data");
         metadata.put("corpusSha256", corpusHash);
         metadata.put("files", files);
@@ -78,9 +89,7 @@ class RepositoryRetrievalEvaluationTest {
             var modes = new LinkedHashMap<String, List<CodeRetrieverStage>>();
             modes.put("lexical", List.of(new TermFtsRetriever()));
             modes.put("semantic", List.of(new SemanticRetriever()));
-            modes.put("lexical_semantic", List.of(new TermFtsRetriever(), new SemanticRetriever()));
-            modes.put("lexical_graph", List.of(new TermFtsRetriever(), new GraphRetriever()));
-            modes.put("full", List.of(new TermFtsRetriever(), new GraphRetriever(), new SemanticRetriever()));
+            modes.put("full", List.of(new TermFtsRetriever(), new SemanticRetriever()));
             for (var mode : modes.entrySet()) {
                 System.out.println("RAG evaluation mode=" + mode.getKey());
                 for (var item : cases) {
@@ -90,10 +99,6 @@ class RepositoryRetrievalEvaluationTest {
                     List<Long> timings = new ArrayList<>();
                     List<RetrievalHit> hits = List.of();
                     Map<RetrievalSource, Integer> stageCounts = Map.of();
-                    int graphSeeds = (int) index.searchSymbols(corpus, item.query(), 20).stream()
-                            .map(RetrievalCandidate::symbolId).filter(Objects::nonNull).distinct().count();
-                    if (item.category().equals("relation_probe"))
-                        assertTrue(graphSeeds > 0, "relation probe must activate a seed: " + item.id());
                     for (int repeat = 0; repeat < REPEATS; repeat++) {
                         long before = System.nanoTime();
                         var measured = search(mode.getValue(), new RetrievalContext(request, index,
@@ -109,21 +114,18 @@ class RepositoryRetrievalEvaluationTest {
                         assertTrue(actual.diagnostics().degradedReasonCodes().isEmpty());
                         assertEquals(actual.hits(), hits, "ablation must match production pipeline");
                     }
-                    if (item.category().equals("relation_probe") && stageCounts.containsKey(RetrievalSource.GRAPH))
-                        assertTrue(stageCounts.get(RetrievalSource.GRAPH) > 0,
-                                "relation probe must produce GRAPH candidates: " + item.id());
                     rows.add(new RepositoryEvaluationReport.Row(mode.getKey(), item.id(), item.category(),
                             item.query(), item.evidence(),
                             RetrievalEvaluationMetrics.measure(item.evidence(), hits, 5),
                             RetrievalEvaluationMetrics.measure(item.evidence(), hits, 10), timings,
-                            graphSeeds, stageCounts,
+                            stageCounts,
                             hits.stream().map(h -> describe(h, item.evidence())).toList()));
                 }
                 // Write completed modes incrementally so later failures do not erase evidence.
                 RepositoryEvaluationReport.write(output, metadata, rows);
             }
         }
-        assertEquals(78 * 5, rows.size());
+        assertEquals(75 * 3, rows.size());
         metadata.put("status", "COMPLETE");
         metadata.put("finishedAt", Instant.now().toString());
         RepositoryEvaluationReport.write(output, metadata, rows);

@@ -1,6 +1,6 @@
 # Local-First 分层代码检索实现计划
 
-> **现行架构提示（2026-09）：** 本文记录 SQLite v2 Local-First 检索落地时的六路 stage 设计，作为历史实现计划保留。当前运行时已进一步精简为 Term FTS、Semantic、Graph 三类召回；LiveGrep 与 trigram 已退出 RAG，Symbol 仅作为 Graph 内部 seed 基础设施。现行设计、兼容策略和测试矩阵见 [25-simplify-code-rag-retrieval.md](25-simplify-code-rag-retrieval.md)。下文中的六路列表、旧权重和验收项不得视为当前行为。
+> **现行架构提示（2026-10）：** 本文记录历史六路 stage 设计。当前仅保留 Term FTS 与 Semantic 两类召回；Graph 不参与 RAG，符号/关系索引仍服务结构地图与 `/graph`。现行设计、兼容策略和复测见 [36-rag-repository-evaluation.md](36-rag-repository-evaluation.md)。下文旧列表、权重与验收项不得视为当前行为。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: 使用 `subagent-driven-development`（推荐）或 `executing-plans` 逐任务实施。所有步骤用 checkbox 跟踪；每个生产代码边界先写失败测试，再写最小实现。未经用户明确允许不得 commit、push、创建 PR 或合并。
 

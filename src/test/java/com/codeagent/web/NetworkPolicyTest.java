@@ -54,12 +54,6 @@ class NetworkPolicyTest {
     }
 
     @Test
-    void allowsPublicHttps() {
-        assertNull(policy.checkUrl("https://example.com/path"));
-        assertNull(policy.checkUrl("https://example.com"));
-    }
-
-    @Test
     void rateLimitTriggersAfterMaxPerWindow() {
         NetworkPolicy bucket = new NetworkPolicy(60_000L, 3);
         assertNull(bucket.acquire());

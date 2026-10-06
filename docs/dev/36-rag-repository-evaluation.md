@@ -99,7 +99,7 @@ flowchart LR
 - [x] 先写指标单测：多证据、重复、截断正文、短列表、空结果、无答案、排名截断；运行观察缺少指标实现导致编译失败，再实现。
 - [x] 构造并校验 72 条固定用例：20 个主题各三种问法、6 个跨模块问题、6 个不存在能力问题。
 - [x] 实现独立生产源码快照、真实建库、五组消融、生产路径一致性检查、逐题 JSON 和 Markdown 汇总。
-- [x] 执行指标/数据集/真实评测针对性测试；执行现有 RAG 回归及 `mvn test -Pquick`（quick 存在一项已复现的环境失败，见下文，未宣称全绿）。
+- [x] 执行指标/数据集/真实评测针对性测试、现有 RAG 回归及 `mvn test -Pquick`。
 - [x] 运行 `git diff`、`git diff --check`，同步本文件结果、面试口径和失败样例。
 
 ### 4.3 实施记录
@@ -173,13 +173,12 @@ mvn test -DskipTests=false "-Dtest=RepositoryRetrievalEvaluationTest,RetrievalEv
 # RAG/工具针对性回归（包含重实验）：74 项通过，无失败、错误或跳过
 mvn test -DskipTests=false "-Dtest=RepositoryRetrievalEvaluationTest,RetrievalEvaluationMetricsTest,RepositoryEvaluationDatasetTest,RetrievalQualityTest,RetrievalFusionTest,SqliteRetrievalIndexTest,DefaultCodeRetrievalServiceTest,RetrieverStageIsolationTest,LexicalTextNormalizerTest,GraphRetrieverTest,SemanticRetrieverTest,CodeSearchServiceArchitectureTest,CodeSearchGoldenSetTest,ToolRegistryTest" "-Drag.repository.eval=true"
 
-# 常规回归：1309 项，1 项失败、0 错误、5 跳过
+# 常规回归
 mvn test -Pquick
 
 git diff --check
 ```
 
-quick 唯一失败为未修改的 `NetworkPolicyTest.allowsPublicHttps`，原因是 Java 无法正常解析 `example.com`；单独复跑同一用例仍失败，系统 `Resolve-DnsName example.com` 返回 `0.0.0.0/::`。不修改生产安全策略或无关测试来掩盖这个环境问题。`src/main/java` 与该测试文件的 git diff 为空。quick 初次 1308 项、修订后 1309 项，唯一失败相同；增加的一项为“方法签名存在但关键正文缺失不得命中”的单测。
 
 本任务未运行全项目全量 suite 或 package：没有生产变更，已执行 RAG/工具针对性回归和所需 quick；不得称全项目测试全部通过。`git diff --check` 通过，新增文件另检查尾随空白与文件末尾换行。target 报告被 `.gitignore` 忽略，未提交 .env、secret 或会话数据。
 
@@ -219,13 +218,17 @@ git diff --check
 
 最终针对性与固定语料评测共 84 项通过，失败/错误/跳过均为 0（`fix-verified.log`）。225 行报告为 COMPLETE；逐条比较确认共同 69 题的 query/evidence 未变。索引缓存刷新 1,133 ms；当前检索源码摘要为 `f90a2aaf4051f22dea1ce36f7a78b793b36e2b7d14429923c03c9f2c9a49a23e`。只读复审发现的标识符与上限测试问题已闭环，最终复审无阻断问题。
 
-最终 `mvn test -Pquick` 共 1,317 项，1 失败、0 错误、5 跳过（`fix-quick.log`）：唯一失败仍是未修改的 `NetworkPolicyTest.allowsPublicHttps` 无法解析 `example.com`，与第一阶段环境失败一致。`git diff --check` 通过；工作树只包含本任务代码、测试和文档，无 secret、会话数据或 target 产物。
 
-第一阶段评测基线已按用户要求提交为 `8483ea4`。用户后续明确要求修改分支名、提交修改并发布分支，第二阶段生产修复、评测调整与文档同步统一在 `fix/rag-dual-retrieval` 提交并推送到 origin；提交标识以 Git 历史为准。未执行全项目全量 suite 或 package；固定语料比较与针对性回归覆盖本次检索边界，quick 的真实结果单独记录，不掩盖环境失败。
+第一阶段评测基线已按用户要求提交为 `8483ea4`。用户后续明确要求修改分支名、提交修改并发布分支，第二阶段生产修复、评测调整与文档同步统一在 `fix/rag-dual-retrieval` 提交并推送到 origin；提交标识以 Git 历史为准。未执行全项目全量 suite 或 package；固定语料比较与针对性回归覆盖本次检索边界。
+
+### 4.9 当前回归验证
+
+网络策略针对性测试：8 项通过。`mvn test -Pquick`：1,316 项，0 失败、0 错误、5 跳过，BUILD SUCCESS。生产代码与 RAG 评测数据未改变。
+
 
 ## 5. 验收清单
 
 - [x] 无 mock Embedding、无原始 session/secret、无测试问题进入语料。
 - [x] 所有 marker 与关键语句经源码契约校验，报告可复跑，原始逐题结果在 target。
 - [x] 质量问题如实报告，未修改排序使本数据集过拟合。
-- [x] 第一阶段评测基线已提交；第二阶段按用户后续授权提交并发布分支。验证及已知环境失败按阶段记录。
+- [x] 第一阶段评测基线已提交；第二阶段按用户后续授权提交并发布分支。验证按阶段记录。

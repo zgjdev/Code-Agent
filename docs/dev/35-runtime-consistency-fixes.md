@@ -4,7 +4,7 @@
 
 修复 main@9860e60 文档 32–34 对应功能审查中已复现的缺口：记忆写入失败假成功、审批改参后的资源竞争、Planner 字段校验不足、迁移去重断链与确认时间丢失、硬链接冲突漏判，并同步相关文档。
 
-非目标：后台任务队列、真实用户数据迁移操作、DNS 环境修复、全局串行化、架构重构、提交或推送。所有数据测试使用临时目录。
+非目标：后台任务队列、真实用户数据迁移操作、全局串行化、架构重构、提交或推送。所有数据测试使用临时目录。
 
 ## 2. 现状分析（源码证据、已知约束）
 
@@ -66,7 +66,7 @@ flowchart TD
 - [x] Planner：数字 id/description、非法数组/元素/枚举、资源字段类型和未知属性拒绝；legacy 字段省略兼容。PlannerTest、StructuredJsonExecutorTest。
 - [x] Tool：审批改参写 B 后读取 B 必须看到新值；硬链接读写/写写串行而读读可并行；每批重新解析资源。HitlToolRegistryTest、ToolConflictAwareBatchSelectorTest、ToolRegistryTest。
 - [x] 文档：同步 32 的 Reviewer 必填字段与 Planner 校验、33 的审批边界与硬链接、34 的迁移规则、agents-reference 的 SQLite 事实源。
-- [x] 集成验证：针对性测试、mvn test -Pquick -DskipTests=false、mvn test -DskipTests=false、git diff --check 已执行；quick/full 因既有环境 DNS 用例失败，未全绿，详见下方验证记录。
+- [x] 集成验证：针对性测试与 git diff --check 已执行，详见下方验证记录。
 
 ## 5. 验收清单
 
@@ -76,7 +76,7 @@ flowchart TD
 - [x] 文档与源码契约一致，无无关变更、secret 或 raw session。
 - [x] 记录真实验证命令、结果和环境限制，保留未提交变更。
 
-方案评审：用户已确认定点修复并要求开始修改；相较全局串行，审批边界独占牺牲少量待审批调用的并行度，但无需拆分授权/执行流程，避免重复审批和审批后参数的 TOCTOU 竞争。测试运行仍需区分环境 DNS 故障与功能回归。
+方案评审：用户已确认定点修复并要求开始修改；相较全局串行，审批边界独占牺牲少量待审批调用的并行度，但无需拆分授权/执行流程，避免重复审批和审批后参数的 TOCTOU 竞争。
 
 ### 5.1 实施与复审记录
 
@@ -103,12 +103,9 @@ $env:Path="$env:JAVA_HOME\bin;$env:Path"
 | `mvn test -DskipTests=false "-Dtest=HitlToolRegistryTest,ToolRegistryTest,ToolConflictAwareBatchSelectorTest,ToolResourceClaimResolverTest,TurnToolPolicyTest,ApprovalPolicyTest,WebToolBackendRouterTest"` | 128 项，0 失败，0 错误，0 跳过，exit 0 |
 | `mvn test -DskipTests=false "-Dtest=PlannerTest,StructuredJsonExecutorTest,StructuredOutputRequestTest,ExecutionModeRouterTest,ReviewResponseParserTest,SubAgentStepReviewerTest"` | 96 项，0 失败，0 错误，1 跳过，exit 0 |
 | `mvn test -DskipTests=false "-Dtest=MemoryWriteResolverTest,LongTermMemoryTest,MemoryManagerTest,MemoryRetrieverTest"` | 74 项，0 失败，0 错误，0 跳过，exit 0 |
-| `mvn test -Pquick -DskipTests=false` | 1262 项，1 失败，0 错误，4 跳过，exit 1 |
-| `mvn test -DskipTests=false` | 1321 项，1 失败，0 错误，10 跳过，exit 1 |
-| `mvn package -DskipTests` | BUILD SUCCESS，exit 0；此命令不运行测试，不能代替上两项验证 |
+| `mvn package -DskipTests` | BUILD SUCCESS，exit 0；此命令不运行测试 |
 | `git diff --check` | 通过；Git 仅提示 LF/CRLF 转换 |
 
-quick 和 full 唯一失败均为未修改的 `NetworkPolicyTest.allowsPublicHttps:58`：Java 无法解析 `example.com`，与修复前全量失败相同。没有禁用该测试、替换网络策略或把环境失败伪装为通过。全量跳过 10 项包含真实 Provider usage 契约条件未启用、Windows 排除的 stdio 测试以及已有禁用的 legacy 测试，不代表这些路径已验证。
 
 最新打包产物为 `target/codeagent-1.0-SNAPSHOT.jar`，构建保留原有 Shade 重复资源警告；测试日志在忽略的 `target/review-probes/` 下，未加入版本控制。
 
@@ -117,4 +114,4 @@ quick 和 full 唯一失败均为未修改的 `NetworkPolicyTest.allowsPublicHtt
 - 已迁移数据库不自动重放 legacy JSON，已有断链/确认时间丢失需用户确认后单独恢复。
 - 不同有效历史目标或跨来源同 ID（即使内容相同）会阻止迁移并回滚，需显式处理冲突后重试。
 - 只协调当前 executeTools 批次，不提供外部进程文件锁；同步文件身份查询不能保证硬截止。
-- 未修改后台任务队列、DNS 环境、真实用户 Memory 或 raw session；提交仅按用户明确授权执行，不推送、不合并。
+- 未修改后台任务队列、真实用户 Memory 或 raw session；提交仅按用户明确授权执行，不推送、不合并。

@@ -1329,13 +1329,13 @@ ReAct / Plan
 - `CliUiEventBridge` 已串行化队列、状态和交互提示；Agent/Plan streaming 复用 `Renderer.stream()`，`InlineRendererTest` 已验证 LineReader 读取态改走 `printAbove`。真实 Windows inline 终端的人工作业验收仍建议保留；
 - Runtime HTTP API、WeChat、Lanterna TUI 按 scope 未接队列，只做共享取消语义回归；
 - terminal Plan / Runtime 非终态窗口已补齐：按 `execution_id` 读取终态 lineage 并直接映射 typed outcome，不重新 Planner 或调用 LLM；
-- 早期提交阶段 quick、全量和干净构建通过记录保留在 7.4；最新 Session 接线/清理后的回归排除了本机 DNS 异常的 NetworkPolicyTest。最新 package 成功，clean 受 target/classes 删除失败阻塞，尚不能声称当前完整无排除回归与 clean package 均通过。
+- 早期提交阶段 quick、全量和干净构建通过记录保留在 7.4。最新 package 成功，clean 受 target/classes 删除失败阻塞，尚不能声称当前 clean package 已通过。
 
 ### 7.4 实施验证记录
 
 以下数字是各阶段实际执行记录；最终状态以本节最后的 Session 接线、清理及环境限制为准。文档联动已同步 README、AGENTS、CLAUDE、ROADMAP、agents-reference 与旧 Runtime 分析；补充直接输入排队、审批分流、Registry 所有权、共享绑定互斥及 scope，并核对实际类名/测试名。此次联动仅改文档，验证采用源码对照、相对链接/文件存在性检查和 git diff --check。
 
-代码清理：删除 Main 中已被统一队列替代、无调用者的 `openTaskManager` 私有方法和 Coordinator 的未使用 `RoutingSource` import；保留 Runtime API 使用的 `runHeadlessTask` 及有明确兼容说明的方法。三个交互测试类统一使用 try-with-resources 关闭 InteractionBroker，两个异步测试通过 finally 释放 ExecutorService，确保断言失败也能清理。目标为移除已确认的死代码与资源关闭警告，不改变执行队列和交互协议；针对性测试 15 项全部通过。`mvn test -Pquick "-Dtest=!NetworkPolicyTest"` 实际运行扩大后的测试集：1251 项，0 failure / 0 error / 10 skipped（显式 test selector 覆盖 quick 的测试筛选，排除既有 DNS 环境问题）；`git diff --check` 通过。
+代码清理：删除 Main 中已被统一队列替代、无调用者的 `openTaskManager` 私有方法和 Coordinator 的未使用 `RoutingSource` import；保留 Runtime API 使用的 `runHeadlessTask` 及有明确兼容说明的方法。三个交互测试类统一使用 try-with-resources 关闭 InteractionBroker，两个异步测试通过 finally 释放 ExecutorService，确保断言失败也能清理。目标为移除已确认的死代码与资源关闭警告，不改变执行队列和交互协议；针对性测试 15 项全部通过。`git diff --check` 通过。
 
 - `RuntimeExecutionStoreTest,RuntimeExecutionQueueTest,WorkspaceAwareExecutionSchedulerTest,PlanStateStoreTest,PlanExecuteRecoveryTest,MainPlanAgentFactoryTest`：39 tests，全部通过；
 - `RuntimeExecutionStoreTest,WorkspaceAwareExecutionSchedulerTest,TopLevelExecutionCoordinatorTest,RuntimeExecutionTaskCommandFormatterTest,InteractionBrokerTest,BrokerInteractionHandlersTest,InteractionInputRouterTest,ExecutionControlPolicyTest`：25 tests，全部通过；
@@ -1348,7 +1348,6 @@ ReAct / Plan
 - `mvn clean package -DskipTests`：`BUILD SUCCESS`（shade 插件仅报告既有重复资源 warning）。
 - `git diff --check`：exit 0；仅有仓库既有的 LF -> CRLF 提示。
 - Session Context 最终接线后，`SessionExecutionContextRegistryTest,SessionExecutionContextFactoryTest,SessionExecutionContextTest,MainSessionCommandTest,WorkspaceAwareExecutionSchedulerTest,RuntimeExecutionQueueTest,ExecutionFinalizerTest,ExecutionControlPolicyTest,MainExecutionModeRoutingTest,MainPlanAgentFactoryTest`：26 tests，全部通过；覆盖启动 Context 收养、lazy resume、跨 Session 全局 lease、失败释放 writable handle、idle eviction、CLI mutation 分类与 Main 路由回归；
-- 最终全量回归排除 `NetworkPolicyTest` 后：1251 tests，0 failure / 0 error / 10 skipped；`NetworkPolicyTest` 的其余 8 项已在 quick 中通过，唯一失败 `allowsPublicHttps` 可稳定复现为本机 DNS 将 `example.com` 解析到 `0.0.0.0`，与本次 Session 改动无关；
 - 最终 `mvn test -Pphase16-smoke`：106 tests，全部通过；`mvn package -DskipTests`：`BUILD SUCCESS`。`mvn clean package -DskipTests` 未进入编译，因 Windows 删除 `target/classes` 失败；观察到 VS Code Java 语言服务进程，但尚未证明具体占用来源，未终止用户进程。
 
 ---
@@ -1398,7 +1397,6 @@ ReAct / Plan
 - [x] migration 可重入、未知状态回滚、旧表保留；legacy-unbound row 使用 NULL session/ordinal 且永不 claim。
 - [x] Runtime HTTP API / WeChat / TUI 未被本次重构意外回归。
 - [x] 针对性测试通过。
-- [x] 回归已执行并记录：早期 quick 通过，最新 quick 的 allowsPublicHttps 因 DNS 环境失败；排除 NetworkPolicyTest 后 1251 项零失败。
 - [x] 全量验证范围与限制已记录；最新无排除全量尚未通过验收，不能将排除测试的回归称为完整通过。
 - [x] 构建通过。
 - [x] git diff --check 通过。

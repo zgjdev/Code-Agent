@@ -756,48 +756,6 @@
     ]
   },
   {
-    "id": "graph-identifier",
-    "category": "identifier",
-    "query": "GraphRetriever retrieve",
-    "evidence": [
-      {
-        "path": "src/main/java/com/codeagent/rag/stage/GraphRetriever.java",
-        "marker": "@Override public List<RetrievalCandidate> retrieve(RetrievalContext context)",
-        "requiredText": [
-          "return context.index().searchRelations(context.request().projectRoot(), seeds, 20);"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "graph-semantic",
-    "category": "semantic",
-    "query": "关系图检索如何从符号种子查找代码关系？",
-    "evidence": [
-      {
-        "path": "src/main/java/com/codeagent/rag/stage/GraphRetriever.java",
-        "marker": "@Override public List<RetrievalCandidate> retrieve(RetrievalContext context)",
-        "requiredText": [
-          "return context.index().searchRelations(context.request().projectRoot(), seeds, 20);"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "graph-paraphrase",
-    "category": "paraphrase",
-    "query": "查某个符号有关联的代码时，图检索先找什么再找什么？",
-    "evidence": [
-      {
-        "path": "src/main/java/com/codeagent/rag/stage/GraphRetriever.java",
-        "marker": "@Override public List<RetrievalCandidate> retrieve(RetrievalContext context)",
-        "requiredText": [
-          "return context.index().searchRelations(context.request().projectRoot(), seeds, 20);"
-        ]
-      }
-    ]
-  },
-  {
     "id": "budget-identifier",
     "category": "identifier",
     "query": "RetrievalBudget apply",
@@ -1003,7 +961,7 @@
   },
   {
     "id": "relation-probe-1",
-    "category": "relation_probe",
+    "category": "symbol_reference",
     "query": "resolveRealPath",
     "evidence": [
       {
@@ -1017,7 +975,7 @@
   },
   {
     "id": "relation-probe-2",
-    "category": "relation_probe",
+    "category": "symbol_reference",
     "query": "topologicalSort",
     "evidence": [
       {
@@ -1031,7 +989,7 @@
   },
   {
     "id": "relation-probe-3",
-    "category": "relation_probe",
+    "category": "symbol_reference",
     "query": "hasUsableAnchor",
     "evidence": [
       {
@@ -1045,7 +1003,7 @@
   },
   {
     "id": "relation-probe-4",
-    "category": "relation_probe",
+    "category": "symbol_reference",
     "query": "fitLines",
     "evidence": [
       {
@@ -1059,7 +1017,7 @@
   },
   {
     "id": "relation-probe-5",
-    "category": "relation_probe",
+    "category": "symbol_reference",
     "query": "fallbackTool",
     "evidence": [
       {
@@ -1073,7 +1031,7 @@
   },
   {
     "id": "relation-probe-6",
-    "category": "relation_probe",
+    "category": "symbol_reference",
     "query": "parseJson",
     "evidence": [
       {

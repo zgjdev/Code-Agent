@@ -22,14 +22,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @SuppressWarnings("deprecation") // Covers the documented legacy constructor overload.
 class DefaultCodeRetrievalServiceTest {
     @Test
-    void executesOnlyTermGraphAndSemanticStagesWithoutLiveFallback(@TempDir Path temp) throws Exception {
+    void executesOnlyTermAndSemanticStagesWithoutLiveFallback(@TempDir Path temp) throws Exception {
         Path root = Files.createDirectories(temp.resolve("project"));
         Files.writeString(root.resolve("Router.java"), "class Router { void routeRequest() {} }");
         try (DefaultCodeRetrievalService service = service(temp, Optional.empty())) {
             RetrievalResponse response = service.search(new RetrievalRequest(root,
                     "Router routeRequest", 5, 4000, true, RetrievalIntent.CHUNKS));
             assertTrue(response.hits().isEmpty(), "RAG must not fall back to live grep");
-            assertEquals(Set.of(RetrievalSource.FTS_TERMS, RetrievalSource.GRAPH,
+            assertEquals(Set.of(RetrievalSource.FTS_TERMS,
                     RetrievalSource.SEMANTIC_LOCAL), response.diagnostics().stageHits().keySet());
         }
     }

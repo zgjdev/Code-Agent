@@ -9,6 +9,7 @@ public final class RetrievalBudget {
         int used = 0;
         boolean partial = input.size() > topK;
         for (RetrievalHit hit : input) {
+            if (hit.content().isBlank()) { partial = true; continue; }
             if (output.size() >= topK) { partial = true; break; }
             int available = maxChars - used;
             if (available <= 0) { partial = true; break; }
@@ -28,7 +29,7 @@ public final class RetrievalBudget {
     private static String fitLines(String content, int available) {
         if (content.length() <= available) return content;
         int newline = content.lastIndexOf('\n', available);
-        return newline > 0 ? content.substring(0, newline) : "";
+        return newline > 0 ? content.substring(0, newline) : content.substring(0, available);
     }
 
     public record Result(List<RetrievalHit> hits, boolean partial) {}

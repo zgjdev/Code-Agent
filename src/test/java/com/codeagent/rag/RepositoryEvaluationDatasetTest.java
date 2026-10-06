@@ -22,11 +22,14 @@ class RepositoryEvaluationDatasetTest {
     }
 
     @Test void validatesRealSourceEvidenceAndBalancedCategories() throws Exception {
+        validate(Path.of("").toAbsolutePath());
+    }
+
+    static void validate(Path root) throws Exception {
         var cases = load();
-        assertEquals(78, cases.size());
+        assertEquals(75, cases.size());
         var ids = new HashSet<String>();
         var queries = new HashSet<String>();
-        Path root = Path.of("").toAbsolutePath();
         for (var item : cases) {
             assertTrue(ids.add(item.id()), item.id());
             assertTrue(queries.add(item.query()), item.query());
@@ -48,9 +51,9 @@ class RepositoryEvaluationDatasetTest {
             }
         }
         for (String category : List.of("identifier", "semantic", "paraphrase"))
-            assertEquals(20, cases.stream().filter(c -> c.category().equals(category)).count());
+            assertEquals(19, cases.stream().filter(c -> c.category().equals(category)).count());
         assertEquals(6, cases.stream().filter(c -> c.category().equals("cross_module")).count());
         assertEquals(6, cases.stream().filter(c -> c.category().equals("no_answer")).count());
-        assertEquals(6, cases.stream().filter(c -> c.category().equals("relation_probe")).count());
+        assertEquals(6, cases.stream().filter(c -> c.category().equals("symbol_reference")).count());
     }
 }

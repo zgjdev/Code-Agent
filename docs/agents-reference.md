@@ -311,6 +311,8 @@ LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖�
 ### ToolRegistry.java
 11 个核心内置工具 + MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult。代码理解默认路径是 `glob_files` / `grep_code` / `read_file` 现用现查，`grep_code` 优先走 ripgrep 并按 `max_results` / `head_limit` / `max_chars` 渐进返回，且不依赖 RAG index。`search_code` 只组合 Term FTS（SQLite FTS5 + BM25）、Semantic（BGE + cosine）和 Graph 三类召回；Graph 内部使用 Symbol Index 找 seed，Symbol 不独立进入 Weighted RRF。确定性搜索链路的回归样例见 `docs/code-search-golden-set.md`，三路 RAG 设计见 `docs/dev/25-simplify-code-rag-retrieval.md`。
 
+真实生产 Java 语料的离线 RAG 评测、指标口径、五组消融及运行命令见 [36-rag-repository-evaluation.md](dev/36-rag-repository-evaluation.md)。重实验需显式设置 `-Drag.repository.eval=true`，日常 quick 跳过；结果只表示固定标注集上的检索质量，不代表最终回答正确率。
+
 ### MCP Package
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/
 

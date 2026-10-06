@@ -1,0 +1,1088 @@
+[
+  {
+    "id": "tokens-identifier",
+    "category": "identifier",
+    "query": "ContextTokenTracker predict",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/context/ContextTokenTracker.java",
+        "marker": "public ContextPrediction predict(RequestSnapshot current)",
+        "requiredText": [
+          "long full = current.estimatedRequestTokens();"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "tokens-semantic",
+    "category": "semantic",
+    "query": "请求发送前如何预测上下文 token 用量？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/context/ContextTokenTracker.java",
+        "marker": "public ContextPrediction predict(RequestSnapshot current)",
+        "requiredText": [
+          "long full = current.estimatedRequestTokens();"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "tokens-paraphrase",
+    "category": "paraphrase",
+    "query": "还没调用模型时怎么判断聊天窗口快装不下了？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/context/ContextTokenTracker.java",
+        "marker": "public ContextPrediction predict(RequestSnapshot current)",
+        "requiredText": [
+          "long full = current.estimatedRequestTokens();"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "mode-identifier",
+    "category": "identifier",
+    "query": "ExecutionModeRouter parseMode",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/agent/ExecutionModeRouter.java",
+        "marker": "private static ExecutionMode parseMode(JsonNode root)",
+        "requiredText": [
+          "default -> throw new IOException(\"Unknown execution mode\");"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "mode-semantic",
+    "category": "semantic",
+    "query": "执行模式路由结果如何校验为 REACT 或 PLAN？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/agent/ExecutionModeRouter.java",
+        "marker": "private static ExecutionMode parseMode(JsonNode root)",
+        "requiredText": [
+          "default -> throw new IOException(\"Unknown execution mode\");"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "mode-paraphrase",
+    "category": "paraphrase",
+    "query": "模型给了不认识的执行方式，哪里负责拒绝它？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/agent/ExecutionModeRouter.java",
+        "marker": "private static ExecutionMode parseMode(JsonNode root)",
+        "requiredText": [
+          "default -> throw new IOException(\"Unknown execution mode\");"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "parent-identifier",
+    "category": "identifier",
+    "query": "ParentConversationContext synchronizeProviderFromProjection",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/history/ParentConversationContext.java",
+        "marker": "public synchronized void synchronizeProviderFromProjection()",
+        "requiredText": [
+          "providerMessages.addAll(projection.messages());"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "parent-semantic",
+    "category": "semantic",
+    "query": "如何从持久化投影同步模型发送上下文？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/history/ParentConversationContext.java",
+        "marker": "public synchronized void synchronizeProviderFromProjection()",
+        "requiredText": [
+          "providerMessages.addAll(projection.messages());"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "parent-paraphrase",
+    "category": "paraphrase",
+    "query": "恢复会话后，发给模型的聊天列表在哪里重新装回去？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/history/ParentConversationContext.java",
+        "marker": "public synchronized void synchronizeProviderFromProjection()",
+        "requiredText": [
+          "providerMessages.addAll(projection.messages());"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "path-identifier",
+    "category": "identifier",
+    "query": "PathGuard resolveSafe",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/policy/PathGuard.java",
+        "marker": "public Path resolveSafe(String input)",
+        "requiredText": [
+          "if (!realResolved.startsWith(rootPath))"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "path-semantic",
+    "category": "semantic",
+    "query": "文件路径如何防止越过项目根目录？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/policy/PathGuard.java",
+        "marker": "public Path resolveSafe(String input)",
+        "requiredText": [
+          "if (!realResolved.startsWith(rootPath))"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "path-paraphrase",
+    "category": "paraphrase",
+    "query": "读写文件时如何拦住跑到仓库外面的路径？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/policy/PathGuard.java",
+        "marker": "public Path resolveSafe(String input)",
+        "requiredText": [
+          "if (!realResolved.startsWith(rootPath))"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "command-identifier",
+    "category": "identifier",
+    "query": "CommandGuard check",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/policy/CommandGuard.java",
+        "marker": "public static String check(String command)",
+        "requiredText": [
+          "rule.pattern().matcher(normalized).find()"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "command-semantic",
+    "category": "semantic",
+    "query": "危险 shell 命令在哪检查和拒绝？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/policy/CommandGuard.java",
+        "marker": "public static String check(String command)",
+        "requiredText": [
+          "rule.pattern().matcher(normalized).find()"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "command-paraphrase",
+    "category": "paraphrase",
+    "query": "用户让程序执行破坏性终端指令，哪段代码会挡住？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/policy/CommandGuard.java",
+        "marker": "public static String check(String command)",
+        "requiredText": [
+          "rule.pattern().matcher(normalized).find()"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "planstore-identifier",
+    "category": "identifier",
+    "query": "PlanStateStore checkpointTask",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/plan/PlanStateStore.java",
+        "marker": "public synchronized void checkpointTask(String planId, Task task)",
+        "requiredText": [
+          "UPDATE plan_tasks"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "planstore-semantic",
+    "category": "semantic",
+    "query": "任务状态如何写入 SQLite 计划检查点？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/plan/PlanStateStore.java",
+        "marker": "public synchronized void checkpointTask(String planId, Task task)",
+        "requiredText": [
+          "UPDATE plan_tasks"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "planstore-paraphrase",
+    "category": "paraphrase",
+    "query": "一个计划步骤刚完成，哪里把进度存下来以便下次恢复？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/plan/PlanStateStore.java",
+        "marker": "public synchronized void checkpointTask(String planId, Task task)",
+        "requiredText": [
+          "UPDATE plan_tasks"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "dag-identifier",
+    "category": "identifier",
+    "query": "ExecutionPlan computeExecutionOrder",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/plan/ExecutionPlan.java",
+        "marker": "public boolean computeExecutionOrder()",
+        "requiredText": [
+          "if (!topologicalSort(task, visited, visiting))"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "dag-semantic",
+    "category": "semantic",
+    "query": "计划如何做拓扑排序并检测依赖环？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/plan/ExecutionPlan.java",
+        "marker": "public boolean computeExecutionOrder()",
+        "requiredText": [
+          "if (!topologicalSort(task, visited, visiting))"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "dag-paraphrase",
+    "category": "paraphrase",
+    "query": "几个任务互相等对方完成，这种循环依赖在哪里发现？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/plan/ExecutionPlan.java",
+        "marker": "public boolean computeExecutionOrder()",
+        "requiredText": [
+          "if (!topologicalSort(task, visited, visiting))"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "conflict-identifier",
+    "category": "identifier",
+    "query": "ConflictAwareBatchSelector select",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/plan/ConflictAwareBatchSelector.java",
+        "marker": "public List<Task> select(List<Task> readyInExecutionOrder, int maxConcurrency)",
+        "requiredText": [
+          "existing.getResourceClaims(), candidate.getResourceClaims()"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "conflict-semantic",
+    "category": "semantic",
+    "query": "就绪任务如何按资源冲突选择并行批次？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/plan/ConflictAwareBatchSelector.java",
+        "marker": "public List<Task> select(List<Task> readyInExecutionOrder, int maxConcurrency)",
+        "requiredText": [
+          "existing.getResourceClaims(), candidate.getResourceClaims()"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "conflict-paraphrase",
+    "category": "paraphrase",
+    "query": "多个步骤都能开始时，怎样挑出不会同时改同一处的那一组？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/plan/ConflictAwareBatchSelector.java",
+        "marker": "public List<Task> select(List<Task> readyInExecutionOrder, int maxConcurrency)",
+        "requiredText": [
+          "existing.getResourceClaims(), candidate.getResourceClaims()"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "memoryread-identifier",
+    "category": "identifier",
+    "query": "MemoryRetriever retrieveLongTerm",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/memory/MemoryRetriever.java",
+        "marker": "public List<MemoryEntry> retrieveLongTerm(String query, int limit, String projectKey)",
+        "requiredText": [
+          "longTermMemory.getActiveVisible(projectKey)"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "memoryread-semantic",
+    "category": "semantic",
+    "query": "长期记忆如何只检索当前项目可见的相关事实？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/memory/MemoryRetriever.java",
+        "marker": "public List<MemoryEntry> retrieveLongTerm(String query, int limit, String projectKey)",
+        "requiredText": [
+          "longTermMemory.getActiveVisible(projectKey)"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "memoryread-paraphrase",
+    "category": "paraphrase",
+    "query": "不同仓库保存的偏好会不会混在一起，找记忆的入口在哪？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/memory/MemoryRetriever.java",
+        "marker": "public List<MemoryEntry> retrieveLongTerm(String query, int limit, String projectKey)",
+        "requiredText": [
+          "longTermMemory.getActiveVisible(projectKey)"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "memorywrite-identifier",
+    "category": "identifier",
+    "query": "MemoryWriteResolver SUPERSEDE",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/memory/MemoryWriteResolver.java",
+        "marker": "if (decision.action() == MemoryRelationClassifier.Action.SUPERSEDE)",
+        "requiredText": [
+          "source.contains(evidence)"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "memorywrite-semantic",
+    "category": "semantic",
+    "query": "覆盖旧记忆前如何验证用户原文 evidence？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/memory/MemoryWriteResolver.java",
+        "marker": "if (decision.action() == MemoryRelationClassifier.Action.SUPERSEDE)",
+        "requiredText": [
+          "source.contains(evidence)"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "memorywrite-paraphrase",
+    "category": "paraphrase",
+    "query": "模型想把旧事实作废时，在哪里要求用户这句话有明确更新证据？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/memory/MemoryWriteResolver.java",
+        "marker": "if (decision.action() == MemoryRelationClassifier.Action.SUPERSEDE)",
+        "requiredText": [
+          "source.contains(evidence)"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index-identifier",
+    "category": "identifier",
+    "query": "IndexCoordinator execute",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/IndexCoordinator.java",
+        "marker": "private IndexRefreshResult execute(IndexRefreshRequest request, boolean rebuild)",
+        "requiredText": [
+          "boolean lexicalChanged = old == null || !old.contentHash().equals(file.contentHash());"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index-semantic",
+    "category": "semantic",
+    "query": "代码索引如何增量更新并删除消失的文件？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/IndexCoordinator.java",
+        "marker": "private IndexRefreshResult execute(IndexRefreshRequest request, boolean rebuild)",
+        "requiredText": [
+          "boolean lexicalChanged = old == null || !old.contentHash().equals(file.contentHash());"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index-paraphrase",
+    "category": "paraphrase",
+    "query": "源码只改了一部分，哪里避免每次都重新建立全部索引？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/IndexCoordinator.java",
+        "marker": "private IndexRefreshResult execute(IndexRefreshRequest request, boolean rebuild)",
+        "requiredText": [
+          "boolean lexicalChanged = old == null || !old.contentHash().equals(file.contentHash());"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "fusion-identifier",
+    "category": "identifier",
+    "query": "RetrievalFusion fuse",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/RetrievalFusion.java",
+        "marker": "public List<RetrievalHit> fuse(",
+        "requiredText": [
+          "accumulator.score += WEIGHTS.getOrDefault(source, 1.0)"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "fusion-semantic",
+    "category": "semantic",
+    "query": "词法语义和关系图结果如何用加权 RRF 融合？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/RetrievalFusion.java",
+        "marker": "public List<RetrievalHit> fuse(",
+        "requiredText": [
+          "accumulator.score += WEIGHTS.getOrDefault(source, 1.0)"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "fusion-paraphrase",
+    "category": "paraphrase",
+    "query": "几种找代码的方法给出不同名次，最终列表在哪里合并排序？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/RetrievalFusion.java",
+        "marker": "public List<RetrievalHit> fuse(",
+        "requiredText": [
+          "accumulator.score += WEIGHTS.getOrDefault(source, 1.0)"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "snapshot-identifier",
+    "category": "identifier",
+    "query": "SnapshotService restorePreTurn",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/snapshot/SnapshotService.java",
+        "marker": "public RestoreResult restorePreTurn(int offset)",
+        "requiredText": [
+          "return manager.restorePreTurn(offset);"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "snapshot-semantic",
+    "category": "semantic",
+    "query": "如何回滚到某一轮执行之前的代码快照？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/snapshot/SnapshotService.java",
+        "marker": "public RestoreResult restorePreTurn(int offset)",
+        "requiredText": [
+          "return manager.restorePreTurn(offset);"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "snapshot-paraphrase",
+    "category": "paraphrase",
+    "query": "刚才代理把文件改坏了，退回那次修改前的入口在哪里？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/snapshot/SnapshotService.java",
+        "marker": "public RestoreResult restorePreTurn(int offset)",
+        "requiredText": [
+          "return manager.restorePreTurn(offset);"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "structured-identifier",
+    "category": "identifier",
+    "query": "StructuredJsonExecutor execute",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/llm/StructuredJsonExecutor.java",
+        "marker": "public <T> Result<T> execute(LlmClient client,",
+        "requiredText": [
+          "attemptMessages.add(LlmClient.Message.user(repairInstruction(spec, validationFailure)));"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "structured-semantic",
+    "category": "semantic",
+    "query": "结构化 JSON 响应如何校验并只修复一次格式？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/llm/StructuredJsonExecutor.java",
+        "marker": "public <T> Result<T> execute(LlmClient client,",
+        "requiredText": [
+          "attemptMessages.add(LlmClient.Message.user(repairInstruction(spec, validationFailure)));"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "structured-paraphrase",
+    "category": "paraphrase",
+    "query": "模型没有按规定返回 JSON，哪里会再给一次纠正机会？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/llm/StructuredJsonExecutor.java",
+        "marker": "public <T> Result<T> execute(LlmClient client,",
+        "requiredText": [
+          "attemptMessages.add(LlmClient.Message.user(repairInstruction(spec, validationFailure)));"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "interaction-identifier",
+    "category": "identifier",
+    "query": "InteractionInputRouter routeHitl",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/cli/InteractionInputRouter.java",
+        "marker": "private static Result routeHitl(",
+        "requiredText": [
+          "return Result.INVALID;"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "interaction-semantic",
+    "category": "semantic",
+    "query": "等待人工审批时如何处理批准拒绝和非法输入？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/cli/InteractionInputRouter.java",
+        "marker": "private static Result routeHitl(",
+        "requiredText": [
+          "return Result.INVALID;"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "interaction-paraphrase",
+    "category": "paraphrase",
+    "query": "工具在等人确认时随便输一句话，哪里避免误当成同意？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/cli/InteractionInputRouter.java",
+        "marker": "private static Result routeHitl(",
+        "requiredText": [
+          "return Result.INVALID;"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "lease-identifier",
+    "category": "identifier",
+    "query": "SessionExecutionContextRegistry acquire",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/runtime/execution/SessionExecutionContextRegistry.java",
+        "marker": "public synchronized Lease<T> acquire(String sessionId)",
+        "requiredText": [
+          "entry = new Entry<>(factory.load(sessionId));"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "lease-semantic",
+    "category": "semantic",
+    "query": "Session 执行上下文如何独占租用并懒加载？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/runtime/execution/SessionExecutionContextRegistry.java",
+        "marker": "public synchronized Lease<T> acquire(String sessionId)",
+        "requiredText": [
+          "entry = new Entry<>(factory.load(sessionId));"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "lease-paraphrase",
+    "category": "paraphrase",
+    "query": "切换聊天后怎样保证只有一个执行者能使用该会话的可写状态？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/runtime/execution/SessionExecutionContextRegistry.java",
+        "marker": "public synchronized Lease<T> acquire(String sessionId)",
+        "requiredText": [
+          "entry = new Entry<>(factory.load(sessionId));"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "web-identifier",
+    "category": "identifier",
+    "query": "WebToolBackendRouter mayFallback",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/web/WebToolBackendRouter.java",
+        "marker": "public boolean mayFallback(Route route, ToolOutput output)",
+        "requiredText": [
+          "output.failureKind() == ToolOutput.FailureKind.BACKEND_UNAVAILABLE"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "web-semantic",
+    "category": "semantic",
+    "query": "Web 后端出错时哪些失败允许降级到另一个通道？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/web/WebToolBackendRouter.java",
+        "marker": "public boolean mayFallback(Route route, ToolOutput output)",
+        "requiredText": [
+          "output.failureKind() == ToolOutput.FailureKind.BACKEND_UNAVAILABLE"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "web-paraphrase",
+    "category": "paraphrase",
+    "query": "搜索服务坏了以后，哪段代码决定能不能换备用服务？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/web/WebToolBackendRouter.java",
+        "marker": "public boolean mayFallback(Route route, ToolOutput output)",
+        "requiredText": [
+          "output.failureKind() == ToolOutput.FailureKind.BACKEND_UNAVAILABLE"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "scan-identifier",
+    "category": "identifier",
+    "query": "IndexFileScanner sensitive",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/IndexFileScanner.java",
+        "marker": "private static boolean sensitive(Path file)",
+        "requiredText": [
+          "name.equals(\"secrets.json\") || name.endsWith(\".jsonl\")"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "scan-semantic",
+    "category": "semantic",
+    "query": "代码索引如何排除密钥和原始会话文件？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/IndexFileScanner.java",
+        "marker": "private static boolean sensitive(Path file)",
+        "requiredText": [
+          "name.equals(\"secrets.json\") || name.endsWith(\".jsonl\")"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "scan-paraphrase",
+    "category": "paraphrase",
+    "query": "建代码知识库时，哪里避免把环境变量文件和私钥收进去？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/IndexFileScanner.java",
+        "marker": "private static boolean sensitive(Path file)",
+        "requiredText": [
+          "name.equals(\"secrets.json\") || name.endsWith(\".jsonl\")"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "graph-identifier",
+    "category": "identifier",
+    "query": "GraphRetriever retrieve",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/stage/GraphRetriever.java",
+        "marker": "@Override public List<RetrievalCandidate> retrieve(RetrievalContext context)",
+        "requiredText": [
+          "return context.index().searchRelations(context.request().projectRoot(), seeds, 20);"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "graph-semantic",
+    "category": "semantic",
+    "query": "关系图检索如何从符号种子查找代码关系？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/stage/GraphRetriever.java",
+        "marker": "@Override public List<RetrievalCandidate> retrieve(RetrievalContext context)",
+        "requiredText": [
+          "return context.index().searchRelations(context.request().projectRoot(), seeds, 20);"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "graph-paraphrase",
+    "category": "paraphrase",
+    "query": "查某个符号有关联的代码时，图检索先找什么再找什么？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/stage/GraphRetriever.java",
+        "marker": "@Override public List<RetrievalCandidate> retrieve(RetrievalContext context)",
+        "requiredText": [
+          "return context.index().searchRelations(context.request().projectRoot(), seeds, 20);"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "budget-identifier",
+    "category": "identifier",
+    "query": "RetrievalBudget apply",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/RetrievalBudget.java",
+        "marker": "public Result apply(List<RetrievalHit> input, int topK, int maxChars)",
+        "requiredText": [
+          "String content = fitLines(hit.content(), available);"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "budget-semantic",
+    "category": "semantic",
+    "query": "检索结果如何按 TopK 和字符预算截断？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/RetrievalBudget.java",
+        "marker": "public Result apply(List<RetrievalHit> input, int topK, int maxChars)",
+        "requiredText": [
+          "String content = fitLines(hit.content(), available);"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "budget-paraphrase",
+    "category": "paraphrase",
+    "query": "找到太多代码发不下时，在哪里限制条数和返回文本长度？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/RetrievalBudget.java",
+        "marker": "public Result apply(List<RetrievalHit> input, int topK, int maxChars)",
+        "requiredText": [
+          "String content = fitLines(hit.content(), available);"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "cross-1",
+    "category": "cross_module",
+    "query": "建代码索引时如何排除秘密文件，并只更新发生变化的源码？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/IndexFileScanner.java",
+        "marker": "private static boolean sensitive(Path file)",
+        "requiredText": [
+          "name.equals(\"secrets.json\") || name.endsWith(\".jsonl\")"
+        ]
+      },
+      {
+        "path": "src/main/java/com/codeagent/rag/IndexCoordinator.java",
+        "marker": "private IndexRefreshResult execute(IndexRefreshRequest request, boolean rebuild)",
+        "requiredText": [
+          "boolean lexicalChanged = old == null || !old.contentHash().equals(file.contentHash());"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "cross-2",
+    "category": "cross_module",
+    "query": "多种检索结果如何合并排名并控制最后发给模型的文本大小？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/RetrievalFusion.java",
+        "marker": "public List<RetrievalHit> fuse(",
+        "requiredText": [
+          "accumulator.score += WEIGHTS.getOrDefault(source, 1.0)"
+        ]
+      },
+      {
+        "path": "src/main/java/com/codeagent/rag/RetrievalBudget.java",
+        "marker": "public Result apply(List<RetrievalHit> input, int topK, int maxChars)",
+        "requiredText": [
+          "String content = fitLines(hit.content(), available);"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "cross-3",
+    "category": "cross_module",
+    "query": "计划怎么检测循环依赖，又怎么从就绪任务中选择没有资源冲突的并行批次？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/plan/ExecutionPlan.java",
+        "marker": "public boolean computeExecutionOrder()",
+        "requiredText": [
+          "if (!topologicalSort(task, visited, visiting))"
+        ]
+      },
+      {
+        "path": "src/main/java/com/codeagent/plan/ConflictAwareBatchSelector.java",
+        "marker": "public List<Task> select(List<Task> readyInExecutionOrder, int maxConcurrency)",
+        "requiredText": [
+          "existing.getResourceClaims(), candidate.getResourceClaims()"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "cross-4",
+    "category": "cross_module",
+    "query": "如何从会话投影恢复发送列表，并在发送之前预测 token 用量？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/history/ParentConversationContext.java",
+        "marker": "public synchronized void synchronizeProviderFromProjection()",
+        "requiredText": [
+          "providerMessages.addAll(projection.messages());"
+        ]
+      },
+      {
+        "path": "src/main/java/com/codeagent/context/ContextTokenTracker.java",
+        "marker": "public ContextPrediction predict(RequestSnapshot current)",
+        "requiredText": [
+          "long full = current.estimatedRequestTokens();"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "cross-5",
+    "category": "cross_module",
+    "query": "长期记忆的项目范围检索和带原文证据的旧事实替换分别在哪里实现？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/memory/MemoryRetriever.java",
+        "marker": "public List<MemoryEntry> retrieveLongTerm(String query, int limit, String projectKey)",
+        "requiredText": [
+          "longTermMemory.getActiveVisible(projectKey)"
+        ]
+      },
+      {
+        "path": "src/main/java/com/codeagent/memory/MemoryWriteResolver.java",
+        "marker": "if (decision.action() == MemoryRelationClassifier.Action.SUPERSEDE)",
+        "requiredText": [
+          "source.contains(evidence)"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "cross-6",
+    "category": "cross_module",
+    "query": "Session 上下文的独占租用和等待用户审批时的输入分流分别在哪里？",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/runtime/execution/SessionExecutionContextRegistry.java",
+        "marker": "public synchronized Lease<T> acquire(String sessionId)",
+        "requiredText": [
+          "entry = new Entry<>(factory.load(sessionId));"
+        ]
+      },
+      {
+        "path": "src/main/java/com/codeagent/cli/InteractionInputRouter.java",
+        "marker": "private static Result routeHitl(",
+        "requiredText": [
+          "return Result.INVALID;"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "absent-1",
+    "category": "no_answer",
+    "query": "支付订单的支付宝退款回调验签和自动对账在哪里实现？",
+    "evidence": []
+  },
+  {
+    "id": "absent-2",
+    "category": "no_answer",
+    "query": "用户密码的 BCrypt 加密和登录验证码发送在哪里实现？",
+    "evidence": []
+  },
+  {
+    "id": "absent-3",
+    "category": "no_answer",
+    "query": "图像目标检测 YOLO 推理和摄像头视频采集在哪里实现？",
+    "evidence": []
+  },
+  {
+    "id": "absent-4",
+    "category": "no_answer",
+    "query": "库存扣减的秒杀 Redis Lua 脚本在哪里执行？",
+    "evidence": []
+  },
+  {
+    "id": "absent-5",
+    "category": "no_answer",
+    "query": "Kubernetes 集群自动扩缩容控制器如何同步副本数量？",
+    "evidence": []
+  },
+  {
+    "id": "absent-6",
+    "category": "no_answer",
+    "query": "音频语音识别 Whisper 模型解码器在哪里加载？",
+    "evidence": []
+  },
+  {
+    "id": "relation-probe-1",
+    "category": "relation_probe",
+    "query": "resolveRealPath",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/policy/PathGuard.java",
+        "marker": "public Path resolveSafe(String input)",
+        "requiredText": [
+          "if (!realResolved.startsWith(rootPath))"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "relation-probe-2",
+    "category": "relation_probe",
+    "query": "topologicalSort",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/plan/ExecutionPlan.java",
+        "marker": "public boolean computeExecutionOrder()",
+        "requiredText": [
+          "if (!topologicalSort(task, visited, visiting))"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "relation-probe-3",
+    "category": "relation_probe",
+    "query": "hasUsableAnchor",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/context/ContextTokenTracker.java",
+        "marker": "public ContextPrediction predict(RequestSnapshot current)",
+        "requiredText": [
+          "long full = current.estimatedRequestTokens();"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "relation-probe-4",
+    "category": "relation_probe",
+    "query": "fitLines",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/rag/RetrievalBudget.java",
+        "marker": "public Result apply(List<RetrievalHit> input, int topK, int maxChars)",
+        "requiredText": [
+          "String content = fitLines(hit.content(), available);"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "relation-probe-5",
+    "category": "relation_probe",
+    "query": "fallbackTool",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/web/WebToolBackendRouter.java",
+        "marker": "public boolean mayFallback(Route route, ToolOutput output)",
+        "requiredText": [
+          "output.failureKind() == ToolOutput.FailureKind.BACKEND_UNAVAILABLE"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "relation-probe-6",
+    "category": "relation_probe",
+    "query": "parseJson",
+    "evidence": [
+      {
+        "path": "src/main/java/com/codeagent/llm/StructuredJsonExecutor.java",
+        "marker": "public <T> Result<T> execute(LlmClient client,",
+        "requiredText": [
+          "attemptMessages.add(LlmClient.Message.user(repairInstruction(spec, validationFailure)));"
+        ]
+      }
+    ]
+  }
+]

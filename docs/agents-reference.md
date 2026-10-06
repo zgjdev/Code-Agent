@@ -364,7 +364,8 @@ EMBEDDING_MODE=local
 # EMBEDDING_BASE_URL=https://open.bigmodel.cn/api/paas/v4
 # EMBEDDING_API_KEY=your_api_key_here
 # CODEAGENT_LOG_LEVEL=INFO
-# CODEAGENT_LOG_DIR=/Users/yourname/.codeagent/logs
+# 日志目录默认使用 ~/.codeagent/logs，自动创建，无需填写；自定义时取消下行注释
+# CODEAGENT_LOG_DIR=~/.codeagent/logs
 # CODEAGENT_LOG_MAX_HISTORY=7
 # CODEAGENT_LOG_MAX_FILE_SIZE=10MB
 # CODEAGENT_LOG_TOTAL_SIZE_CAP=100MB

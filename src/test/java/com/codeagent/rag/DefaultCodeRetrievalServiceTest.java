@@ -22,6 +22,35 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @SuppressWarnings("deprecation") // Covers the documented legacy constructor overload.
 class DefaultCodeRetrievalServiceTest {
     @Test
+    void invalidLocalDirectoryStillServesFtsWithSpecificDiagnostic(@TempDir Path temp) throws Exception {
+        Path root = Files.createDirectories(temp.resolve("project"));
+        Files.writeString(root.resolve("Router.java"), "class Router { void routeRequest() {} }");
+        var config = new com.codeagent.config.CodeAgentConfig();
+        config.getEmbedding().setLocalModelDirectory("bad\u0000directory");
+        var resolution = new com.codeagent.rag.embedding.EmbeddingProviderFactory().resolve(config, root, null);
+        try (var service = new DefaultCodeRetrievalService(new SqliteRetrievalIndex(temp.resolve("invalid.db")), resolution)) {
+            service.refresh(new IndexRefreshRequest(root, false));
+            var response = service.search(new RetrievalRequest(root, "routeRequest", 5, 4000, false, RetrievalIntent.CHUNKS));
+            assertFalse(response.hits().isEmpty());
+            assertTrue(response.diagnostics().degradedReasonCodes().contains("local_embedding_directory_invalid"));
+        }
+    }
+
+    @Test
+    void missingQwenFilesDoNotRollbackLexicalIndex(@TempDir Path temp) throws Exception {
+        Path root = Files.createDirectories(temp.resolve("project"));
+        Files.writeString(root.resolve("Router.java"), "class Router { void routeRequest() {} }");
+        try (var service = service(temp, Optional.of(new com.codeagent.rag.embedding.InProcessQwen3EmbeddingProvider(temp.resolve("missing"))))) {
+            var refreshed = service.refresh(new IndexRefreshRequest(root, false));
+            assertEquals(1, refreshed.changedFiles());
+            assertTrue(refreshed.reasonCodes().contains("embedding_failed"));
+            var response = service.search(new RetrievalRequest(root, "routeRequest", 5, 4000, false, RetrievalIntent.CHUNKS));
+            assertFalse(response.hits().isEmpty());
+            assertTrue(response.partial());
+            assertTrue(response.diagnostics().degradedReasonCodes().stream().anyMatch(r -> r.contains("semantic")));
+        }
+    }
+    @Test
     void executesOnlyTermAndSemanticStagesWithoutLiveFallback(@TempDir Path temp) throws Exception {
         Path root = Files.createDirectories(temp.resolve("project"));
         Files.writeString(root.resolve("Router.java"), "class Router { void routeRequest() {} }");

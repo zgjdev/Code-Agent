@@ -18,6 +18,31 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IndexCoordinatorTest {
     @Test
+    void qwenSpaceBackfillsUnchangedChunksWithoutReplacingBgeOrFts(@TempDir Path temp) throws Exception {
+        Path root = Files.createDirectories(temp.resolve("project"));
+        Files.writeString(root.resolve("Router.java"), "class Router { void routeRequest() {} }");
+        try (var bge = new com.codeagent.rag.embedding.InProcessBgeEmbeddingProvider();
+             var qwen = new com.codeagent.rag.embedding.InProcessQwen3EmbeddingProvider(temp.resolve("not-loaded"));
+             var index = new SqliteRetrievalIndex(temp.resolve("migration.db"))) {
+            var oldSpace = bge.space(); var newSpace = qwen.space();
+            new IndexCoordinator(index, Optional.of(provider(oldSpace, false))).refresh(new IndexRefreshRequest(root, false));
+            var before = index.searchTerms(root, "routeRequest", 10);
+            assertFalse(before.isEmpty());
+            float[] oldQuery = new float[oldSpace.dimension()]; oldQuery[0] = 1;
+            float[] newQuery = new float[newSpace.dimension()]; newQuery[0] = 1;
+            assertTrue(index.searchVector(root, newSpace.embeddingSpaceId(), newQuery, 10).isEmpty());
+            var backfilled = new IndexCoordinator(index, Optional.of(provider(newSpace, false)))
+                    .refresh(new IndexRefreshRequest(root, false));
+            assertEquals(0, backfilled.changedFiles());
+            assertEquals(1, backfilled.unchangedFiles());
+            assertEquals(before, index.searchTerms(root, "routeRequest", 10));
+            assertFalse(index.searchVector(root, oldSpace.embeddingSpaceId(), oldQuery, 10).isEmpty());
+            assertFalse(index.searchVector(root, newSpace.embeddingSpaceId(), newQuery, 10).isEmpty());
+            assertEquals(0, new IndexCoordinator(index, Optional.of(provider(newSpace, false)))
+                    .refresh(new IndexRefreshRequest(root, false)).changedFiles());
+        }
+    }
+    @Test
     void embeddingOffStillBuildsLexicalStructureAndIncrementallyDeletes(@TempDir Path temp) throws Exception {
         Path root = Files.createDirectories(temp.resolve("project"));
         Path source = root.resolve("ContextService.java");
@@ -72,7 +97,7 @@ class IndexCoordinatorTest {
             @Override public EmbeddingLocality locality() { return EmbeddingLocality.IN_PROCESS; }
             @Override public List<float[]> embedAll(List<String> inputs) throws EmbeddingException {
                 if (fail) throw new EmbeddingException("test_failure", "failed");
-                return inputs.stream().map(ignored -> new float[]{1, 1}).toList();
+                return inputs.stream().map(ignored -> { float[] vector = new float[space.dimension()]; vector[0] = 1; return vector; }).toList();
             }
         };
     }

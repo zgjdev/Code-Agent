@@ -14,6 +14,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EmbeddingProviderFactoryTest {
 
     @Test
+    void malformedModelDirectoryDisablesOnlySemanticProvider(@TempDir Path tempDir) throws Exception {
+        var config = new CodeAgentConfig();
+        config.getEmbedding().setLocalModelDirectory("bad\u0000directory");
+        var resolution = new EmbeddingProviderFactory().resolve(config, project(tempDir), null);
+        assertTrue(resolution.provider().isEmpty());
+        assertEquals("local_embedding_directory_invalid", resolution.reason());
+        assertFalse(resolution.consentRequired());
+    }
+
+    @Test
     void defaultsToLazyLocalProvider(@TempDir Path tempDir) throws Exception {
         Path project = project(tempDir);
 
@@ -21,8 +31,19 @@ class EmbeddingProviderFactoryTest {
                 new CodeAgentConfig(), project, null);
 
         assertTrue(resolution.provider().isPresent());
+        assertEquals("local-qwen3", resolution.provider().orElseThrow().id());
+        assertEquals(1024, resolution.provider().orElseThrow().space().dimension());
         assertEquals(EmbeddingLocality.IN_PROCESS, resolution.provider().orElseThrow().locality());
         assertFalse(resolution.consentRequired());
+    }
+
+    @Test
+    void explicitBgeIsLocalRollback(@TempDir Path tempDir) throws Exception {
+        var config = new CodeAgentConfig();
+        config.getEmbedding().setProvider("bge");
+        try (var provider = new EmbeddingProviderFactory().resolve(config, project(tempDir), null).provider().orElseThrow()) {
+            assertEquals("local-bge", provider.id());
+        }
     }
 
     @Test

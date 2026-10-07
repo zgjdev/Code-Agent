@@ -19,8 +19,7 @@ import com.codeagent.rag.RetrievalIntent;
 import com.codeagent.rag.RetrievalRequest;
 import com.codeagent.rag.SqliteRetrievalIndex;
 import com.codeagent.rag.SearchResultFormatter;
-import com.codeagent.rag.embedding.EmbeddingResolution;
-import com.codeagent.rag.embedding.InProcessBgeEmbeddingProvider;
+import com.codeagent.rag.embedding.EmbeddingProviderFactory;
 import com.codeagent.search.CodeSearchRequest;
 import com.codeagent.search.CodeSearchResult;
 import com.codeagent.search.CodeSearchService;
@@ -172,8 +171,7 @@ public class ToolRegistry {
                     codeRetrievalService = new DefaultCodeRetrievalService(
                             new SqliteRetrievalIndex(directory.resolve("codebase-v2.db"),
                                     directory.resolve("codebase.db")),
-                            new EmbeddingResolution(Optional.of(new InProcessBgeEmbeddingProvider()),
-                                    "local_embedding", false));
+                            new EmbeddingProviderFactory().resolve(CodeAgentConfig.load(), Path.of(projectPath), null));
                 } catch (Exception e) {
                     throw new IllegalStateException("Unable to initialize code retrieval", e);
                 }

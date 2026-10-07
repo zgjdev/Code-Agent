@@ -2575,7 +2575,7 @@ public class Main {
                     config.save();
                     registry.getCodeRetrievalService().reconfigureEmbedding(
                             new EmbeddingProviderFactory().resolve(config, projectRoot, null));
-                    return "✅ Embedding 已切换为内置本地 BGE";
+                    return "✅ Embedding 已切换为本地 Qwen3 FP32（1024 维）；模型文件需预先安装";
                 }
                 case OFF -> {
                     embedding.setMode("off");

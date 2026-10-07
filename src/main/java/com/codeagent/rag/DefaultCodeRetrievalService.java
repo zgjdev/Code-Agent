@@ -54,6 +54,9 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
             RetrievalBudget.Result budgeted = new RetrievalBudget().apply(
                     fused, request.topK(), request.maxChars());
             List<String> reasons = new ArrayList<>(stagesResult.degradedReasonCodes());
+            if (embeddingResolution.provider().isEmpty() && embeddingResolution.reason() != null
+                    && !embeddingResolution.reason().isBlank() && !reasons.contains(embeddingResolution.reason()))
+                reasons.add(embeddingResolution.reason());
             Optional<RepositoryMap> repositoryMap = request.intent() == RetrievalIntent.ARCHITECTURE
                     ? Optional.of(new RepositoryMapSelector(index).select(
                             request.projectRoot(), request.query(), 1_500))

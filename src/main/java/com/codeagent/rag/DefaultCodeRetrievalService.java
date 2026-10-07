@@ -48,9 +48,19 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
         try {
             RetrievalContext context = new RetrievalContext(request, index,
                     embeddingResolution.provider());
-            RetrievalStageRunner.Result stagesResult = new RetrievalStageRunner().run(stages, context);
+            boolean empty;
+            try { empty = index.status(request.projectRoot()).chunkCount() == 0; }
+            catch (Exception e) { throw new IllegalStateException("Unable to inspect retrieval index", e); }
+            RetrievalStageRunner.Result stagesResult = empty
+                    ? new RetrievalStageRunner.Result(java.util.Map.of(), java.util.Map.of(),
+                            java.util.Map.of(RetrievalSource.FTS_TERMS, 0, new SemanticRetriever().source(context), 0),
+                            List.of("index_empty"))
+                    : new RetrievalStageRunner().run(stages, context);
             RetrievalPipeline.Result budgeted = new RetrievalPipeline().apply(stagesResult.rankings(), request);
             List<String> reasons = new ArrayList<>(stagesResult.degradedReasonCodes());
+            var freshness = new RetrievalFreshnessChecker().check(request.projectRoot(), index, budgeted.hits());
+            freshness.values().stream().filter(state -> !"verified".equals(state))
+                    .map(state -> "index_file_" + state).distinct().sorted().forEach(reasons::add);
             if (embeddingResolution.provider().isEmpty() && embeddingResolution.reason() != null
                     && !embeddingResolution.reason().isBlank() && !reasons.contains(embeddingResolution.reason()))
                 reasons.add(embeddingResolution.reason());
@@ -63,7 +73,7 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
             String providerId = embeddingResolution.provider().map(EmbeddingProvider::id).orElse("off");
             RetrievalDiagnostics diagnostics = new RetrievalDiagnostics(providerId,
                     stagesResult.durations(), stagesResult.hits(), reasons,
-                    SqliteRetrievalIndex.SCHEMA_VERSION);
+                    SqliteRetrievalIndex.SCHEMA_VERSION, freshness);
             return new RetrievalResponse(budgeted.hits(), repositoryMap, diagnostics, partial);
         } finally {
             providerLock.readLock().unlock();

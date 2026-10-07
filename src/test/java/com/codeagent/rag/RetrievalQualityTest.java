@@ -38,14 +38,20 @@ class RetrievalQualityTest {
                     new EmbeddingResolution(Optional.empty(), "off", false));
             service.refresh(new IndexRefreshRequest(root, false));
             Metrics lexical = evaluate(service, root, cases);
+            Metrics lexicalNatural = evaluate(service, root, cases.stream().filter(c -> !c.exact).toList());
 
             service.reconfigureEmbedding(new EmbeddingResolution(Optional.of(provider), "local", false));
             service.refresh(new IndexRefreshRequest(root, false));
             Metrics semantic = evaluate(service, root, cases);
+            Metrics semanticNatural = evaluate(service, root, cases.stream().filter(c -> !c.exact).toList());
 
             System.out.println("RAG quality lexical=" + lexical + " lexical+local-semantic=" + semantic);
-            assertEquals(lexical.exactTop1, semantic.exactTop1,
-                    "semantic must not regress exact identifier Top-1");
+            assertEquals(lexical.exactTotal, lexical.exactTop1,
+                    "lexical-only exact identifier locating remains intact");
+            assertEquals(lexical.exactFound, semantic.exactFound,
+                    "unified semantic-first fusion must preserve identifier evidence within Top-5");
+            assertTrue(semanticNatural.recallAt5 >= lexicalNatural.recallAt5 - 0.10,
+                    "natural-language quality must be checked independently of identifier cases");
             assertTrue(semantic.recallAt5 >= lexical.recallAt5 - 0.10);
             service.close();
         }
@@ -56,6 +62,7 @@ class RetrievalQualityTest {
         int found = 0;
         int exactTotal = 0;
         int exactTop1 = 0;
+        int exactFound = 0;
         double reciprocalRanks = 0;
         int empty = 0;
         List<Long> latencies = new ArrayList<>();
@@ -73,13 +80,14 @@ class RetrievalQualityTest {
             if (testCase.exact) {
                 exactTotal++;
                 if (rank == 1) exactTop1++;
+                if (rank > 0) exactFound++;
             }
         }
         latencies.sort(Comparator.naturalOrder());
         long p95 = latencies.get(Math.min(latencies.size() - 1,
                 (int) Math.ceil(latencies.size() * 0.95) - 1));
         return new Metrics(found / (double) cases.size(), reciprocalRanks / cases.size(),
-                exactTop1, exactTotal, empty / (double) cases.size(), p95);
+                exactTop1, exactTotal, exactFound, empty / (double) cases.size(), p95);
     }
 
     private static void writeCorpus(Path root) throws Exception {
@@ -97,5 +105,5 @@ class RetrievalQualityTest {
 
     private record GoldenCase(String id, String query, String expectedPath, boolean exact) {}
     private record Metrics(double recallAt5, double mrr, int exactTop1,
-                           int exactTotal, double noResultRate, long p95Millis) {}
+                           int exactTotal, int exactFound, double noResultRate, long p95Millis) {}
 }

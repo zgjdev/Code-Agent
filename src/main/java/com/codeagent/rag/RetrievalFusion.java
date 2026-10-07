@@ -60,15 +60,14 @@ public final class RetrievalFusion {
                                          String query, int limit) {
         var lexical = lane(rankings, List.of(RetrievalSource.FTS_TERMS));
         var semantic = lane(rankings, List.of(RetrievalSource.SEMANTIC_LOCAL, RetrievalSource.SEMANTIC_REMOTE));
-        boolean identifier = isIdentifierQuery(query);
-        List<RetrievalHit> primary = identifier ? lexical : semantic, secondary = identifier ? semantic : lexical;
+        List<RetrievalHit> primary = semantic, secondary = lexical;
         List<RetrievalHit> output = new ArrayList<>(); Set<String> seen = new LinkedHashSet<>();
         Map<String, Integer> perFile = new LinkedHashMap<>(); int p = 0, s = 0;
         Map<String, Set<RetrievalSource>> sources = new LinkedHashMap<>();
         rankings.forEach((source, candidates) -> candidates.forEach(c -> sources.computeIfAbsent(
                 c.filePath() + ':' + c.startLine() + ':' + c.endLine() + ':' + c.symbol(), ignored -> new LinkedHashSet<>()).add(source)));
         while (output.size() < limit && (p < primary.size() || s < secondary.size())) {
-            boolean supplement = !identifier && output.size() % 4 == 3 && s < secondary.size();
+            boolean supplement = output.size() % 4 == 3 && s < secondary.size();
             RetrievalHit hit = supplement || p >= primary.size() ? secondary.get(s++) : primary.get(p++);
             String key = hit.filePath() + ':' + hit.startLine() + ':' + hit.endLine() + ':' + hit.symbol();
             if (!seen.add(key) || perFile.getOrDefault(hit.filePath(), 0) >= 3) continue;
@@ -77,17 +76,6 @@ public final class RetrievalFusion {
             perFile.merge(hit.filePath(), 1, Integer::sum);
         }
         return List.copyOf(output);
-    }
-
-    static boolean isIdentifierQuery(String query) {
-        if (query == null || query.isBlank()) return false;
-        String[] terms = query.trim().split("\\s+");
-        boolean explicitCodeShape = false;
-        for (String term : terms) {
-            if (!term.matches("[A-Za-z_$][A-Za-z0-9_$.]*(?:\\(\\))?")) return false;
-            explicitCodeShape |= term.matches(".*(?:[a-z][A-Z]|[A-Z]{2}|[._$]|\\(\\)).*");
-        }
-        return terms.length == 1 || explicitCodeShape;
     }
 
     /** Preserve native candidate order; diversity and deduplication apply once, after interleaving. */

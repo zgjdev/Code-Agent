@@ -8,11 +8,15 @@ public final class RetrievalBudget {
         List<RetrievalHit> output = new ArrayList<>();
         int used = 0;
         boolean partial = input.size() > topK;
+        List<RetrievalHit> deferred = new ArrayList<>();
         for (RetrievalHit hit : input) {
             if (hit.content().isBlank()) { partial = true; continue; }
             if (output.size() >= topK) { partial = true; break; }
             int available = maxChars - used;
             if (available <= 0) { partial = true; break; }
+            if (!output.isEmpty() && hit.content().length() > available) {
+                deferred.add(hit); partial = true; continue;
+            }
             String content = fitLines(hit.content(), available);
             if (content.length() < hit.content().length()) partial = true;
             if (content.isEmpty() && output.isEmpty()) content = hit.content().substring(0,
@@ -22,6 +26,12 @@ public final class RetrievalBudget {
                     hit.chunkType(), hit.symbol(), content, hit.score(), hit.sources()));
             used += content.length();
             if (content.length() < hit.content().length()) break;
+        }
+        if (output.size() < topK && used < maxChars && !deferred.isEmpty()) {
+            RetrievalHit hit = deferred.get(0);
+            String content = fitLines(hit.content(), maxChars - used);
+            if (!content.isEmpty()) output.add(new RetrievalHit(hit.filePath(), hit.startLine(), hit.endLine(),
+                    hit.chunkType(), hit.symbol(), content, hit.score(), hit.sources()));
         }
         return new Result(List.copyOf(output), partial);
     }

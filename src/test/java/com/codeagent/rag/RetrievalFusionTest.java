@@ -10,11 +10,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RetrievalFusionTest {
-    @Test void explicitClassAndMethodQueryUsesLexicalLane() {
+    @Test void explicitClassAndMethodQueryStillUsesUnifiedSemanticLane() {
         var lexical = fileCandidate("Exact.java", 1, "exact");
         var semantic = fileCandidate("Other.java", 1, "other");
         var rankings = Map.of(RetrievalSource.FTS_TERMS, List.of(lexical), RetrievalSource.SEMANTIC_LOCAL, List.of(semantic));
-        assertEquals("Exact.java", new RetrievalFusion().fuse(rankings, "TaskStore restoreState", 10).get(0).filePath());
+        assertEquals("Other.java", new RetrievalFusion().fuse(rankings, "TaskStore restoreState", 10).get(0).filePath());
         assertEquals("Other.java", new RetrievalFusion().fuse(rankings, "restore interrupted tasks", 10).get(0).filePath());
     }
     @Test void typeBonusCannotReorderSemanticLane() {
@@ -53,12 +53,12 @@ class RetrievalFusionTest {
     }
 
     @Test
-    void standaloneIdentifierKeepsLexicalFirstEvenWithManySemanticResults() {
+    void standaloneIdentifierDoesNotTurnRagIntoExactSearch() {
         var lexical = fileCandidate("Exact.java", 1, "exact");
         var semantic = fileCandidate("Other.java", 1, "other");
         var hits = new RetrievalFusion().fuse(Map.of(RetrievalSource.FTS_TERMS, List.of(lexical),
                 RetrievalSource.SEMANTIC_LOCAL, List.of(semantic)), "resumePendingTasks()", 10);
-        assertEquals("Exact.java", hits.get(0).filePath());
+        assertEquals("Other.java", hits.get(0).filePath());
     }
 
     @Test
@@ -71,7 +71,7 @@ class RetrievalFusionTest {
 
         List<RetrievalHit> result = new RetrievalFusion().fuse(rankings, "Exact", 10);
 
-        assertEquals("A.java", result.get(0).filePath(), "source consensus should beat one exact boost");
+        assertEquals("A.java", result.get(0).filePath(), "native semantic order is preserved");
         assertEquals(2, result.get(0).sources().size());
         assertEquals(java.util.Set.of(RetrievalSource.SEMANTIC_LOCAL), result.get(1).sources());
         assertTrue(result.get(0).score() > result.get(1).score());

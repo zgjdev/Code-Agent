@@ -1319,11 +1319,7 @@ public class Main {
                                             com.codeagent.rag.RetrievalRequest.DEFAULT_TOP_K,
                                             com.codeagent.rag.RetrievalRequest.DEFAULT_MAX_CHARS,
                                             true, com.codeagent.rag.RetrievalIntent.CHUNKS));
-                            if (response.hits().isEmpty()) {
-                                ui.println("📭 未找到相关代码\n");
-                            } else {
-                                ui.println(SearchResultFormatter.formatForCli(query, response) + "\n");
-                            }
+                            ui.println(SearchResultFormatter.formatForCli(query, response) + "\n");
                         } catch (Exception e) {
                             ui.println("❌ 检索失败: " + e.getClass().getSimpleName() + "\n");
                         }

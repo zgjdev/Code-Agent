@@ -12,6 +12,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PromptAssemblerTest {
 
+    @Test void codeSearchGuidancePreservesIntentAndRequiresCurrentEvidence() {
+        String prompt=PromptAssembler.createDefault().assemble(PromptMode.AGENT,PromptContext.empty());
+        assertFalse(prompt.contains("\"top_k\": 5, \"intent\""));
+        assertTrue(prompt.contains("lexical_query"));
+        assertTrue(prompt.contains("store.save()"));
+        assertTrue(prompt.contains("当前源码"));
+        assertTrue(prompt.contains("重复"));
+    }
+
     @TempDir
     Path tempDir;
 

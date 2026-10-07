@@ -1,0 +1,132 @@
+{
+    "files":  {
+                  "Store.java":  "class Store {\n    void save(String payload, boolean transactionActive) {\n        if (!transactionActive) throw new IllegalStateException(\"transaction required\");\n        persist(payload);\n    }\n    void persist(String payload) { System.out.println(payload); }\n}\n",
+                  "CheckpointRecovery.java":  "import java.nio.file.Files;\nimport java.nio.file.Path;\nimport java.io.IOException;\nimport java.util.List;\nclass CheckpointRecovery {\n    List\u003cString\u003e resumeUnfinishedTask(Path checkpoint) throws IOException {\n        return loadCheckpointFromDisk(checkpoint).stream()\n            .filter(task -\u003e task.startsWith(\"unfinished:\")).toList();\n    }\n    List\u003cString\u003e loadCheckpointFromDisk(Path checkpoint) throws IOException {\n        return Files.readAllLines(checkpoint);\n    }\n}\n",
+                  "AuditLog.java":  "class AuditLog {\n    void save(String message) {\n        appendAuditLine(message);\n    }\n    void appendAuditLine(String message) { System.out.println(\"audit: \" + message); }\n}\n",
+                  "RetryPolicy.java":  "class RetryPolicy {\n    int maxRetries() { return 1; }\n}\n"
+              },
+    "cases":  [
+                  {
+                      "id":  "known-method",
+                      "query":  "看一下 store.save() 这个方法，解释保存前有哪些检查。只分析，不修改。",
+                      "scenario":  "normal",
+                      "files":  [
+                                    "Store.java"
+                                ],
+                      "facts":  {
+                                    "transactionRequired":  true
+                                },
+                      "evidence":  {
+                                       "Store.java":  [
+                                                          "!transactionActive",
+                                                          "throw new IllegalStateException",
+                                                          "persist(payload)"
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "unknown-behavior",
+                      "query":  "程序中断后，未完成的任务如何从磁盘恢复？指出实现并解释依据。只分析，不修改。",
+                      "scenario":  "normal",
+                      "files":  [
+                                    "CheckpointRecovery.java"
+                                ],
+                      "facts":  {
+                                    "unfinishedOnly":  true,
+                                    "diskCheckpoint":  true
+                                },
+                      "evidence":  {
+                                       "CheckpointRecovery.java":  [
+                                                                       "Files.readAllLines(checkpoint)",
+                                                                       "task.startsWith(\"unfinished:\")"
+                                                                   ]
+                                   }
+                  },
+                  {
+                      "id":  "mixed-intent",
+                      "query":  "为什么 store.save() 在未开启事务时保存失败？请结合实现解释，必要时查找相关机制。只分析，不修改。",
+                      "scenario":  "normal",
+                      "files":  [
+                                    "Store.java"
+                                ],
+                      "facts":  {
+                                    "transactionRequired":  true
+                                },
+                      "evidence":  {
+                                       "Store.java":  [
+                                                          "!transactionActive",
+                                                          "throw new IllegalStateException"
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "ambiguous-save",
+                      "query":  "项目中两个 save 方法分别做什么？请定位并比较，不要把同名方法当成一个。只分析，不修改。",
+                      "scenario":  "normal",
+                      "files":  [
+                                    "Store.java",
+                                    "AuditLog.java"
+                                ],
+                      "facts":  {
+                                    "auditAppendsLog":  true,
+                                    "storeUsesTransaction":  true
+                                },
+                      "evidence":  {
+                                       "Store.java":  [
+                                                          "!transactionActive"
+                                                      ],
+                                       "AuditLog.java":  [
+                                                             "appendAuditLine(message)"
+                                                         ]
+                                   }
+                  },
+                  {
+                      "id":  "absent-feature",
+                      "query":  "这个项目哪里实现了 GraphQL 订阅推送？如果没有实现证据请明确说明，不要猜测。只分析，不修改。",
+                      "scenario":  "normal",
+                      "files":  [
+
+                                ],
+                      "facts":  {
+                                    "implemented":  false
+                                },
+                      "evidence":  {
+
+                                   }
+                  },
+                  {
+                      "id":  "changed-source",
+                      "query":  "当前源码最多允许重试多少次？请定位并核实当前实现，索引可能过期。只分析，不修改。",
+                      "scenario":  "changed",
+                      "files":  [
+                                    "RetryPolicy.java"
+                                ],
+                      "facts":  {
+                                    "maxRetries":  3
+                                },
+                      "evidence":  {
+                                       "RetryPolicy.java":  [
+                                                                "return 3"
+                                                            ]
+                                   }
+                  },
+                  {
+                      "id":  "empty-index",
+                      "query":  "程序中断后，未完成的任务如何从磁盘恢复？索引可能尚未建立，请根据当前源码给出依据。只分析，不修改。",
+                      "scenario":  "empty",
+                      "files":  [
+                                    "CheckpointRecovery.java"
+                                ],
+                      "facts":  {
+                                    "unfinishedOnly":  true,
+                                    "diskCheckpoint":  true
+                                },
+                      "evidence":  {
+                                       "CheckpointRecovery.java":  [
+                                                                       "Files.readAllLines(checkpoint)",
+                                                                       "task.startsWith(\"unfinished:\")"
+                                                                   ]
+                                   }
+                  }
+              ]
+}

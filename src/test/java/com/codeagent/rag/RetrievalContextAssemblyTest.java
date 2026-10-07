@@ -30,11 +30,11 @@ class RetrievalContextAssemblyTest {
         assertEquals(1,hits.get(0).content().split("mainA",-1).length-1);
         assertTrue(hits.get(0).sources().contains(RetrievalSource.SEMANTIC_REMOTE));
     }
-    @Test void identifierAndLexicalOnlyReturnOriginalResults() {
+    @Test void identifierCanReceiveSemanticContextWhileLexicalOnlyStaysUnchanged() {
         var primary=List.of(hit("A.java",10,"primary"));
         var ranks=Map.of(RetrievalSource.SEMANTIC_LOCAL,List.of(candidate("A.java",20,"extra")));
         for(String query:List.of("Worker","Worker actionOne","resumePendingTasks()"))
-            assertEquals(primary,new RetrievalContextAssembler().assemble(primary,ranks,query,1000));
+            assertTrue(new RetrievalContextAssembler().assemble(primary,ranks,query,1000).get(0).content().contains("extra"));
         assertEquals(primary,new RetrievalContextAssembler().assemble(primary,Map.of(),"恢复任务",1000));
     }
     @Test void overlappingClassRangeCannotRemoveMethodBody() {

@@ -8,7 +8,7 @@ public final class RetrievalContextAssembler {
 
     public List<RetrievalHit> assemble(List<RetrievalHit> primary,
             Map<RetrievalSource,List<RetrievalCandidate>> rankings, String query, int maxChars) {
-        if (primary.isEmpty() || RetrievalFusion.isIdentifierQuery(query)) return primary;
+        if (primary.isEmpty()) return primary;
         List<RetrievalHit> output = new ArrayList<>(primary);
         long used = primary.stream().mapToLong(h -> h.content().length()).sum();
         Map<String,Integer> owner = new LinkedHashMap<>(), counts = new HashMap<>();

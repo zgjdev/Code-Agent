@@ -650,6 +650,7 @@ public class ToolRegistry {
                 "RAG 语义辅助检索代码库，根据自然语言描述查找相关代码块；精确符号/字符串定位请优先用 grep_code/glob_files/read_file；默认 top_k=10，可显式指定（上限 30）；正文预算16000字符",
                 createParameters(
                         new Param("query", "string", "自然语言查询描述，例如'用户登录的实现'", true),
+                        new Param("lexical_query", "string", "可选词法软线索，例如原问题中的 store.save()；不限制语义候选范围，不表示精确符号定位", false),
                         new Param("top_k", "integer", "返回结果数量（默认 10，上限 30）", false),
                         new Param("intent", "string", "检索意图：chunks（默认）或 architecture", false)
                 ),
@@ -670,10 +671,7 @@ public class ToolRegistry {
                     try {
                         var response = getCodeRetrievalService().search(new RetrievalRequest(
                                 pathGuard.getRootPath(), query, topK, RetrievalRequest.DEFAULT_MAX_CHARS,
-                                true, intent));
-                        if (response.hits().isEmpty()) {
-                            return "未找到与查询相关的代码。";
-                        }
+                                true, intent, args.get("lexical_query")));
                         return SearchResultFormatter.formatForTool(query, response);
                     } catch (Exception e) {
                         return "代码检索失败: " + e.getClass().getSimpleName();

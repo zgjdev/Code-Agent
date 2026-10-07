@@ -68,6 +68,7 @@ public final class SearchResultFormatter {
 
     public static String formatForTool(String query, RetrievalResponse response) {
         StringBuilder output = new StringBuilder("检索结果:\n");
+        if (response.hits().isEmpty()) output.append("没有候选；这不证明不存在相关实现。\n");
         appendHits(output, response, true);
         appendDiagnostics(output, response);
         return output.toString().trim();
@@ -92,6 +93,10 @@ public final class SearchResultFormatter {
                 .append(map.text()).append("\n"));
         output.append("partial: ").append(response.partial()).append("\n")
                 .append("degraded: ").append(response.diagnostics().degradedReasonCodes());
+        if (!response.diagnostics().fileFreshness().isEmpty()) {
+            output.append("\nfile_freshness: ").append(new java.util.TreeMap<>(response.diagnostics().fileFreshness()));
+            output.append("\n候选来自索引，请用 read_file 确认当前源码；changed/missing/unavailable 的旧行号不可直接用于修改。仅检查命中文件，不保证全库索引时效。\n");
+        }
     }
 
     static String buildSummary(String query, List<VectorStore.SearchResult> results) {

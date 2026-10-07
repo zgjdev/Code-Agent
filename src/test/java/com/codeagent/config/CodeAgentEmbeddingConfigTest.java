@@ -13,6 +13,13 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CodeAgentEmbeddingConfigTest {
+    @Test void localModelDirectoryHonorsConfigurationPrecedence(@TempDir Path directory) throws Exception {
+        var file = directory.resolve("config.json");
+        Files.writeString(file, "{\"embedding\":{\"localModelDirectory\":\"configured-models\"}}");
+        assertEquals("configured-models", CodeAgentConfig.load(file, Map.of("EMBEDDING_LOCAL_MODEL_DIR", "env-models")).getEmbedding().getLocalModelDirectory());
+        Files.writeString(file, "{}");
+        assertEquals("env-models", CodeAgentConfig.load(file, Map.of("EMBEDDING_LOCAL_MODEL_DIR", "env-models")).getEmbedding().getLocalModelDirectory());
+    }
 
     @Test
     void defaultsEmbeddingModeToLocal() {

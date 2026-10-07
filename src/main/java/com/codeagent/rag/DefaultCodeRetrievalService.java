@@ -49,11 +49,11 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
             RetrievalContext context = new RetrievalContext(request, index,
                     embeddingResolution.provider());
             RetrievalStageRunner.Result stagesResult = new RetrievalStageRunner().run(stages, context);
-            List<RetrievalHit> fused = new RetrievalFusion().fuse(
-                    stagesResult.rankings(), request.query(), Math.max(request.topK() * 3, 15));
-            RetrievalBudget.Result budgeted = new RetrievalBudget().apply(
-                    fused, request.topK(), request.maxChars());
+            RetrievalPipeline.Result budgeted = new RetrievalPipeline().apply(stagesResult.rankings(), request);
             List<String> reasons = new ArrayList<>(stagesResult.degradedReasonCodes());
+            if (embeddingResolution.provider().isEmpty() && embeddingResolution.reason() != null
+                    && !embeddingResolution.reason().isBlank() && !reasons.contains(embeddingResolution.reason()))
+                reasons.add(embeddingResolution.reason());
             Optional<RepositoryMap> repositoryMap = request.intent() == RetrievalIntent.ARCHITECTURE
                     ? Optional.of(new RepositoryMapSelector(index).select(
                             request.projectRoot(), request.query(), 1_500))

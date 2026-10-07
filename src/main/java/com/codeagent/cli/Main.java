@@ -1315,7 +1315,9 @@ public class Main {
                         try {
                             Path root = Path.of(currentAgent.getToolRegistry().getProjectPath());
                             var response = currentAgent.getToolRegistry().getCodeRetrievalService().search(
-                                    new com.codeagent.rag.RetrievalRequest(root, query, 5, 24_000,
+                                    new com.codeagent.rag.RetrievalRequest(root, query,
+                                            com.codeagent.rag.RetrievalRequest.DEFAULT_TOP_K,
+                                            com.codeagent.rag.RetrievalRequest.DEFAULT_MAX_CHARS,
                                             true, com.codeagent.rag.RetrievalIntent.CHUNKS));
                             if (response.hits().isEmpty()) {
                                 ui.println("📭 未找到相关代码\n");
@@ -2575,7 +2577,7 @@ public class Main {
                     config.save();
                     registry.getCodeRetrievalService().reconfigureEmbedding(
                             new EmbeddingProviderFactory().resolve(config, projectRoot, null));
-                    return "✅ Embedding 已切换为内置本地 BGE";
+                    return "✅ Embedding 已切换为本地 Qwen3 FP32（1024 维）；模型文件需预先安装";
                 }
                 case OFF -> {
                     embedding.setMode("off");

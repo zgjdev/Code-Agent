@@ -14,10 +14,32 @@ class RepositoryEvaluationDatasetTest {
                      List<RetrievalEvaluationMetrics.Evidence> evidence) {}
 
     static List<QueryCase> load() throws Exception {
+        return load("/rag/repository-evaluation.json");
+    }
+
+    static List<QueryCase> load(String resource) throws Exception {
         try (var input = RepositoryEvaluationDatasetTest.class.getResourceAsStream(
-                "/rag/repository-evaluation.json")) {
+                resource)) {
             assertNotNull(input);
             return new ObjectMapper().readValue(input, new TypeReference<>() {});
+        }
+    }
+
+    @Test void validatesSupplementalEvidenceWithoutChangingOriginalDataset() throws Exception {
+        var cases = load("/rag/repository-recall-holdout.json");
+        assertEquals(12, cases.size());
+        var originalQueries = load().stream().map(QueryCase::query).toList();
+        var ids = new HashSet<String>();
+        for (var item : cases) {
+            assertTrue(ids.add(item.id()));
+            assertFalse(originalQueries.contains(item.query()));
+            assertFalse(item.evidence().isEmpty());
+            for (var evidence : item.evidence()) {
+                String source = Files.readString(Path.of(evidence.path()));
+                assertTrue(source.contains(evidence.marker()), item.id());
+                assertFalse(evidence.requiredText().isEmpty());
+                for (var text : evidence.requiredText()) assertTrue(source.contains(text), item.id());
+            }
         }
     }
 

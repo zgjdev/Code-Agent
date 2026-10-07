@@ -58,6 +58,9 @@ public class CodeAgentConfig {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class EmbeddingConfig {
+        private String localModelDirectory;
+        public String getLocalModelDirectory() { return trimToNull(localModelDirectory); }
+        public void setLocalModelDirectory(String directory) { localModelDirectory = directory; }
         private String mode;
         private String provider;
         private String model;
@@ -84,6 +87,7 @@ public class CodeAgentConfig {
         public void setDimension(int dimension) { this.dimension = dimension; }
 
         private void applyEnvironment(Map<String, String> environment) {
+            if (isBlank(localModelDirectory)) localModelDirectory = environment.get("EMBEDDING_LOCAL_MODEL_DIR");
             if (isBlank(mode)) mode = environment.get("EMBEDDING_MODE");
             if (isBlank(provider)) provider = environment.get("EMBEDDING_PROVIDER");
             if (isBlank(model)) model = environment.get("EMBEDDING_MODEL");

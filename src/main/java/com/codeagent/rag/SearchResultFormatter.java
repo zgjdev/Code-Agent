@@ -61,19 +61,19 @@ public final class SearchResultFormatter {
     public static String formatForCli(String query, RetrievalResponse response) {
         StringBuilder output = new StringBuilder();
         output.append("📋 找到 ").append(response.hits().size()).append(" 个相关代码块:\n\n");
-        appendHits(output, response);
+        appendHits(output, response, false);
         appendDiagnostics(output, response);
         return output.toString().trim();
     }
 
     public static String formatForTool(String query, RetrievalResponse response) {
         StringBuilder output = new StringBuilder("检索结果:\n");
-        appendHits(output, response);
+        appendHits(output, response, true);
         appendDiagnostics(output, response);
         return output.toString().trim();
     }
 
-    private static void appendHits(StringBuilder output, RetrievalResponse response) {
+    private static void appendHits(StringBuilder output, RetrievalResponse response, boolean fullBody) {
         for (int i = 0; i < response.hits().size(); i++) {
             RetrievalHit hit = response.hits().get(i);
             output.append(i + 1).append(". [").append(hit.chunkType()).append(":")
@@ -81,8 +81,9 @@ public final class SearchResultFormatter {
                     .append(String.format("%.5f", hit.score())).append(" ")
                     .append(hit.filePath()).append(":").append(hit.startLine())
                     .append("-").append(hit.endLine()).append(" sources=")
-                    .append(hit.sources()).append("\n   ")
-                    .append(buildSnippet(hit.content(), 240).replace("\n", "\n   ")).append("\n\n");
+                    .append(hit.sources()).append("\n")
+                    .append(fullBody ? hit.content() : "   "+buildSnippet(hit.content(), 240).replace("\n", "\n   "))
+                    .append("\n\n");
         }
     }
 

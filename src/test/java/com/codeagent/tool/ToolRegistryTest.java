@@ -91,8 +91,10 @@ class ToolRegistryTest {
     }
 
     private static final class StubRetrievalService implements CodeRetrievalService {
+        private RetrievalRequest lastRequest;
         @Override
         public RetrievalResponse search(RetrievalRequest request) {
+            lastRequest = request;
             Optional<RepositoryMap> map = request.intent() == RetrievalIntent.ARCHITECTURE
                     ? Optional.of(new RepositoryMap("Router -> Agent", 4, false))
                     : Optional.empty();
@@ -113,6 +115,28 @@ class ToolRegistryTest {
         }
         @Override public void reconfigureEmbedding(EmbeddingResolution resolution) {}
         @Override public void close() {}
+    }
+
+    @Test
+    void searchCodeUsesChosenDefaultsAndPreservesExplicitTopK(@TempDir Path root) {
+        var registry = new ToolRegistry();
+        registry.setProjectPath(root.toString());
+        var service = new StubRetrievalService();
+        registry.setCodeRetrievalService(service);
+        for (String args : List.of("{\"query\":\"恢复任务\"}",
+                "{\"query\":\"恢复任务\",\"top_k\":\"invalid\"}")) {
+            registry.executeTools(List.of(new ToolRegistry.ToolInvocation("default", "search_code", args)));
+            assertEquals(10, service.lastRequest.topK());
+            assertEquals(16_000, service.lastRequest.maxChars());
+        }
+        for (int explicit : List.of(1, 15, 20, 0, 99)) {
+            registry.executeTools(List.of(new ToolRegistry.ToolInvocation("explicit", "search_code",
+                    MAPPER.createObjectNode().put("query", "恢复任务").put("top_k", explicit).toString())));
+            assertEquals(Math.max(1, Math.min(30, explicit)), service.lastRequest.topK());
+            assertEquals(16_000, service.lastRequest.maxChars());
+        }
+        var definition = registry.getToolDefinitions().stream().filter(t -> t.name().equals("search_code")).findFirst().orElseThrow();
+        assertTrue(definition.description().contains("top_k=10"));
     }
 
     @Test

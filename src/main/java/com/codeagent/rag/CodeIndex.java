@@ -5,6 +5,7 @@ import com.codeagent.rag.embedding.EmbeddingLocality;
 import com.codeagent.rag.embedding.EmbeddingProvider;
 import com.codeagent.rag.embedding.EmbeddingSpaceDescriptor;
 import com.codeagent.rag.embedding.InProcessBgeEmbeddingProvider;
+import com.codeagent.rag.embedding.InProcessQwen3EmbeddingProvider;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -12,10 +13,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-/** Compatibility facade over the incremental v2 retrieval index. */
-public class CodeIndex {
+/** Compatibility facade; close default instances to release their owned local model. */
+public class CodeIndex implements AutoCloseable {
     private final Optional<EmbeddingProvider> provider;
     private final ProgressListener progressListener;
+    private final boolean ownsProvider;
+    private boolean closed;
 
     @FunctionalInterface
     public interface ProgressListener {
@@ -24,11 +27,11 @@ public class CodeIndex {
     }
 
     public CodeIndex() {
-        this(Optional.of(new InProcessBgeEmbeddingProvider()), ProgressListener.noop());
+        this(Optional.of(new InProcessQwen3EmbeddingProvider(InProcessQwen3EmbeddingProvider.defaultModelDirectory())), ProgressListener.noop(), true);
     }
 
     public CodeIndex(ProgressListener progressListener) {
-        this(Optional.of(new InProcessBgeEmbeddingProvider()), progressListener);
+        this(Optional.of(new InProcessQwen3EmbeddingProvider(InProcessQwen3EmbeddingProvider.defaultModelDirectory())), progressListener, true);
     }
 
     /** Retained for source compatibility while callers migrate to EmbeddingProvider. */
@@ -43,12 +46,20 @@ public class CodeIndex {
         this(Optional.of(new ClientAdapter(client)), progressListener);
     }
 
+    /** The injected provider remains caller-owned when this facade is closed. */
     public CodeIndex(Optional<EmbeddingProvider> provider, ProgressListener progressListener) {
+        this(provider, progressListener, false);
+    }
+
+    /** Explicit ownership for the default constructors and package-local lifecycle tests. */
+    CodeIndex(Optional<EmbeddingProvider> provider, ProgressListener progressListener, boolean ownsProvider) {
         this.provider = provider == null ? Optional.empty() : provider;
         this.progressListener = progressListener == null ? ProgressListener.noop() : progressListener;
+        this.ownsProvider = ownsProvider;
     }
 
     public IndexResult index(String projectPath) {
+        if (closed) throw new IllegalStateException("Code index is closed");
         Path root = Path.of(projectPath).toAbsolutePath().normalize();
         if (!Files.isDirectory(root)) {
             String message = "路径不存在: " + projectPath;
@@ -78,6 +89,12 @@ public class CodeIndex {
     }
 
     private void emit(String message) { progressListener.onProgress(message); }
+
+    @Override public void close() {
+        if (closed) return;
+        closed = true;
+        if (ownsProvider) provider.ifPresent(EmbeddingProvider::close);
+    }
 
     public record IndexResult(int chunkCount, int relationCount, String message) {}
 

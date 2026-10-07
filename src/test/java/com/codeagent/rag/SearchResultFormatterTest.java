@@ -10,6 +10,13 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SearchResultFormatterTest {
+    @Test void toolPreservesBudgetedBodyBeyondCliPreview() {
+        String body="class Example {\n"+"// "+"x".repeat(300)+"\n// Indexed context at lines 50-52\nvoid recover() { resume(); }\n";
+        var response=new RetrievalResponse(List.of(new RetrievalHit("Example.java",1,52,"context","Example",
+                body,1,Set.of(RetrievalSource.SEMANTIC_LOCAL))),Optional.empty(),
+                new RetrievalDiagnostics("toy",Map.of(),Map.of(),List.of(),2),false);
+        assertTrue(SearchResultFormatter.formatForTool("恢复任务",response).contains(body));
+    }
 
     @Test
     void cliFormatIncludesReadableSummaryBeforeResults() {

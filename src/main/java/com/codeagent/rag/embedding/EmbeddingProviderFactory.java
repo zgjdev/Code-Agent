@@ -5,6 +5,7 @@ import okhttp3.OkHttpClient;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.nio.file.InvalidPathException;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -17,8 +18,8 @@ public final class EmbeddingProviderFactory {
         CodeAgentConfig.EmbeddingConfig embedding = config.getEmbedding();
         String mode = embedding.getMode().toLowerCase(Locale.ROOT);
         if ("off".equals(mode)) return unavailable("embedding_disabled", false);
-        if ("local".equals(mode) || "auto".equals(mode)) return local("local_embedding");
-        if (!"remote".equals(mode)) return local("unsupported_embedding_provider");
+        if ("local".equals(mode) || "auto".equals(mode)) return local(embedding, projectRoot, "local_embedding");
+        if (!"remote".equals(mode)) return local(embedding, projectRoot, "unsupported_embedding_provider");
 
         RemoteSettings settings = remoteSettings(embedding);
         if (settings == null) return unavailable("unsupported_embedding_provider", false);
@@ -37,8 +38,16 @@ public final class EmbeddingProviderFactory {
                 settings.dimension(), client, 3)), "remote_embedding", false);
     }
 
-    private static EmbeddingResolution local(String reason) {
-        return new EmbeddingResolution(Optional.of(new InProcessBgeEmbeddingProvider()), reason, false);
+    private static EmbeddingResolution local(CodeAgentConfig.EmbeddingConfig config, Path projectRoot, String reason) {
+        if ("bge".equalsIgnoreCase(config.getProvider()))
+            return new EmbeddingResolution(Optional.of(new InProcessBgeEmbeddingProvider()), reason, false);
+        try {
+            Path directory = config.getLocalModelDirectory() == null ? InProcessQwen3EmbeddingProvider.defaultModelDirectory()
+                    : projectRoot.resolve(config.getLocalModelDirectory()).toAbsolutePath().normalize();
+            return new EmbeddingResolution(Optional.of(new InProcessQwen3EmbeddingProvider(directory)), reason, false);
+        } catch (InvalidPathException e) {
+            return unavailable("local_embedding_directory_invalid", false);
+        }
     }
 
     private static EmbeddingResolution unavailable(String reason, boolean consentRequired) {

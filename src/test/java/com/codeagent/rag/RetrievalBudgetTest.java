@@ -10,6 +10,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RetrievalBudgetTest {
     @Test
+    void oversizedMiddleChunkDoesNotConsumeSpaceNeededByCompleteLaterEvidence() {
+        var first = hit("First.java", 1);
+        var huge = new RetrievalHit("Huge.java", 1, 100, "class", "huge", "x".repeat(100), 2,
+                Set.of(RetrievalSource.SEMANTIC_LOCAL));
+        var small = new RetrievalHit("Evidence.java", 1, 1, "method", "evidence", "abc", 1,
+                Set.of(RetrievalSource.SEMANTIC_LOCAL));
+        var result = new RetrievalBudget().apply(List.of(first, huge, small), 5, 10);
+        assertEquals(List.of(first, small), result.hits());
+        assertTrue(result.partial());
+    }
+    @Test
     void appliesTopKAndCharacterBudgetWithoutSplittingNormalLines() {
         RetrievalHit hit = new RetrievalHit("A.java", 1, 3, "method", "run",
                 "line one\nline two\nline three", 1, Set.of(RetrievalSource.FTS_TERMS));

@@ -35,7 +35,7 @@ For the primary entry point, see `/AGENTS.md`.
 
 ### Embedding Config
 
-配置文件 > 环境变量 > 默认值：`EMBEDDING_MODE`(local)。`local` 使用随 JAR 分发的 `bge-small-zh-v1.5-q`，不访问网络；`off` 仅关闭语义层。`remote` 需要 provider/model/endpoint/API Key 和当前项目的显式授权，可选 `glm`、`jina`、`openai-compatible`。
+配置文件 > 环境变量 > 默认值：`EMBEDDING_MODE`(local)。`local` 默认使用 Qwen3-Embedding-0.6B ONNX FP32（1024 维），通过 `embedding.localModelDirectory` / `EMBEDDING_LOCAL_MODEL_DIR` 指定固定 artifact 目录，默认 `~/.codeagent/models/qwen3-embedding-0.6b/c25a394dd583836952667c12f008335071b3f43d`。使用 `scripts/install-qwen3-model.ps1` 显式安装并校验；运行时 lazy 加载、不自动联网，初始化失败缓存到关闭或重配，仅降级语义路径。`embedding.provider=bge` 是本地回滚；`off` 仅关闭语义层。`remote` 需要 provider/model/endpoint/API Key 和当前项目的显式授权，可选 `glm`、`jina`、`openai-compatible`。
 
 ### Log Config
 
@@ -309,9 +309,13 @@ LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖�
 `ExecutionPlan` 负责 DAG 拓扑排序 / 可执行任务判定 / 进度可视化；`PlanStateStore` 负责 SQLite DAG checkpoint 与 Task 边界恢复。active Plan 按 workspace + `session_id` 关联，终态 Plan 不参与 active lookup；`findById` / `findActiveRecord` 提供 reconciliation 所需的只读持久化视图。COMPLETED Task 的 result 会恢复并继续进入下游 StepBriefing；要求 DIFF 的 durable Task 会在首次执行前把仅含相对路径与 SHA-256 的 baseline 写入 `plan_tasks.diff_baseline_json`，恢复时复用且不保存源码正文；旧版仅有 `resume_key` 且没有 `session_id` 的记录视为 legacy unbound plan，不做猜测式绑定。
 
 ### ToolRegistry.java
-11 个核心内置工具 + MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult。代码理解默认路径是 `glob_files` / `grep_code` / `read_file` 现用现查，`grep_code` 优先走 ripgrep 并按 `max_results` / `head_limit` / `max_chars` 渐进返回，且不依赖 RAG index。`search_code` 只组合 Term FTS（SQLite FTS5 + BM25）与 Semantic（BGE + cosine）。词法查询过滤问句词，严格交集的 BM25 结果优先，候选不足时补充并集并按 chunk 去重；文档规范化与 SQLite schema 不变。Graph 已退出 Weighted RRF，符号/关系索引保留用于结构地图与 `/graph`。预算跳过空正文，单行片段可按剩余字符截断。确定性搜索链路的回归样例见 `docs/code-search-golden-set.md`，双路修复设计见 [36-rag-repository-evaluation.md](dev/36-rag-repository-evaluation.md)。
+11 个核心内置工具 + MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult。代码理解默认路径是 `glob_files` / `grep_code` / `read_file` 现用现查，`grep_code` 优先走 ripgrep 并按 `max_results` / `head_limit` / `max_chars` 渐进返回，且不依赖 RAG index。`search_code` 只组合 Term FTS（SQLite FTS5 + BM25）与 Semantic（Qwen3 FP32 1024 + cosine）。词法查询过滤问句词，严格交集的 BM25 结果优先，候选不足时补充并集并按 chunk 去重；文档规范化与 SQLite schema 不变。双路融合保留各路原序，自然语言以语义为主、每四位补充词法，明确标识符（含类名与方法名组合）以词法为主；单路保留原有 RRF rank/type 分值及文件限额。Graph 已退出 RAG 融合，符号/关系索引保留用于结构地图与 `/graph`。预算跳过空正文，先保留首条、暂存放不下的后续片段并继续装入完整候选，再以剩余容量按行截断暂存片段。确定性搜索链路的回归样例见 `docs/code-search-golden-set.md`，既有双路修复设计见 [36-rag-repository-evaluation.md](dev/36-rag-repository-evaluation.md)，当前迁移与融合方案见 [26-qwen3-embedding-migration.md 第 11 节](dev/26-qwen3-embedding-migration.md#11-生产替换与融合修正设计任务及验收)。
+
+上下文补充复用同一次query向量：Semantic候选池为max(topK*10,30)，`RetrievalPipeline`先将语义候选截回旧max(topK*3,15)，执行原融合及预算，确保主片段的正文与顺序不变。`RetrievalContextAssembler`仅用剩余字符追加已选文件的完整语义chunk，每文件最多2个，跳过已选或正文重复，标记context、索引行范围并合并sources；明确标识符不追加。`search_code`输出完整预算正文，CLI仍预览240字符。`search_code`和`/search`默认Top10/16000，与固定评测配置一致，统一引用`RetrievalRequest`默认常量；工具显式`top_k`仍限定1–30，正文预算保持16000。新增上下文的证据覆盖和主chunk排序指标分开记录，不代表最终回答准确率。候选诊断、重排负实验、TopK对照与默认值变更见 [26-qwen3-embedding-migration.md 第12节](dev/26-qwen3-embedding-migration.md#12-候选池诊断与下一轮召回改进)。
 
 真实生产 Java 语料的离线 RAG 评测、指标口径、历史五组消融和当前双路复测见 [36-rag-repository-evaluation.md](dev/36-rag-repository-evaluation.md)。重实验需显式设置 `-Drag.repository.eval=true`，日常 quick 跳过；`-Drag.repository.corpus=<仓库内源码快照根目录>` 可固定语料作前后比较。结果只表示固定标注集上的检索质量，不代表最终回答正确率。
+
+固定语料上的 BGE / Qwen3 ONNX INT8（1024、512 维）及 FP32（1024 维）受控实验、artifact 校验、成本与量化参考对照见 [26-qwen3-embedding-migration.md 第 10 节](dev/26-qwen3-embedding-migration.md#10-本次受控质量实验方案任务与实施记录)。第 11 节记录生产默认迁移到 Qwen FP32 1024 与融合修正；长期 Memory 和显式 legacy EmbeddingClient 兼容 API 继续使用 BGE。
 
 ### MCP Package
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/
@@ -361,6 +365,8 @@ GLM_API_KEY=your_api_key_here
 # XFYUN_MAAS_BASE_URL=https://maas-api.cn-huabei-1.xf-yun.com/v2
 # XFYUN_MAAS_LORA_ID=0
 EMBEDDING_MODE=local
+# EMBEDDING_LOCAL_MODEL_DIR=D:/models/qwen3-embedding-0.6b
+# EMBEDDING_PROVIDER=bge  # 本地回滚
 # EMBEDDING_PROVIDER=glm
 # EMBEDDING_MODEL=embedding-3
 # EMBEDDING_BASE_URL=https://open.bigmodel.cn/api/paas/v4

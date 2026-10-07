@@ -139,6 +139,15 @@ class ToolRegistryTest {
         assertTrue(definition.description().contains("top_k=10"));
     }
 
+    @Test void searchCodePassesSoftLexicalHintWithoutChangingSemanticQuery(@TempDir Path root) {
+        var registry=new ToolRegistry(); registry.setProjectPath(root.toString());
+        var service=new StubRetrievalService(); registry.setCodeRetrievalService(service);
+        registry.executeTools(List.of(new ToolRegistry.ToolInvocation("mixed","search_code",
+                "{\"query\":\"保存失败的异常和事务处理\",\"lexical_query\":\"store.save()\"}")));
+        assertEquals("保存失败的异常和事务处理",service.lastRequest.query());
+        assertEquals("store.save()",service.lastRequest.lexicalQuery());
+    }
+
     @Test
     void executionResultCarriesTypedFailureStatus() {
         ToolRegistry registry = new ToolRegistry();

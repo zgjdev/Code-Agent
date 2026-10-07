@@ -1,6 +1,7 @@
 package com.codeagent.rag;
 
 import com.codeagent.rag.embedding.EmbeddingResolution;
+import com.codeagent.rag.embedding.EmbeddingProvider;
 import com.codeagent.rag.embedding.InProcessBgeEmbeddingProvider;
 import com.codeagent.rag.stage.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,7 +23,10 @@ class RepositoryRetrievalEvaluationTest {
 
     @Test void reportsRealRepositoryAblations() throws Exception {
         Path repository = Path.of("").toAbsolutePath().normalize();
-        Path output = Files.createDirectories(repository.resolve("target/rag-evaluation"));
+        Path output = Path.of(System.getProperty("rag.repository.output", "target/rag-evaluation"))
+                .toAbsolutePath().normalize();
+        assertTrue(output.startsWith(repository.resolve("target")), "experiment output must stay in target");
+        Files.createDirectories(output);
         Path sourceRoot = Path.of(System.getProperty("rag.repository.corpus", repository.toString()))
                 .toAbsolutePath().normalize();
         assertTrue(sourceRoot.startsWith(repository), "evaluation corpus must stay within the workspace");
@@ -60,6 +64,12 @@ class RepositoryRetrievalEvaluationTest {
                 pipelineSources.put(repository.relativize(path).toString().replace('\\', '/'), hash(Files.readAllBytes(path)));
         }
         metadata.put("pipelineSourcesSha256", hash(JSON.writeValueAsBytes(pipelineSources)));
+        Map<String, String> harnessSources = new TreeMap<>();
+        try (var paths = Files.walk(repository.resolve("src/test/java/com/codeagent/rag"))) {
+            for (Path path : paths.filter(p -> p.toString().endsWith(".java")).sorted().toList())
+                harnessSources.put(repository.relativize(path).toString().replace('\\', '/'), hash(Files.readAllBytes(path)));
+        }
+        metadata.put("evaluationHarnessSha256", hash(JSON.writeValueAsBytes(harnessSources)));
         metadata.put("corpusScope", "all src/main/java/**/*.java, excluding docs/tests/evaluation data");
         metadata.put("corpusSha256", corpusHash);
         metadata.put("files", files);
@@ -72,10 +82,23 @@ class RepositoryRetrievalEvaluationTest {
         metadata.put("javaVersion", System.getProperty("java.version"));
         metadata.put("os", System.getProperty("os.name") + " " + System.getProperty("os.arch"));
         metadata.put("availableProcessors", Runtime.getRuntime().availableProcessors());
-        var index = new SqliteRetrievalIndex(output.resolve("index-" + corpusHash + ".db"));
-        var provider = new InProcessBgeEmbeddingProvider();
-        try (var service = new DefaultCodeRetrievalService(index,
+        metadata.put("processId", ProcessHandle.current().pid());
+        String model = System.getProperty("rag.repository.model", "bge");
+        assertTrue(Set.of("bge", "qwen", "production").contains(model), "unknown experiment model");
+        metadata.put("model", model);
+        System.out.println("RAG evaluation pid=" + ProcessHandle.current().pid() + "; model=" + model);
+        long loadStarted = System.nanoTime();
+        try (EmbeddingProvider provider = model.equals("production")
+                ? new com.codeagent.rag.embedding.EmbeddingProviderFactory().resolve(new com.codeagent.config.CodeAgentConfig(), corpus, null).provider().orElseThrow()
+                : model.equals("bge") ? new InProcessBgeEmbeddingProvider()
+                : new Qwen3EvaluationProvider(repository.resolve("target/qwen-evaluation/model"),
+                Integer.getInteger("rag.qwen.dimension", 1024), repository.resolve("target/qwen-evaluation/vector-cache"),
+                Boolean.getBoolean("rag.qwen.fp32"));
+             var index = new SqliteRetrievalIndex(output.resolve("index-" + corpusHash + ".db"));
+             var service = new DefaultCodeRetrievalService(index,
                 new EmbeddingResolution(Optional.of(provider), "local", false))) {
+            provider.embedAll(List.of(new com.codeagent.rag.embedding.EmbeddingInputPolicy().prepareQuery("模型加载预热")));
+            metadata.put("providerLoadAndFirstQueryMillis", (System.nanoTime() - loadStarted) / 1_000_000);
             long started = System.nanoTime();
             System.out.println("RAG evaluation indexing " + files.size() + " production Java files");
             var refresh = service.refresh(new IndexRefreshRequest(corpus, false));
@@ -124,6 +147,11 @@ class RepositoryRetrievalEvaluationTest {
                 // Write completed modes incrementally so later failures do not erase evidence.
                 RepositoryEvaluationReport.write(output, metadata, rows);
             }
+            if (provider instanceof Qwen3EvaluationProvider qwen) metadata.put("providerStatistics", qwen.statistics());
+            metadata.put("peakJavaMemoryPools", java.lang.management.ManagementFactory.getMemoryPoolMXBeans()
+                    .stream().filter(pool -> pool.getPeakUsage() != null)
+                    .collect(java.util.stream.Collectors.toMap(java.lang.management.MemoryPoolMXBean::getName,
+                            pool -> pool.getPeakUsage().getUsed())));
         }
         assertEquals(75 * 3, rows.size());
         metadata.put("status", "COMPLETE");

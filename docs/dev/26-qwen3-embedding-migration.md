@@ -922,3 +922,146 @@ git diff --check
 最小方案：所有测试中的 CodeIndex 使用 try-with-resources；显式注入的 FakeEmbeddingClient 仍为 borrowed，由测试调用者自动关闭；保留 owned 只关闭一次、borrowed 不被索引器关闭、关闭后拒绝索引的断言。主类仅补所有权 Javadoc，文件更新可触发编辑器重新分析。修正后 CodeIndexTest 4 tests、0 failures、0 errors；最终 `mvn test -Pquick`：1,345 tests、0 failures、0 errors、11 skipped，BUILD SUCCESS；`git diff --check` 通过。没有可直接操作当前编辑器语言服务的工具，若仍保留 java2 旧诊断，需要在编辑器执行 Java: Clean Java Language Server Workspace 后重新加载。
 
 第 11.4 节的源码/harness 哈希保留为当时真实质量评测快照；本次注释与测试生命周期修改会改变工作区字节哈希，不改写历史报告，也不据此声称重新进行了模型质量评测。
+
+## 12. 候选池诊断与下一轮召回改进
+
+### 12.1 授权、目标与非目标
+
+用户要求先分批提交当前改动，再按候选池、排序和代码表示方向继续提升召回。已完成三笔本地提交：`b319d8f`（冻结语料与 Qwen 实验）、`686c1d6`（生产默认 Qwen 与资源管理）、`d643424`（融合预算及文档）；提交前 quick 1,345 tests、0 failures、0 errors、11 skipped，diff 检查通过。最终核对origin分支与HEAD同为d643424，remote reflog记录2026-10-07 14:26:09 update by push；这三笔已经同步远端。以下新增改动默认保留未提交，沿用当前分支及本任务唯一文档。
+
+目标是在第 11 节 72.22% 基线上提升同题 Recall@10，同时保护 19/19 标识符，记录逐题退化、MRR、时延及六个无答案误返回。非目标：打包模型入 JAR、恢复 Graph、改变 remote 授权、改 Memory、修改原题集/证据、宣称达到回答准确率。保留固定语料与已完成的向量空间，诊断阶段不重新索引。
+
+### 12.2 设计与决策边界
+
+先新增 opt-in 候选诊断：记录 FTS 与 semantic 的 raw Top30/50/100 证据覆盖、当前生产 FTS40/semantic30 联合候选覆盖、融合后30和预算后10覆盖；按每个 evidence 的消失阶段归因，正文与 marker/requiredText 必须同时匹配，不使用元数据命中。每题真实计算一次 query embedding，在同一请求内部复用给各候选深度统计，不作为缓存查询时延基准；额外实际 service 调用核对当前最终输出。
+
+候选已存在却丢失时，优先比较结构去重/文件限额与语义排序；候选不足时再考虑代码上下文、分块及更强模型。新增 cross-encoder 需要固定本地模型、明确额外部署/CPU成本；不为了单个测试问题写特殊规则。分阶段报告本身不能当作生产提升，必须实现一般策略后重新运行原75题三路评测与逐题比较。未见题集用于检测优化是否只适配原题集，原题集不变。
+
+```mermaid
+flowchart LR
+    Q[原查询 / 一次真实向量化] --> S[Semantic Top100]
+    Q --> F[FTS严格与补充 Top100]
+    S --> C[当前候选池与扩大候选覆盖]
+    F --> C
+    C --> M[融合前后30 / 文件限额损失]
+    M --> B[预算后10 / 内容裁剪损失]
+    B --> D{证据在哪个阶段消失}
+    D -->|候选存在| R[通用排序与结构去重实验]
+    D -->|候选缺失| I[上下文与表示实验]
+    R --> E[固定语料对照 / 回归 / 逐题得失]
+    I --> E
+```
+
+### 12.3 任务与验收
+
+- [x] 分批提交第 10—11 节已有改动并确认工作区干净。
+- [x] 新增真实候选池与分阶段报告，在既有索引上量化瓶颈。
+- [x] 根据诊断补一般策略回归，先观察 RED，再最小生产改动。
+- [x] 冻结代码后重新跑75题三路，核对实际 service 与测试链路一致；报告全部得失和独立补充题。
+- [x] 针对性、quick、必要全量/构建、diff及只读评审；同步行为文档。
+
+验收门槛：主集 Recall@10 高于72.22%，标识符19/19，原题集不变，无未解释的语义降级或数据空间混用；候选覆盖与最终召回分开呈现。若某一实验没有收益，保留实验事实而不启用该策略；继续依据阶段证据寻找可验证改进。
+
+### 12.4 候选诊断与重排实验边界
+
+`RepositoryCandidateRecallTest` 在原生产索引上运行，不刷新文件、不重算文档向量；75 题逐题校验诊断最终 hits 与实际 service 一致。主集语义 Top30/50/100 证据覆盖分别为 81.75% / 89.68% / 96.83%，当前双路候选池覆盖 84.92%，融合后30覆盖 78.57%，最终10为72.22%。同义转述语义 Top30/100 覆盖 52.63% / 89.47%，最终只有36.84%。这些是候选覆盖上限，不能称作最终检索召回率。
+
+已捕获原始候选以便离线比较。仅扩大30至100而保留原排序不会改变Top10；每文件限额降至1/2分别使双路召回降至57.94% / 69.84%；取消词法补充仍为72.22%，产生一得一失。没有启用这些没有收益的策略。类 chunk 正文仅含头部而其行范围覆盖整类，因此不能根据区间包含关系删除方法 chunk。
+
+下一步先验证官方 [cross-encoder/mmarco-mMiniLMv2-L12-H384-v1 固定文件](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1/tree/1427fd652930e4ba29e8149678df786c240d8825/onnx) 的本地 FP32 ONNX，固定 revision `1427fd652930e4ba29e8149678df786c240d8825`；模型470,883,696字节，SHA-256 `3e9a03ed1e966f7c5288dd4230e3d6a9bf5e3a170a06f1f4241c5bca12c6487c`；tokenizer17,082,660字节，SHA-256 `62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626`。只下载官方固定文件，不向外发送查询/代码。输入为query与path/symbol/content配对，最大512 tokens，输出单个有限logit；CPU4线程。它按多语言文本训练，代码检索收益未知，先做测试专用实验再决定是否生产接线。
+
+预先比较的通用策略：原始语义顺序、cross-encoder顺序、二者排序融合；精确标识符保留FTS优先。Top10/16000字符、正文证据与原题集不变；报告所有得失及时间，不按query ID设置规则。重排只处理现有候选，不可能恢复未进入Top100的证据。若启用，必须懒加载、哈希校验、资源关闭、故障回退原融合且给出诊断；默认运行时不联网下载。另补未参与参数选择的自然语言问题，承认源码知情且小样本，不宣称外部独立基准。
+
+### 12.5 最小生产方案：保留主片段、利用剩余预算补上下文
+
+中间 cross-encoder 结果存在显著排序退化，因此暂不生产接入，也不改变用户模型安装流程。另一个通用实验以原Top10/16000正文为不可缩减的基线，在剩余字符内补充同文件的完整语义候选；每文件最多2个，候选不超过Top100。离线63题达到79.37%，4题完整提升、1题跨模块部分提升、0题下降。只补1个为77.78%，补3个没有继续收益。该实验属于原题集上选择策略，后续用事先冻结的12个其他模块问题验证；不把这12题声称为外部盲测。
+
+实现目标是改善返回的代码上下文覆盖；非目标是提高原始chunk排序。语义stage扩大到 `max(topK*10,30)`；共同pipeline先截取原 `max(topK*3,15)` 语义候选执行原融合和预算，保证原主片段不减少、不重排。然后仅将扩展语义候选中已选文件的未返回chunk附到该文件第一条hit上，所有追加都完整且总字符不超maxChars，每文件最多2个；不新增输出槽位、不读取未索引文件、不重新向量化、不调用远端重排。明确标识符不补上下文。追加时标出indexed chunk起止行，并把hit类型标为context、行范围扩至所有片段，sources合并；跳过已选或正文已包含的重复chunk。
+
+因此新Top10是最多10条含主片段的上下文结果，可含额外方法，而旧Top10是单chunk结果；相同证据、Top10槽位与16000总字符仍可比较正文证据召回，但P@5的检索单位已变，不能称作纯chunk排序精度提升。保留原主片段指标与context后指标分别报告。Memory、FTS、Embedding输入/空间、schema、Graph、远程授权及安装脚本不改。
+
+```mermaid
+flowchart LR
+    S[一次query embedding / 语义Top100] --> P[原语义Top30与FTS40]
+    P --> F[原融合与预算 / 主片段Top10]
+    S --> X[同文件未返回候选]
+    F --> A[剩余字符预算 / 每文件最多2个完整片段]
+    X --> A
+    A --> O[保留主正文和顺序 / 标记context及行范围]
+```
+
+设计评审：追加只消费原预算余量，不能裁掉已有证据；单路语义同样适用，FTS-only保持原行为；模型失败时stage无语义候选，继续原FTS；候选数量提高只增加已计算cosine结果的保留数量，不增加模型调用。源码类chunk行范围与正文不一致时不作区间去重，去重使用chunk身份与正文包含。测试矩阵覆盖预算不足、完整追加、重复、同文件限额、不同文件隔离、标识符、单路/失败及实际service一致性。
+
+### 12.6 评审、负实验与证据边界
+
+首次只读评审发现工具输出仍把每条hit截为240字符，追加正文会被裁掉，service覆盖提升不能可靠传到Agent。先补真实SQLite→service→`ToolRegistry.executeTools(search_code)`及长正文formatter回归，观察2个断言失败，再修正 `formatForTool(RetrievalResponse)` 输出完整预算正文与原换行；`formatForCli`仍保留240字符预览。针对性50项通过，评审复查无新增Critical/Important。最终75题full逐题校验formatter包含每条完整body。工具默认Top5/24000正文字符，固定benchmark为Top10/16000，指标不能直接用于默认工具配置或最终回答。
+
+本地 cross-encoder 完整实验75题/9433个pair，模型及tokenizer哈希匹配，单logit维度与有限值检查通过，约16分21秒。捕获候选上的主集63题重排：全候选直接cross排序Recall@10 55.56%，与语义等权RRF(k=60)为67.46%，仅重排语义为57.14%，保护语义首3条后重排剩余为69.05%，均未超过72.22%。直接cross排序2题提升、14题退化（含跨模块部分证据损失）；不能据实验测试执行成功宣称质量门槛通过。pair打分每题P50/P95为12.802/19.054秒，实验期间另跑过轻量测试与短补充候选诊断，故仅为本机观测成本，不是隔离的生产延迟基准。这一路没有生产接线、没有新增安装依赖；模型来源多语言文本检索训练，代码域适配及独立官方实现parity未验证，不能把这次失败归纳为所有重排模型均无效。
+
+补充12题在策略选择前冻结，覆盖重试、LSP、Step URL、Skill、审批、路径、Execution恢复、会话压缩和Side-Git；SHA-256 `7d49b0a5b5319c4d67ff575a178273560db3ad365b5624682d859705faa58e4c`。旧pipeline正文Recall@10为10/12=83.33%，后续仅验证已选策略，不据此调参数；源码知情、小样本、没有外部标注者，因此不称为严格独立盲测。
+
+### 12.7 最终真实评测与验收证据
+
+原 corpus/dataset SHA 与第11节一致，368文件/3226chunk，75题三路共225行COMPLETE。`rag.repository.reuseIndex`严格核对原冻结corpus根、检查源数据库无未checkpoint的WAL后复制到新输出目录；只在隔离副本刷新，0 changed/368 unchanged/0 failed，旧72.22%报告与原索引均保留。新报告在 `target/qwen-recall-optimization/production/results.json` / `report.md`；配对报告 `paired-comparison.json`。
+
+| 主集63正例 / 固定Top10与16000正文字符 | P@5（结果单位不同） | Recall@5 | Recall@10 | MRR@10 |
+|---|---:|---:|---:|---:|
+| 保留的原双路主chunk | 13.33% | 61.90% | 72.22% | 0.4167 |
+| 新双路完整上下文结果 | 15.24% | 69.84% | 80.16% | 0.4776 |
+| 保留的原纯语义主chunk | 13.02% | 59.52% | 67.46% | 0.3401 |
+| 新纯语义完整上下文结果 | 14.29% | 65.08% | 73.02% | 0.3798 |
+
+FTS-only仍为Recall@10 36.51%。双路标识符19/19，语义描述18/19（94.74%），同义转述9/19（47.37%），跨模块macro75.00%；caller probes6/6。主集Recall@10较72.22%提高7.94个百分点；6题提升/0下降/57相同，MRR同样6题提升/0下降。提升清单：`planstore-paraphrase`、`structured-semantic`、`structured-paraphrase`、`scan-semantic`从0到1，`cross-1`从0.5到1，`cross-6`从0到0.5。最终80.16%不同于早期离线79.37%：真实实现还跳过正文已包含的重复候选，剩余预算使cross-1补齐。没有按题写规则。
+
+比较器逐条核验225行原primary的at5/at10全部分数、每条hit的path/行范围/symbol/正文长度/SHA/marker offsets/matchedEvidence均与旧报告完全一致，且新结果正文总量≤16000、槽位≤10。全75题actual service无降级、hits等于共同pipeline输出；工具formatter完整保留每条预算正文。指标改善来自同文件上下文覆盖，不是原chunk排序变好；P@5单位改变不能直接宣传为纯chunk精度提升，更不是回答准确率。
+
+12个预冻结补充题从10/12提升至11/12（83.33%→91.67%），1题提升/0下降；找回`holdout-mcp-approval`，`holdout-missing-path`仍未命中，未据此改策略。`holdout-candidates.json`中final10表示旧主chunk、context10表示新上下文；新service逐题校验通过。
+
+本次模型加载预热12.366秒、隔离副本无变更refresh1.682秒，没有新增文档向量化。warm主集P50/P95：FTS3.42/6.82ms、语义318.32/407.90ms、双路317.96/449.47ms；三次实际计算、一次warmup，无query缓存，模型加载/indexing/Agent回答不计入。旧双路300.21/372.55ms来自不同时间运行，不能把全部差异归因于候选扩展。没有额外Embedding请求或生产cross-encoder；更完整的工具正文会增加LLM上下文token，仍受正文预算约束，元信息另计。
+
+最终源码字节哈希手工独立复核匹配报告：pipeline `b7bb7b76c0e5b4483d6850b85d10e0fd1a331f2cd603bb4070ad941cf1f9e73f`，harness `4ff4e41d7c3b6fd25b6ccb492c5e5601c25e1cdcc8b631a8b49474e367839393`，原题集 `842bf3544c7cb7367c496588ffb286674c65eeba51c6fd61ce12a7be35ca53e2`。后续仅同步文档，未更改评测源码。
+
+实际命令（Java17，所有模型/报告均留在target或既有安装目录）：
+
+```powershell
+mvn test -DskipTests=false '-Dtest=RepositoryCandidateRecallTest' '-Drag.candidate.eval=true'
+mvn test -DskipTests=false '-Dtest=RepositoryRerankingExperimentTest' '-Drag.rerank.experiment=true'
+mvn test -DskipTests=false '-Dtest=RetrievalContextAssemblyTest,RetrievalFusionTest,RetrievalBudgetTest,DefaultCodeRetrievalServiceTest,SemanticRetrieverTest'
+mvn test -DskipTests=false '-Dtest=SearchResultFormatterTest,RetrievalContextAssemblyTest,ToolRegistryTest,CodeSearchServiceArchitectureTest'
+mvn test -DskipTests=false '-Dtest=RepositoryRetrievalEvaluationTest' '-Drag.repository.eval=true' '-Drag.repository.model=production' '-Drag.repository.output=target/qwen-recall-optimization/production' '-Drag.repository.corpus=D:\IDEAworkSpace\zsxq\paicli\target\qwen-migration\production\corpus-a55c320f0e9897b1115dcdde4e8ee798c59300c12f0716f42370a7c5acd1fe4c' '-Drag.repository.reuseIndex=target/qwen-migration/production'
+mvn test -DskipTests=false '-Dtest=RepositoryRecallOptimizationComparisonTest,RepositoryCandidateRecallTest' '-Drag.recall.compare=true' '-Drag.candidate.eval=true' '-Drag.candidate.holdout=true'
+mvn test -Pquick
+mvn test -DskipTests=false
+mvn package -DskipTests
+git diff --check
+```
+
+候选诊断1项通过；cross-encoder真实评分实验1项通过但质量负实验不启用；context回归先1失败/0错误后24项通过；formatter/真实tool输出回归先2失败/0错误后50项通过；最终75题评测1项通过，配对/补充题2项通过。最终quick 1,355 tests、0 failures、0 errors、14 skipped；全量1,426 tests、0 failures、0 errors、20 skipped（真实模型/评测opt-in另行执行）。`mvn package -DskipTests` BUILD SUCCESS，JAR169,213,669字节，确认含新增RetrievalContextAssembler/RetrievalPipeline类；未打入重排实验模型或Embedding权重。`git diff --check`通过；README/AGENTS/agents-reference及本任务唯一开发文档同步。只读评审发现的工具输出问题已修复且复查无新增Critical/Important。未提交.env/secret/target/raw session，未执行clean；本轮新增优化未commit或push。
+
+已知限制仍包括6个无答案问题全部返回候选、同义转述与跨模块尚有遗漏、索引内容时效性、冷启动与首次回填成本、小样本和不穷尽标注。Top100候选覆盖96.83%不是最终80.16%召回率。先前三笔已授权提交已同步远端（最终核对reflog更正早期未push记录）；本轮新增优化保留未提交、未push。
+
+### 12.8 TopK 与正文预算敏感性评测方案
+
+用户询问Top15/20召回率。本轮只新增opt-in评测与记录，不改生产默认、不调策略、不提交。沿用原75题/368文件/3226chunk及既有冻结索引，比较实际topK=10/15/20在16000、24000正文字符下的三路结果，另测默认工具Top5/24000。topK参数同时改变语义候选池100/150/200、主候选30/45/60和FTS40/60/80；这是实际参数效果，不能宣称只改变输出槽位。每题真实query embedding一次取200后按真实pool深度切片，仅在同题内部复用；不作为延迟基准。对三个16000预算设置逐题独立调用实际service，核对hits与无降级；Top10/16000须与原80.16%基线逐题一致。验收检查输出槽位/总正文预算、formatter完整性、主集63正例宏平均证据召回、标识符、6无答案及全部配对得失。字符预算不变时更多主片段可能占用补充上下文余量，不预设召回必然单调增加。流程沿用第12.5节图，仅改变request参数；没有架构或持久化变更。
+
+评测完成：75题×7组request设置×3路=1575行COMPLETE，原题集SHA与baseline一致，Top10/16000三路逐题at5/at10全部分数与第12.7节相同；Top10/15/20在16000下的实际service逐题hits等于评测pipeline、无降级，formatter完整包含预算正文，所有设置返回槽位与正文字符均不超限。报告 `target/qwen-recall-optimization/topk/results.json`，63题双路对照 `paired-rows.json`。只新增测试文件改变harness快照，第12.7节原source/harness哈希仍保留为历史评测；本轮生产pipeline SHA独立复核仍为b7bb7b76c0e5b4483d6850b85d10e0fd1a331f2cd603bb4070ad941cf1f9e73f，无生产修改。
+
+| 最终最多返回结果数 | 双路正文证据Recall@K / 16000字符 | 双路正文证据Recall@K / 24000字符 |
+|---|---:|---:|
+| 10 | 80.16% | 80.16% |
+| 15 | 76.98% | 81.75% |
+| 20 | 77.78% | 83.33% |
+
+这三组各自标识符均19/19、六个无答案全部误返回。Top15/16000较Top10基线0提升/3下降/60相同（planstore-paraphrase、cross-1、cross-6）；Top20/16000为2提升/4下降/57相同（下降还包括structured-semantic）；Top15/24000为1提升/0下降/62相同；Top20/24000为3提升/1下降/59相同（cross-1退化）。纯语义16000下Top10/15/20分别73.02%/74.60%/75.40%，24000下73.81%/78.57%/78.57%；FTS对应16000下36.51%/38.10%/39.68%，24000下36.51%/38.10%/41.27%。增加TopK不能当成对原完整context结果的简单追加：主片段选择与剩余预算重新计算，更多主片段会挤占同文件补充余量；更大预算的对照支持预算分配是重要变量，不把所有变化仅归因于关键词融合。
+
+更大K的MRR也未改善：双路Top10为0.4776；16000下Top15/20为0.4417/0.4207，24000下为0.4640/0.4381。更大预算/更多结果增加Agent上下文，不代表回答准确率提高。实际工具默认Top5/24000本轮测得69.84%，它与Top10基准必须区分；本轮没有改默认值。
+
+执行：`mvn test -DskipTests=false '-Dtest=RepositoryTopKRecallTest' '-Drag.topk.eval=true'`，1 test、0 failures、0 errors、0 skipped，BUILD SUCCESS（107秒测试、1分57秒总计）；`mvn test -Pquick`：1356 tests、0 failures、0 errors、15 skipped，BUILD SUCCESS；`git diff --check`通过。没有重复文档、新索引、文档重新向量化、commit或push。
+
+### 12.9 统一用户选定的默认Top10/16000
+
+用户选择保持Top10/16000；现状源码ToolRegistry.search_code和Main./search实际均为Top5/24000，因此只保留评测配置不足以落实选择。最小方案在RetrievalRequest定义公共默认常量10/16000，工具与CLI共同引用；工具top_k显式参数和1–30边界继续保留，预算固定16000，不改grep_code默认24000或其他检索策略、模型、索引、授权。同步工具描述、参数说明、README/AGENTS/reference。验收：默认与非法top_k回退10，显式值正确、上下界正确，全部search_code请求预算16000，/search引用同一常量；先观察回归RED再实现，针对性、quick、diff并记录结果。流程/图复用12.5节，仅调整入口request参数；不新增开发文档、不提交。
+
+已实现两个入口引用统一默认常量，工具描述与README、AGENTS、agents-reference同步。先运行`mvn test -DskipTests=false -Dtest=ToolRegistryTest#searchCodeUsesChosenDefaultsAndPreservesExplicitTopK`，1项断言按预期失败（默认值预期10、实际5）；修改后`mvn test -DskipTests=false -Dtest=ToolRegistryTest,CliCommandParserTest,CodeSearchServiceArchitectureTest,RetrievalContextAssemblyTest`共102项通过，0失败/错误。默认参数、非法参数回退、显式参数及上下界、正文预算均经工具执行入口验证；CLI源码复核引用相同常量，无命令语法或权限变化。第12.6–12.8节的Top5/24000描述保留为当时的历史配置；当前默认为Top10/16000。此次没有重新执行75题质量评测，80.16%仍引用先前显式Top10/16000的冻结评测，不宣称为本轮新测结果。
+
+交付验证：`mvn test -Pquick`共1356项、0失败/错误、15跳过；`mvn package -DskipTests` BUILD SUCCESS，已更新`target/codeagent-1.0-SNAPSHOT.jar`；`git diff --check`通过。构建保留既有shade依赖重叠警告，不影响本次构建成功。初次交付保留未提交状态；用户随后明确要求提交当前修改，本轮召回优化、评测、默认参数与联动文档一起提交，模型权重、target报告与构建产物不纳入版本控制。

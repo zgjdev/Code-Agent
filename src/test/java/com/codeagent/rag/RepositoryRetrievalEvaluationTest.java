@@ -41,7 +41,19 @@ class RepositoryRetrievalEvaluationTest {
         }
         assertTrue(files.size() > 100, "must evaluate full production corpus");
         String corpusHash = hash(JSON.writeValueAsBytes(files));
-        Path corpus = Files.createDirectories(output.resolve("corpus-" + corpusHash));
+        String reuse = System.getProperty("rag.repository.reuseIndex");
+        Path reuseDirectory = reuse == null ? null : Path.of(reuse).toAbsolutePath().normalize();
+        if (reuseDirectory != null) {
+            assertTrue(reuseDirectory.startsWith(repository.resolve("target")));
+            assertEquals(reuseDirectory.resolve("corpus-" + corpusHash), sourceRoot,
+                    "reused vectors must reference exactly their original frozen corpus root");
+            assertNotEquals(reuseDirectory, output, "preserve original reports and index");
+            Path from = reuseDirectory.resolve("index-" + corpusHash + ".db");
+            assertFalse(Files.exists(Path.of(from + "-wal")) && Files.size(Path.of(from + "-wal")) > 0,
+                    "close/checkpoint source index before making an isolated copy");
+            Files.copy(from, output.resolve("index-" + corpusHash + ".db"), StandardCopyOption.REPLACE_EXISTING);
+        }
+        Path corpus = reuseDirectory == null ? Files.createDirectories(output.resolve("corpus-" + corpusHash)) : sourceRoot;
         for (var entry : files.entrySet()) {
             Path destination = corpus.resolve(entry.getKey());
             Files.createDirectories(destination.getParent());
@@ -58,6 +70,10 @@ class RepositoryRetrievalEvaluationTest {
         metadata.put("status", "IN_PROGRESS");
         metadata.put("gitHead", gitHead(repository));
         metadata.put("frozenCorpus", !sourceRoot.equals(repository));
+        if (reuseDirectory != null) metadata.put("reusedIndexFrom", reuseDirectory.toString());
+        metadata.put("resultUnit", "primary chunk plus at most two complete same-file semantic companions; total character budget unchanged");
+        Map<String,Object> primaryScores = new LinkedHashMap<>();
+        metadata.put("primaryScores", primaryScores);
         Map<String, String> pipelineSources = new TreeMap<>();
         try (var paths = Files.walk(repository.resolve("src/main/java/com/codeagent/rag"))) {
             for (Path path : paths.filter(p -> p.toString().endsWith(".java")).sorted().toList())
@@ -122,6 +138,7 @@ class RepositoryRetrievalEvaluationTest {
                     List<Long> timings = new ArrayList<>();
                     List<RetrievalHit> hits = List.of();
                     Map<RetrievalSource, Integer> stageCounts = Map.of();
+                    List<RetrievalHit> primaryHits = List.of();
                     for (int repeat = 0; repeat < REPEATS; repeat++) {
                         long before = System.nanoTime();
                         var measured = search(mode.getValue(), new RetrievalContext(request, index,
@@ -130,12 +147,19 @@ class RepositoryRetrievalEvaluationTest {
                         if (repeat == 0) {
                             hits = measured.hits();
                             stageCounts = measured.stageCounts();
+                            primaryHits = measured.primaryHits();
                         } else assertEquals(hits, measured.hits(), "non-deterministic ranking: " + item.id());
                     }
+                    primaryScores.put(mode.getKey()+":"+item.id(), Map.of(
+                            "at5",RetrievalEvaluationMetrics.measure(item.evidence(),primaryHits,5),
+                            "at10",RetrievalEvaluationMetrics.measure(item.evidence(),primaryHits,10),
+                            "hits",primaryHits.stream().map(h->describe(h,item.evidence())).toList()));
                     if (mode.getKey().equals("full")) {
                         var actual = service.search(request);
                         assertTrue(actual.diagnostics().degradedReasonCodes().isEmpty());
                         assertEquals(actual.hits(), hits, "ablation must match production pipeline");
+                        String toolBody=SearchResultFormatter.formatForTool(item.query(),actual);
+                        for(var hit:actual.hits()) assertTrue(toolBody.contains(hit.content()),"budgeted evidence must reach tool output intact");
                     }
                     rows.add(new RepositoryEvaluationReport.Row(mode.getKey(), item.id(), item.category(),
                             item.query(), item.evidence(),
@@ -155,20 +179,19 @@ class RepositoryRetrievalEvaluationTest {
         }
         assertEquals(75 * 3, rows.size());
         metadata.put("status", "COMPLETE");
+        metadata.put("fullModeToolBodiesVerified",true);
         metadata.put("finishedAt", Instant.now().toString());
         RepositoryEvaluationReport.write(output, metadata, rows);
         System.out.println(Files.readString(output.resolve("report.md")));
     }
 
-    private record SearchResult(List<RetrievalHit> hits, Map<RetrievalSource, Integer> stageCounts) {}
+    private record SearchResult(List<RetrievalHit> hits, List<RetrievalHit> primaryHits, Map<RetrievalSource, Integer> stageCounts) {}
 
     private static SearchResult search(List<CodeRetrieverStage> stages, RetrievalContext context) {
         var result = new RetrievalStageRunner().run(stages, context);
         assertTrue(result.degradedReasonCodes().isEmpty(), "degraded stage: " + result.degradedReasonCodes());
-        var fused = new RetrievalFusion().fuse(result.rankings(), context.request().query(),
-                Math.max(context.request().topK() * 3, 15));
-        return new SearchResult(new RetrievalBudget().apply(fused,
-                context.request().topK(), context.request().maxChars()).hits(), result.hits());
+        var pipeline = new RetrievalPipeline().apply(result.rankings(), context.request());
+        return new SearchResult(pipeline.hits(), pipeline.primaryHits(), result.hits());
     }
 
     private static RepositoryEvaluationReport.Hit describe(RetrievalHit hit,

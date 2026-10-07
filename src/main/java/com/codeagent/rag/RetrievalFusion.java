@@ -79,7 +79,7 @@ public final class RetrievalFusion {
         return List.copyOf(output);
     }
 
-    private static boolean isIdentifierQuery(String query) {
+    static boolean isIdentifierQuery(String query) {
         if (query == null || query.isBlank()) return false;
         String[] terms = query.trim().split("\\s+");
         boolean explicitCodeShape = false;

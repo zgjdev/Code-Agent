@@ -25,6 +25,6 @@ public final class SemanticRetriever implements CodeRetrieverStage {
         if (provider == null) return List.of();
         float[] query = provider.embedAll(List.of(inputPolicy.prepareQuery(context.request().query()))).get(0);
         return context.index().searchVector(context.request().projectRoot(),
-                provider.space().embeddingSpaceId(), query, Math.max(context.request().topK() * 3, 15));
+                provider.space().embeddingSpaceId(), query, Math.max(context.request().topK() * 10, 30));
     }
 }

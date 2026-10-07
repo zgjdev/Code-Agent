@@ -1315,7 +1315,9 @@ public class Main {
                         try {
                             Path root = Path.of(currentAgent.getToolRegistry().getProjectPath());
                             var response = currentAgent.getToolRegistry().getCodeRetrievalService().search(
-                                    new com.codeagent.rag.RetrievalRequest(root, query, 5, 24_000,
+                                    new com.codeagent.rag.RetrievalRequest(root, query,
+                                            com.codeagent.rag.RetrievalRequest.DEFAULT_TOP_K,
+                                            com.codeagent.rag.RetrievalRequest.DEFAULT_MAX_CHARS,
                                             true, com.codeagent.rag.RetrievalIntent.CHUNKS));
                             if (response.hits().isEmpty()) {
                                 ui.println("📭 未找到相关代码\n");

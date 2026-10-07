@@ -159,6 +159,8 @@ CodeAgent 把实时确定性工具与索引式 RAG 分开：
 
 词法层规范化中英文、identifier 和 camelCase；查询过滤通用问句词，优先返回全部词项匹配的 BM25 候选，不足时补充任一词项匹配候选并去重。语义层默认使用 Qwen3-Embedding-0.6B ONNX FP32（1024 维）。自然语言双路融合保留语义候选原序，每四位补充一条关键词候选；明确标识符查询（含类名与方法名组合）优先关键词。共同命中合并来源，按 chunk 去重，每文件最多三条。字符预算先保留首条，后续优先装入完整片段，再按剩余容量截断暂存片段。Graph 已退出 RAG 融合；符号和关系索引继续服务 `/graph` 与结构地图。远程 Embedding 只有在用户对当前项目和 Provider 明确授权后才会启用，拒绝或故障会自动降级且不影响 FTS。`grep_code` 继续直接搜索当前磁盘，并在 ripgrep 不可用时回退到 Java 实现，不会被 `search_code` 自动调用。
 
+自然语言检索还会利用剩余字符预算补充同文件的相关实现：先保留原主片段与顺序，再从扩大的语义候选池中为每个已选文件追加最多两个完整片段，结果标为 `context` 并注明行范围。`search_code` 将预算内正文完整交给 Agent；`/search` 保留简短预览。此优化复用原模型与索引，不需要安装额外重排模型。两个入口均默认 Top10/16000 正文字符，与固定评测配置一致；`search_code` 仍可显式指定 `top_k`（1–30），正文预算保持16000字符。评测数字衡量正文证据覆盖，不等同于最终回答准确率。
+
 首次使用语义检索前，在 PowerShell 执行 `./scripts/install-qwen3-model.ps1`，显式下载并校验固定版本的三个模型文件（约 2.41 GB，未打入 JAR）。默认存放于 `~/.codeagent/models/qwen3-embedding-0.6b/c25a394dd583836952667c12f008335071b3f43d`，可通过 `embedding.localModelDirectory` 或 `EMBEDDING_LOCAL_MODEL_DIR` 指定目录。已有文件可用 `-SourceDirectory <目录>` 离线安装。运行时不联网下载，模型缺失或校验失败仅关闭语义召回，关键词检索仍可用；安装后通过 `/embedding local` 重配并刷新索引。旧索引保留 FTS，只回填新向量空间。需要回滚时配置 `embedding.mode=local`、`embedding.provider=bge`；长期记忆仍使用 BGE。实验与实施证据见 [模型迁移文档](docs/dev/26-qwen3-embedding-migration.md)。
 
 ```text

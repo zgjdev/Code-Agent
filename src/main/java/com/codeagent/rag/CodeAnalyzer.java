@@ -35,7 +35,10 @@ public class CodeAnalyzer {
      * 分析单个 Java 文件，提取所有代码关系
      */
     public List<CodeRelation> analyzeFile(Path filePath) throws IOException {
-        String content = Files.readString(filePath);
+        return analyzeContent(filePath, Files.readString(filePath));
+    }
+
+    public synchronized List<CodeRelation> analyzeContent(Path filePath, String content) {
         String relativePath = filePath.toString();
         List<CodeRelation> relations = new ArrayList<>();
 

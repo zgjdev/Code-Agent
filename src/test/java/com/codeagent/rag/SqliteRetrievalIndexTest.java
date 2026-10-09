@@ -224,6 +224,83 @@ class SqliteRetrievalIndexTest {
         assertEquals(3, chunk.endLine());
     }
 
+    @Test
+    void conditionalCommitRejectsOldFileEvenWhenChunkContentIsUnchanged(@TempDir Path tempDir) throws Exception {
+        Path project=project(tempDir); Path relative=Path.of("A.java");
+        try(var index=new SqliteRetrievalIndex(tempDir.resolve("index.db"))) {
+            FileIndexBatch old=batch(project,"A.java","old","class A {}","A","class a");
+            index.replaceLexicalFile(old);
+            IndexedChunk chunk=old.chunks().get(0);
+            var stale=new FileEmbeddingBatch(project,relative,space(),List.of(new ChunkEmbedding(chunk.startLine(),chunk.endLine(),chunk.symbolId(),chunk.contentHash(),new float[]{1,0,0})),"old");
+            index.replaceLexicalFile(new FileIndexBatch(project,relative,"new",1,1,"java","READY",null,old.chunks(),old.symbols(),old.relations()));
+            org.junit.jupiter.api.Assertions.assertFalse(index.replaceFileEmbeddingsIfCurrent(stale));
+            assertTrue(index.searchVector(project,space().embeddingSpaceId(),new float[]{1,0,0},5).isEmpty());
+        }
+    }
+
+    @Test
+    void legacyCommitRejectsChangedChunkAtSameIdentity(@TempDir Path tempDir) throws Exception {
+        Path project=project(tempDir);
+        try(var index=new SqliteRetrievalIndex(tempDir.resolve("index.db"))) {
+            FileIndexBatch old=batch(project,"A.java","old","class A {}","A","class a"); index.replaceLexicalFile(old);
+            IndexedChunk chunk=old.chunks().get(0);
+            index.replaceLexicalFile(batch(project,"A.java","new","class A { }","A","class a"));
+            index.replaceFileEmbeddings(new FileEmbeddingBatch(project,Path.of("A.java"),space(),List.of(new ChunkEmbedding(chunk.startLine(),chunk.endLine(),chunk.symbolId(),chunk.contentHash(),new float[]{1,0,0}))));
+            assertTrue(index.searchVector(project,space().embeddingSpaceId(),new float[]{1,0,0},5).isEmpty());
+        }
+    }
+
+    @Test
+    void publicReadsUseTheSameReentrantSnapshotMonitor(@TempDir Path tempDir) throws Exception {
+        Path project=project(tempDir);
+        try(var index=new SqliteRetrievalIndex(tempDir.resolve("index.db"))) {
+            var executor=java.util.concurrent.Executors.newSingleThreadExecutor();
+            var started=new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.Future<Integer> read;
+            try {
+                synchronized(index) {
+                    index.replaceLexicalFile(batch(project,"A.java","hash","class A {}","A","class a"));
+                    read=executor.submit(()->{started.countDown();return index.listFiles(project).size();});
+                    assertTrue(started.await(2,java.util.concurrent.TimeUnit.SECONDS));
+                    assertThrows(java.util.concurrent.TimeoutException.class,()->read.get(100,java.util.concurrent.TimeUnit.MILLISECONDS));
+                    assertEquals(1,index.listFiles(project).size());
+                }
+                assertEquals(1,read.get(2,java.util.concurrent.TimeUnit.SECONDS));
+            } finally { executor.shutdownNow(); }
+        }
+    }
+
+    @Test
+    void conditionalApiRejectsBatchWithoutExpectedFileHash(@TempDir Path tempDir) throws Exception {
+        Path project=project(tempDir); Path relative=Path.of("A.java");
+        try(var index=new SqliteRetrievalIndex(tempDir.resolve("index.db"))) {
+            var old=batch(project,"A.java","old","class A {}","A","class a");
+            index.replaceLexicalFile(old);
+            var chunk=old.chunks().get(0);
+            var noVersion=new FileEmbeddingBatch(project,relative,space(),List.of(new ChunkEmbedding(chunk.startLine(),chunk.endLine(),chunk.symbolId(),chunk.contentHash(),new float[]{1,0,0})));
+            index.replaceLexicalFile(new FileIndexBatch(project,relative,"new",1,1,"java","READY",null,old.chunks(),old.symbols(),old.relations()));
+            org.junit.jupiter.api.Assertions.assertFalse(index.replaceFileEmbeddingsIfCurrent(noVersion));
+        }
+    }
+
+    @Test
+    void conditionalChunkCheckDoesNotMaskDatabaseErrors(@TempDir Path tempDir) throws Exception {
+        Path project = project(tempDir);
+        Path database = tempDir.resolve("index.db");
+        try (var index = new SqliteRetrievalIndex(database)) {
+            var lexical = batch(project,"A.java","hash","class A {}","A","class a");
+            index.replaceLexicalFile(lexical);
+            var chunk = lexical.chunks().get(0);
+            var vector = new FileEmbeddingBatch(project,Path.of("A.java"),space(),
+                    List.of(new ChunkEmbedding(chunk.startLine(),chunk.endLine(),chunk.symbolId(),chunk.contentHash(),new float[]{1,0,0})),"hash");
+            try (var external = DriverManager.getConnection("jdbc:sqlite:" + database);
+                 var statement = external.createStatement()) {
+                statement.execute("ALTER TABLE code_chunks_v2 RENAME TO unavailable_chunks");
+            }
+            assertThrows(java.sql.SQLException.class, () -> index.replaceFileEmbeddingsIfCurrent(vector));
+        }
+    }
+
     private static FileIndexBatch batch(Path project, String file, String hash,
                                         String content, String symbol, String terms) {
         String fileId = StableSymbolId.create(file, "FILE", file, "");

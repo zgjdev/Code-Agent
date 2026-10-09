@@ -163,7 +163,17 @@ CodeAgent 把实时确定性工具与索引式 RAG 分开：
 
 首次使用语义检索前，在 PowerShell 执行 `./scripts/install-qwen3-model.ps1`，显式下载并校验固定版本的三个模型文件（约 2.41 GB，未打入 JAR）。默认存放于 `~/.codeagent/models/qwen3-embedding-0.6b/c25a394dd583836952667c12f008335071b3f43d`，可通过 `embedding.localModelDirectory` 或 `EMBEDDING_LOCAL_MODEL_DIR` 指定目录。已有文件可用 `-SourceDirectory <目录>` 离线安装。运行时不联网下载，模型缺失或校验失败仅关闭语义召回，关键词检索仍可用；安装后通过 `/embedding local` 重配并刷新索引。旧索引保留 FTS，只回填新向量空间。需要回滚时配置 `embedding.mode=local`、`embedding.provider=bge`；长期记忆仍使用 BGE。实验与实施证据见 [模型迁移文档](docs/dev/26-qwen3-embedding-migration.md)。
 
-混合问题按目标和已有线索协作：例如“看一下 store.save()”先实时定位并读取；“保存失败的事务和异常处理”可用 RAG 寻找相关机制。`search_code.query`保留行为描述，`lexical_query`可提供来自问题或已读取源码的词法软线索，不限制语义候选范围；中文夹杂驼峰名称、点号调用等也会自动提取线索。词法线索最多占一半候选池，其余保留原问题关键词补充。RAG 不自动调用 grep，也不自动重建索引。
+混合问题按目标和已有线索协作：例如“看一下 store.save()”先实时定位并读取；“保存失败的事务和异常处理”可用 RAG 寻找相关机制。`search_code.query`保留行为描述，`lexical_query`可提供来自问题或已读取源码的词法软线索，不限制语义候选范围；中文夹杂驼峰名称、点号调用等也会自动提取线索。词法线索最多占一半候选池，其余保留原问题关键词补充。RAG 不自动调用 grep，检索请求本身不触发全库回填。
+
+交互式 CLI（inline/plain/TUI）默认在后台维护代码索引：启动时 Hash 校准，保存后去抖更新词法，再异步补齐向量；监听失效或漏事件由每300秒校准兜底。通常无需重复执行 `/index`，模型仍需显式预装。`/index` 保留手动刷新、重建、状态和清理入口；清理后该项目自动维护暂停，显式刷新或重启恢复。检索诊断 `maintenance_state` 展示更新/补齐状态，`idle` 不保证全库实时新鲜。Runtime API、WeChat 和 headless 入口保持手动维护。
+
+可在 `~/.codeagent/config.json` 设置：
+
+```json
+{"autoIndex":{"enabled":true,"debounceMillis":1500,"maxDebounceMillis":10000,"reconcileIntervalSeconds":300}}
+```
+
+将 `enabled` 设为 `false` 可退回手动模式。后台不弹远程授权、不下载模型；缺失或故障保留词法索引。队列有界，退出后停止维护，重启重新对账。设计、并发与平台边界见 [40-索引自动维护](docs/dev/40-automatic-code-index-maintenance.md)。
 
 返回结果的`file_freshness`只核对候选文件：`verified`表示检查时内容hash与索引相同，`changed`/`missing`/`unavailable`表示需回到当前源码确认，旧行号不能直接用于修改。`index_empty`表示当前项目没有已索引chunk，不证明项目没有答案；空结果仍带诊断。关键结论和修改前使用`read_file`核实当前实现，避免重复收集相同正文。协作设计与分层评测见 [38-code-search-rag-coordination.md](docs/dev/38-code-search-rag-coordination.md)。
 

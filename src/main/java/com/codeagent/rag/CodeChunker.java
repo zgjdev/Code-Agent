@@ -31,7 +31,10 @@ public class CodeChunker {
      * 对单个文件进行分块
      */
     public List<CodeChunk> chunkFile(Path filePath) throws IOException {
-        String content = Files.readString(filePath);
+        return chunkContent(filePath, Files.readString(filePath));
+    }
+
+    public synchronized List<CodeChunk> chunkContent(Path filePath, String content) {
         String relativePath = filePath.toString();
 
         // 非 Java 文件：按大小分段

@@ -89,6 +89,45 @@ class IndexCoordinatorTest {
         }
     }
 
+    @Test
+    void refreshCommitsAllLexicalFilesBeforeFirstInference(@TempDir Path temp) throws Exception {
+        Path root=Files.createDirectory(temp.resolve("project"));
+        Files.writeString(root.resolve("A.java"),"class A {}");
+        Files.writeString(root.resolve("B.java"),"class B {}");
+        var space=EmbeddingSpaceDescriptor.create("test","test","local","1",2,"mean",true,1,1);
+        try(var index=new SqliteRetrievalIndex(temp.resolve("index.db"))) {
+            var delegate=provider(space,false);
+            var observing=new EmbeddingProvider() {
+                public String id(){return delegate.id();}
+                public String modelId(){return delegate.modelId();}
+                public EmbeddingSpaceDescriptor space(){return space;}
+                public EmbeddingLocality locality(){return EmbeddingLocality.IN_PROCESS;}
+                public List<float[]> embedAll(List<String> inputs) throws EmbeddingException {
+                    try { assertEquals(2,index.listFiles(root).size()); }
+                    catch(java.sql.SQLException e){throw new AssertionError(e);}
+                    return delegate.embedAll(inputs);
+                }
+            };
+            var coordinator=new IndexCoordinator(index,Optional.of(observing));
+            assertEquals(2,coordinator.refresh(new IndexRefreshRequest(root,false)).changedFiles());
+            assertTrue(coordinator.missingEmbeddingWork(root,1).isEmpty());
+        }
+    }
+
+    @Test
+    void staleMetadataHasTypedCancellation(@TempDir Path temp) throws Exception {
+        Path root=Files.createDirectory(temp.resolve("project"));
+        Files.writeString(root.resolve("A.java"),"class A {}");
+        var space=EmbeddingSpaceDescriptor.create("test","test","local","1",2,"mean",true,1,1);
+        try(var index=new SqliteRetrievalIndex(temp.resolve("index.db"))) {
+            var coordinator=new IndexCoordinator(index,Optional.of(provider(space,false)));
+            coordinator.reconcileLexical(new IndexRefreshRequest(root,false));
+            var work=coordinator.missingEmbeddingWork(root,1).get(0);
+            Files.writeString(root.resolve("A.java"),"class B {}");
+            org.junit.jupiter.api.Assertions.assertThrows(StaleIndexWorkException.class,()->coordinator.computeEmbeddings(work));
+        }
+    }
+
     private static EmbeddingProvider provider(EmbeddingSpaceDescriptor space, boolean fail) {
         return new EmbeddingProvider() {
             @Override public String id() { return "test"; }

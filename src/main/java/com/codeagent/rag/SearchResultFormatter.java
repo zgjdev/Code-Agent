@@ -93,6 +93,13 @@ public final class SearchResultFormatter {
                 .append(map.text()).append("\n"));
         output.append("partial: ").append(response.partial()).append("\n")
                 .append("degraded: ").append(response.diagnostics().degradedReasonCodes());
+        var maintenance = response.diagnostics().maintenance();
+        output.append("\nmaintenance_state: ").append(maintenance.state())
+                .append(" pending_lexical=").append(maintenance.pendingLexical())
+                .append(" pending_embedding=").append(maintenance.pendingEmbedding())
+                .append(" watcher=").append(maintenance.watcherState())
+                .append(" last_complete_reconcile_ms=").append(maintenance.lastCompleteReconcileMillis());
+        if (!maintenance.errorCode().isBlank()) output.append(" error=").append(maintenance.errorCode());
         if (!response.diagnostics().fileFreshness().isEmpty()) {
             output.append("\nfile_freshness: ").append(new java.util.TreeMap<>(response.diagnostics().fileFreshness()));
             output.append("\n候选来自索引，请用 read_file 确认当前源码；changed/missing/unavailable 的旧行号不可直接用于修改。仅检查命中文件，不保证全库索引时效。\n");

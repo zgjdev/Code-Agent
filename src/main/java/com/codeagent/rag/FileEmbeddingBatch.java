@@ -9,8 +9,13 @@ public record FileEmbeddingBatch(
         Path projectRoot,
         Path relativePath,
         EmbeddingSpaceDescriptor space,
-        List<ChunkEmbedding> embeddings
+        List<ChunkEmbedding> embeddings,
+        String expectedFileContentHash
 ) {
+    public FileEmbeddingBatch(Path projectRoot, Path relativePath, EmbeddingSpaceDescriptor space, List<ChunkEmbedding> embeddings) {
+        this(projectRoot, relativePath, space, embeddings, null);
+    }
+
     public FileEmbeddingBatch {
         embeddings = List.copyOf(embeddings);
     }

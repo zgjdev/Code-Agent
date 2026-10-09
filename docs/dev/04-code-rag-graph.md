@@ -180,7 +180,6 @@ rag/
 
 | 入口 | 触发方式 | 代码位置 |
 |---|---|---|
-| `/index [路径]` | 用户敲命令 | 解析 `CliCommandParser.java:193-198`；执行 `Main.java:917-928` |
 | `/search <查询>` | 用户敲命令 | 解析 `CliCommandParser.java:201-206`；执行 `Main.java:929-951` |
 | `/graph <类名>` | 用户敲命令 | 解析 `CliCommandParser.java:209-214`；执行 `Main.java:953-986` |
 | `search_code` 工具 | 模型自主调用 | 注册 `ToolRegistry.java:597-631` |
@@ -194,7 +193,7 @@ rag/
 
 工具自己的描述也在强调这个分工：`search_code` 的说明里明确写了"精确符号/字符串定位请优先用 `grep_code`/`glob_files`/`read_file`"（`ToolRegistry.java:599`）。
 
-**为什么要这样分工**：RAG 依赖预建索引，索引会过期（用户改了代码但没重新 `/index`），而且它返回的是相关性排序而不是精确匹配。把 RAG 当成代码定位的首选，会引入"索引和源码不一致"这类难排查的问题。
+**为什么要这样分工**：RAG 依赖预建索引，代码修改后到后台更新完成之间存在时效窗口，而且它返回的是相关性排序而不是精确匹配。关键判断或修改前需要读取当前源码。
 
 ## 1.4 三个容易混淆的东西
 
@@ -435,7 +434,7 @@ insertRelations()   ← 独立提交
 
 含义：**给表加一列不会对已存在的数据库生效**。老用户的 `codebase.db` 已经存在，`IF NOT EXISTS` 会让整条 `CREATE` 语句被跳过，新列永远加不上，随后新代码一 `INSERT` 就报 `no such column`。
 
-实践上的后果就是：**改表结构 = 必须让用户删库重跑 `/index`**。对 RAG 库来说这个代价可以接受（数据能靠源码重新生成），但值得知道这是当前的事实行为，不是"应该有人写过了吧"。
+这个历史版本没有 schema 迁移机制；表结构变更需要受控迁移或派生数据重建。当前自动维护与兼容性约束见第 40 号文档。
 
 ## 2.7 索引阶段的数据模型
 
@@ -598,17 +597,7 @@ flowchart TD
 
 ## 3.6 同一能力，两条入口，行为并不相同
 
-`/search` 命令和 `search_code` 工具最终都调用 `hybridSearch`，但**项目路径的来源不同**：
-
-| 入口 | 项目路径来源 | 代码位置 |
-|---|---|---|
-| CLI `/index [路径]` | 命令参数，缺省为 `.`；同时把绝对路径同步给 `ToolRegistry` 和 `MemoryManager` | `Main.java:917-928` |
-| CLI `/search`、`/graph` | **固定用 `"."`**，即当前工作目录 | `Main.java:936`、`Main.java:960` |
-| `search_code` 工具 | `ToolRegistry.projectPath` 实例字段，默认是 `user.dir`，被 `/index` 改写 | `ToolRegistry.java:87`、`:134-138`、`:615` |
-
-后果：**如果用户执行 `/index /other/project`，`/search` 仍然去当前工作目录找索引**，两者落到不同的 `project_path`，于是报"尚未索引"或检索不到刚索引的内容。而 `search_code` 工具因为被同步过路径，反而能正常工作。
-
-路径在进入 `VectorStore` 前会被转成绝对路径并 `normalize()`（`CodeRetriever.java:24`、`:29`），所以 `.` 和 `user.dir` 默认情况下是一致的——不一致只发生在 `/index` 被指定了别的路径之后。
+当前查询统一绑定 ToolRegistry 的项目路径，后台维护器负责规范化项目根及增量更新；详细行为见第 40 号自动索引维护文档。
 
 ---
 
@@ -670,7 +659,6 @@ flowchart TD
 | schema 演进 | 以为改表结构加个列就行 | DDL 内联在 `initTables()`，`CREATE TABLE IF NOT EXISTS` 对已存在的库**整条跳过**，新列不会生效 | `VectorStore.java:35-82` |
 | 文件收集 | 文档描述排除目录与后缀白名单 | 确认用目录名硬编码排除 + 后缀白名单；**不读 `.gitignore`**，以 `.` 开头的目录一律跳过 | `CodeIndex.java:129-174`（排除 `:136-141`、白名单 `:150-158`） |
 | Embedding 默认地址 | 以为全局只有单一默认 base URL | `inferDefaultUrl` 按 provider 返回**不同**默认：`zhipu`/`glm` 落到智谱开放平台地址，`ollama` 与未知 provider 才落到本地地址；`EMBEDDING_BASE_URL` 可覆盖 | `EmbeddingClient.java:29`、`:132-138` |
-| CLI 项目路径一致性 | 以为 `/index <路径>` 后 `/search` 会在同一项目上检索 | `/index` 同步路径给 `ToolRegistry`/`MemoryManager`，但 `/search` 与 `/graph` **固定用 `"."`**，索引非 `.` 路径时二者落到不同 `project_path` | `Main.java:917-928`、`:936`、`:960` |
 | 结果格式化 | 文档未提该组件 | 存在 `SearchResultFormatter`（CLI 与 tool 两种格式，片段长度上限不同），并有对应单测 | `SearchResultFormatter.java:21`、`:41`、`SearchResultFormatterTest.java:11` |
 | 实时精确搜索 | 文档只对比 `grep_code` 概念 | 实现上是 `RipgrepCodeSearchEngine` 优先、`JavaCodeSearchEngine` 回退两个实现 | `ToolRegistry.java:351`、`:466`、`RipgrepCodeSearchEngine.java:35-36`、`:202-203` |
 | Embedding 模型版本 | 以为表里有模型信息可用于校验 | 表里**没有** provider / 模型名 / 维度 / 索引版本字段，无法判断索引是用哪个模型建的 | `VectorStore.java:37-62` |
@@ -708,7 +696,7 @@ flowchart TD
 
 ## 6.4 全量重建 vs 增量索引
 
-**全量重建**：逻辑确定，不需要维护文件哈希、删除检测和版本迁移。契合"用户手动敲 `/index`"的使用方式。
+**历史全量重建方案**：逻辑确定，但会重复处理未变化文件。当前自动维护采用文件 Hash 增量更新与删除校准，详见第 40 号文档。
 
 **代价**：每次都要重新算所有块的 Embedding（如果 Embedding 走远程 API，这就是真金白银和时间），且发布过程非原子。
 
@@ -746,7 +734,6 @@ flowchart TD
 | clear 成功、insert 失败 | 分步提交 | 返回携带错误消息的 0/0 `IndexResult` | 旧索引已清空，留下空索引 |
 | 关系写入失败 | 独立事务 | 代码块已提交 | 图数据缺失，`/graph` 查不到 |
 | 语义检索时 Embedding 服务不可用 | `hybridSearch` 先走语义路径 | 异常直接向上抛出，**不自动降级关键词** | 本次混合检索整体失败 |
-| `/index` 到非 cwd 路径后 `/search` | 无校验 | `/search` 用 cwd 打开另一个 `project_path` | 报"尚未索引"或检索不到刚索引的内容 |
 | 超长单行 | 文本分段 | 单行无法再拆，块可能超预算 | 向量输入被截断，存储正文完整 |
 | 两个同名方法 | `calls` 关系 | 目标无法消歧 | 图查询假阳性 |
 | 接口/类简单名跨包重名 | `getRelations` 按名匹配 | 无法区分 | 图查询假阳性 |
@@ -799,7 +786,6 @@ mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest
 - 重复命中奖励只发一次、每文件条数上限、method/class 类型奖励
 - Embedding 维度不一致与空向量的返回行为、provider 返回空数组的静默失效
 - `search_code` 传入空白查询的行为
-- CLI `/index <path>` 后 `/search` 的项目路径一致性
 
 **测试环境约定**：涉及数据库的用例通过 `codeagent.rag.dir` 指向临时目录（如 `VectorStoreTest.java:19`），避免污染真实索引。需要验证索引/检索逻辑的单测应注入确定性的 fake client，并确保写入与查询使用同一种 project key 规范化规则。当前 `CodeIndexTest` 尚未注入 fake，`CodeRetrieverTest` 虽使用 stub，但在 Windows 下仍有 project key 错配；因此上面的整组命令目前不是跨平台、无外部依赖的绿色基线。
 
@@ -939,7 +925,7 @@ RAG 依赖预索引且返回相关性排序，可能过期或语义误召回。�
 
 ## 12.1 已经实现的
 
-Java 类和方法切块、非 Java 文本分段、两类 Embedding 接口（Ollama / OpenAI 兼容）、SQLite 持久化、JVM 余弦搜索、关键词召回、混合重排、单文件限流、结果格式化、一跳关系查询；`/index`、`/search`、`/graph` 三个 CLI 命令与 `search_code` 工具均已接线。语义索引与检索是否可用仍取决于已配置的 Embedding 服务；默认 Ollama 不可达时索引会跳过失败文件，不能表述为无条件可工作。
+Java 类和方法切块、非 Java 文本分段、两类 Embedding 接口（Ollama / OpenAI 兼容）、SQLite 持久化、JVM 余弦搜索、关键词召回、混合重排、单文件限流、结果格式化、一跳关系查询；`/search`、`/graph` 两个 CLI 查询命令与 `search_code` 工具均已接线。语义索引与检索是否可用仍取决于已配置的 Embedding 服务；默认 Ollama 不可达时索引会跳过失败文件，不能表述为无条件可工作。
 
 ## 12.2 尚未实现的
 
@@ -952,11 +938,10 @@ Java 类和方法切块、非 Java 文本分段、两类 Embedding 接口（Olla
 - **`VectorStore` 未声明线程安全**：它持有单个 JDBC Connection（`VectorStore.java:19`），`CodeRetriever` 应按"一次检索一个生命周期"使用并通过 `close()` 释放（`CodeRetriever.java:163-166`）。CLI 与工具路径都是用 try-with-resources 这么做的（`Main.java:936`、`ToolRegistry.java:615`）。
 - **行号不可用**：整文件小文本块行号为占位 0/0，类块行号与其 `content` 范围不匹配，且都不入库。
 - **`record` / `enum` 文件不走 AST 分块**，退化为整文件文本块。
-- **CLI 项目路径可能错配**：`/index <非 cwd 路径>` 与 `/search`、`/graph` 的路径来源不同（前者 payload 并同步给工具，后者固定 cwd）。
 - **关系图是静态近似**：`calls` 不做符号求解且混入 JDK 调用；`to_file` 恒为 null；`imports` 的 `fromName` 写死为 `file`；`getOutgoingRelations` 是未被调用的死代码。
 - **图谱不参与检索**：`hybridSearch` 只查 `code_chunks`，没有基于关系的扩展或重排。
 - **混合检索无降级**：Embedding 失败会让整次混合检索失败。
-- **表结构无法演进**：`CREATE TABLE IF NOT EXISTS` 意味着加列对已有数据库不生效，只能删库重跑 `/index`。
+- **历史表结构限制**：`CREATE TABLE IF NOT EXISTS` 不会为已有数据库增加列，需要受控迁移或派生数据重建。
 - **空向量与空白查询会静默失效**：不报错，但结果无意义或该块永不召回。
 
 ## 12.4 最准确的定位

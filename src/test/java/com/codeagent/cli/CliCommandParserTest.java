@@ -8,6 +8,15 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class CliCommandParserTest {
 
     @Test
+    void rejectsRemovedIndexCommandsInsteadOfSendingThemToAgent() {
+        for (String input : new String[]{"/index", "/INDEX", "/index .", "/index status",
+                "/index refresh", "/index rebuild", "/index clear"}) {
+            assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND,
+                    CliCommandParser.parse(input).type(), input);
+        }
+    }
+
+    @Test
     void parsesPlanSlashCommandWithoutPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/plan");
 
@@ -264,19 +273,12 @@ class CliCommandParserTest {
     }
 
     @Test
-    void parsesWechatSlashCommand() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/wechat");
-
-        assertEquals(CliCommandParser.CommandType.WECHAT, command.type());
-        assertEquals("start", command.payload());
-    }
-
-    @Test
-    void parsesWechatSlashCommandWithPayload() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/wechat status");
-
-        assertEquals(CliCommandParser.CommandType.WECHAT, command.type());
-        assertEquals("status", command.payload());
+    void rejectsRemovedWechatCommands() {
+        for (String input : new String[]{"/wechat", "/WECHAT", "/wechat setup",
+                "/wechat start", "/wechat status", "/wechat stop", "/wechat restart"}) {
+            assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND,
+                    CliCommandParser.parse(input).type(), input);
+        }
     }
 
     @Test

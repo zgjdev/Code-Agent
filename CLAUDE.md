@@ -1,6 +1,6 @@
 # CodeAgent 项目开发指南
 
-本文件是仓库中 Agent 和新线程的首读入口。它约束开发流程、架构边界和交付质量；详细实现说明见 [docs/agents-reference.md](docs/agents-reference.md)。
+本文件是仓库中 Agent 和新线程的首读入口。它约束开发流程、架构边界和交付质量；详细实现说明见 [docs/implementation/01-runtime-and-agent-foundation.md](docs/implementation/01-runtime-and-agent-foundation.md)。
 
 ## 1. 信息优先级与项目快照
 
@@ -65,11 +65,11 @@ flowchart LR
 
 ```mermaid
 graph TB
-    CLI[CLI / Runtime API / WeChat] --> ROUTE[命令与入口解析]
+    CLI[CLI / Runtime API] --> ROUTE[命令与入口解析]
     ROUTE --> QUEUE[inline/plain: RuntimeExecutionQueue]
     QUEUE --> WORKER[workspace 单 Worker + Session Context lease]
     WORKER --> MODE{执行模式}
-    ROUTE -->|Runtime API / WeChat / Lanterna 原路径| MODE
+    ROUTE -->|Runtime API / Lanterna 原路径| MODE
     MODE --> REACT[Agent ReAct]
     MODE --> PLAN[PlanExecuteAgent 统一多 Agent 协作]
     REACT --> CORE[Prompt + Context + ConversationLedger]
@@ -148,7 +148,7 @@ sequenceDiagram
 ## 6. 必须遵守的运行时约束
 
 - inline/plain 普通输入、`/react <任务>`、`/plan <任务>`、`/task add <任务>` 共用 runtime_executions 队列；运行中可直接输入追加任务，等待 Plan/HITL 时普通输入先作为交互回答，`/task add` 显式入队。Worker 不读终端，同 workspace 顶层串行、同 Session FIFO，任务开始时读取最新 Session 上下文。
-- SessionExecutionContextRegistry 管理 writable handle、独立 Agent/ParentConversationContext/MemoryManager/SkillContextBuffer；共享 ToolRegistry 绑定由进程级单 lease 和 CLI mutation 互斥锁保护。EOF/shutdown 保留非终态任务供恢复；API、WeChat、Lanterna TUI 尚未接入统一队列。详细生命周期、Plan execution_id 与恢复限制见 AGENTS.md 第 6 节。
+- SessionExecutionContextRegistry 管理 writable handle、独立 Agent/ParentConversationContext/MemoryManager/SkillContextBuffer；共享 ToolRegistry 绑定由进程级单 lease 和 CLI mutation 互斥锁保护。EOF/shutdown 保留非终态任务供恢复；API、Lanterna TUI 尚未接入统一队列。详细生命周期、Plan execution_id 与恢复限制见 AGENTS.md 第 6 节。
 - ReAct 与 PlanExecuteAgent（`/plan` 入口，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
 - 工具授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard；策略拒绝不能通过换工具、provider 或分支绕过。
 - URL 只能来自顶层用户原文或成功 web_search 的结构化 discoveredUrls；搜索正文、reasoning、普通工具输出和回复文本都不能产生新授权。计划分支默认隔离 URL 凭据，只有声明的 DAG 后继可继承；步骤自动评审（stepReview）不改变这一步的授权继承。
@@ -193,7 +193,7 @@ TUI：mvn test -Pphase16-smoke
 
 ## 10. 协作准则
 
-使用中文沟通；大规模重构先进入 Plan Mode；优先最小化、可回滚的改动；遇到不确定的协议或安全边界先停下来核对代码和测试。长期记忆只在用户明确要求或执行 /save 时写入，不自动提取事实。形成稳定协作规则时更新本文件，具体实现细节补充到 docs/agents-reference.md。
+使用中文沟通；大规模重构先进入 Plan Mode；优先最小化、可回滚的改动；遇到不确定的协议或安全边界先停下来核对代码和测试。长期记忆只在用户明确要求或执行 /save 时写入，不自动提取事实。形成稳定协作规则时更新本文件，具体实现细节补充到 docs/implementation/01-runtime-and-agent-foundation.md。
 
 ### 独立判断与证据纪律
 

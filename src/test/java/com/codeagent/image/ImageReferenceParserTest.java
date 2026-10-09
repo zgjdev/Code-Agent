@@ -145,7 +145,7 @@ class ImageReferenceParserTest {
 
     @Test
     void barePathStopsAtFullWidthPunctuation(@TempDir Path tempDir) throws Exception {
-        // 用例对应 docs/phase-21-image-input-manual-test.md Case 9：
+        // 图片路径贪婪匹配回归，参见 docs/implementation/03-context-memory-and-retrieval.md：
         // "@image:./shot.png。这是什么？"  —— 路径应在全角句号处截断，不再吞掉后面的中文。
         Path image = tempDir.resolve("shot.png");
         Files.write(image, new byte[]{1, 2, 3});

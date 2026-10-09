@@ -23,7 +23,7 @@
 
 ### 2.1 架构位置
 
-`Main` 在普通 inline/plain 顶层任务开始时调用 `ExecutionModeRouter`，路由结果为 ReAct 或 Plan；显式 `/react`、`/plan` 绕过 Router 并只覆盖当前轮。Lanterna TUI、Runtime API 和 WeChat 仍可直接进入 ReAct。所有这些入口最终由 `Agent` 组装 `PromptMode.AGENT`，因此 `modes/agent.md` 只能描述当前 ReAct 执行路径，不能断言该轮必然来自 Router 或显式覆盖，更不能把 ReAct 写成产品默认模式。
+`Main` 在普通 inline/plain 顶层任务开始时调用 `ExecutionModeRouter`，路由结果为 ReAct 或 Plan；显式 `/react`、`/plan` 绕过 Router 并只覆盖当前轮。Lanterna TUI、Runtime API 仍可直接进入 ReAct。所有这些入口最终由 `Agent` 组装 `PromptMode.AGENT`，因此 `modes/agent.md` 只能描述当前 ReAct 执行路径，不能断言该轮必然来自 Router 或显式覆盖，更不能把 ReAct 写成产品默认模式。
 
 ### 2.2 数据/状态模型
 
@@ -32,7 +32,7 @@
 1. 运行时用户文案：`Main.startupHints()`。
 2. 模型指令：`src/main/resources/prompts/modes/agent.md` 与相关内置 Skill。
 3. 新项目记忆模板：`ProjectMemoryInitializer` 及仓库自身 `CODEAGENT.md`。
-4. 当前产品说明：README、`docs/agents-reference.md` 以及带“当前状态”语义的路线图/阶段说明。
+4. 当前产品说明：README、`docs/implementation/01-runtime-and-agent-foundation.md` 以及带“当前状态”语义的路线图/阶段说明。
 5. Prompt 跨平台组装：`PromptAssembler.stripToolSections()` 必须同时识别 LF 与 CRLF。
 
 ### 2.3 核心时序与失败路径
@@ -76,8 +76,8 @@ flowchart LR
 |---|---|---|
 | 锁定正确文案 | `PromptAssemblerTest`、`MainInputNormalizationTest`、`ProjectMemoryInitializerTest` | 新断言在修复前失败 |
 | 修复运行时内容 | `agent.md`、`Main.java`、`ProjectMemoryInitializer.java`、`PromptAssembler.java` | 针对性测试通过 |
-| 修复当前说明 | `CODEAGENT.md`、`README.md`、`docs/agents-reference.md`、相关 Skill/状态说明 | 陈旧短语审计无当前态误报 |
-| 审核历史文档 | `ROADMAP.md`、`docs/phase-*.md`、`docs/dev/*.md` | 只改错误的“当前状态”，保留历史语境 |
+| 修复当前说明 | `CODEAGENT.md`、`README.md`、`docs/implementation/01-runtime-and-agent-foundation.md`、相关 Skill/状态说明 | 陈旧短语审计无当前态误报 |
+| 审核历史文档 | `ROADMAP.md`、`docs/implementation/*.md`、`docs/dev/*.md` | 只改错误的“当前状态”，保留历史语境 |
 | 回归与交付 | 全部变更 | `mvn test -Pquick`、必要全量测试、`git diff --check` |
 
 ## 5. 验收清单

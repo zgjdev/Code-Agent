@@ -80,13 +80,6 @@ import com.codeagent.skill.SkillRegistry;
 import com.codeagent.tool.ToolRegistry;
 import com.codeagent.util.AnsiStyle;
 import com.codeagent.util.TerminalMarkdownRenderer;
-import com.codeagent.wechat.IlinkClient;
-import com.codeagent.wechat.WechatAccount;
-import com.codeagent.wechat.WechatAccountStore;
-import com.codeagent.wechat.WechatCommandMain;
-import com.codeagent.wechat.WechatLoginResult;
-import com.codeagent.wechat.WechatMessageLoop;
-import com.codeagent.wechat.WechatQrLogin;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 import org.jline.terminal.Attributes;
@@ -234,14 +227,6 @@ public class Main {
 
     public static void main(String[] args) {
         configureAwtForCli();
-        if (WechatCommandMain.isWechatCommand(args)) {
-            configureLogging();
-            int code = WechatCommandMain.run(args);
-            if (code != 0) {
-                System.exit(code);
-            }
-            return;
-        }
         if (isRuntimeServeCommand(args)) {
             configureLogging();
             startRuntimeApiAndBlock(args);
@@ -410,8 +395,6 @@ public class Main {
                         "可恢复会话初始化失败，当前仅使用内存上下文: " + e.getMessage());
             }
             final SessionStore sessionStore = openedSessionStore;
-            WechatRuntimeController wechatRuntime = new WechatRuntimeController(renderer);
-            Runtime.getRuntime().addShutdownHook(new Thread(wechatRuntime::stop, "codeagent-wechat-shutdown"));
             renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
             StartupScreenInfo startupScreenInfo = startupScreenInfo(llmClient, mcpServerManager, skillRegistry, startupNote);
             if (renderer instanceof InlineRenderer inline) {
@@ -733,7 +716,6 @@ public class Main {
                         closeSessionContextsQuietly(sessionContexts);
                         closeExecutionStoreQuietly(executionStore);
                         ui.println("\n👋 再见!");
-                        wechatRuntime.stop();
                         renderer.close();
                         return;
                     }
@@ -1166,10 +1148,6 @@ public class Main {
                                 hitlHandler));
                         continue;
                     }
-                    case WECHAT -> {
-                        ui.println(handleWechatCommand(command.payload(), lineReader, renderer, ui, wechatRuntime));
-                        continue;
-                    }
                     case TASK -> {
                         SessionStore.SessionHandle session = activeSession.get();
                         if (session == null) {
@@ -1287,33 +1265,6 @@ public class Main {
                         handleExportCommand(ui, currentAgent);
                         continue;
                     }
-                    case INDEX_CODE -> {
-                        try {
-                            var parsed = new IndexCommandParser().parse(command.payload());
-                            String indexPath = parsed.path() == null ? currentAgent.getToolRegistry().getProjectPath() : parsed.path();
-                            String absPath = new File(indexPath).getAbsolutePath();
-                            currentAgent.getToolRegistry().setProjectPath(absPath);
-                            currentAgent.getMemoryManager().setProjectPath(absPath);
-                            var service = currentAgent.getToolRegistry().getCodeRetrievalService();
-                            if (parsed.action() == IndexCommandParser.IndexCommand.Action.STATUS) {
-                                ui.println("索引状态: " + service.status());
-                            } else if (parsed.action() == IndexCommandParser.IndexCommand.Action.CLEAR
-                                    && service instanceof com.codeagent.rag.DefaultCodeRetrievalService defaultService) {
-                                defaultService.clear(Path.of(absPath));
-                                ui.println("✅ 已清除当前项目 v2 索引");
-                            } else {
-                                boolean rebuild = parsed.action() == IndexCommandParser.IndexCommand.Action.REBUILD;
-                                var refresh = service.refresh(new com.codeagent.rag.IndexRefreshRequest(Path.of(absPath), rebuild));
-                                ui.println(String.format("✅ 索引完成：变更 %d，未变 %d，删除 %d，失败 %d",
-                                        refresh.changedFiles(), refresh.unchangedFiles(),
-                                        refresh.deletedFiles(), refresh.failedFiles()));
-                            }
-                        } catch (Exception e) {
-                            ui.println("❌ " + e.getMessage());
-                        }
-                        ui.println();
-                        continue;
-                    }
                     case SEARCH_CODE -> {
                         String query = command.payload();
                         if (query == null || query.isEmpty()) {
@@ -1405,7 +1356,6 @@ public class Main {
             closeSessionContextsQuietly(sessionContexts);
             closeExecutionStoreQuietly(executionStore);
             ui.println("\n👋 再见!");
-            wechatRuntime.stop();
             renderer.close();
 
         } catch (IOException e) {
@@ -1571,160 +1521,6 @@ public class Main {
     static void configureToolRegistry(ToolRegistry registry, CodeAgentConfig config) {
         if (registry != null) {
             registry.setWebToolsConfig(config == null ? null : config.getWebTools());
-        }
-    }
-
-    private static String handleWechatCommand(String payload,
-                                              LineReader lineReader,
-                                              Renderer renderer,
-                                              PrintStream out,
-                                              WechatRuntimeController runtime) {
-        String action = payload == null || payload.isBlank() ? "start" : payload.trim().toLowerCase(Locale.ROOT);
-        try {
-            return switch (action) {
-                case "start", "on" -> {
-                    WechatAccount account = WechatAccountStore.createDefault()
-                            .loadLatest()
-                            .orElseGet(() -> setupWechatAccount(lineReader, renderer, out));
-                    yield runtime.start(account);
-                }
-                case "setup", "bind" -> {
-                    WechatAccount account = setupWechatAccount(lineReader, renderer, out);
-                    yield runtime.start(account);
-                }
-                case "status" -> runtime.status();
-                case "stop", "off" -> {
-                    runtime.stop();
-                    yield "微信通道已停止。";
-                }
-                case "restart" -> {
-                    runtime.stop();
-                    WechatAccount account = WechatAccountStore.createDefault()
-                            .loadLatest()
-                            .orElseGet(() -> setupWechatAccount(lineReader, renderer, out));
-                    yield runtime.start(account);
-                }
-                default -> """
-                        未知 /wechat 子命令: %s
-                        用法:
-                          /wechat          绑定并启动；已绑定时直接启动
-                          /wechat setup    重新扫码绑定并启动
-                          /wechat status   查看当前进程内微信通道状态
-                          /wechat stop     停止当前进程内微信通道
-                        """.formatted(action).trim();
-            };
-        } catch (UserInterruptException e) {
-            return "已取消微信通道操作。";
-        } catch (Exception e) {
-            return "微信通道操作失败: " + e.getMessage();
-        }
-    }
-
-    private static WechatAccount setupWechatAccount(LineReader lineReader, Renderer renderer, PrintStream out) {
-        try {
-            IlinkClient client = new IlinkClient();
-            WechatAccountStore store = WechatAccountStore.createDefault();
-            Path defaultWorkspace = Path.of(".").toAbsolutePath().normalize();
-            String workspace;
-            renderer.beforeInput();
-            try {
-                workspace = lineReader.readLine("请输入微信通道工作区 [" + defaultWorkspace + "]: ");
-            } finally {
-                renderer.afterInput();
-            }
-            if (workspace == null || workspace.isBlank()) {
-                workspace = defaultWorkspace.toString();
-            }
-
-            WechatQrLogin qr = client.startQrLogin("3");
-            out.println("请用目标微信扫描二维码：");
-            com.codeagent.wechat.TerminalQrRenderer.print(out, qr.qrcodeUrl());
-            out.println("扫码失败时可打开链接：" + qr.qrcodeUrl());
-            out.println("等待扫码确认...");
-
-            WechatLoginResult login = waitWechatLogin(client, qr.qrcodeId(), Duration.ofMinutes(5));
-            if (!login.connected()) {
-                throw new IllegalStateException("扫码绑定未完成: " + login.message());
-            }
-            WechatAccount account = store.createAccount(
-                    login.token(),
-                    login.accountId(),
-                    login.baseUrl(),
-                    login.userId(),
-                    workspace);
-            store.save(account);
-            out.println("微信通道绑定完成");
-            out.println("账号: " + login.accountId());
-            out.println("工作区: " + workspace);
-            return account;
-        } catch (UserInterruptException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new IllegalStateException(e.getMessage(), e);
-        }
-    }
-
-    private static WechatLoginResult waitWechatLogin(IlinkClient client, String qrcodeId, Duration timeout) throws Exception {
-        long deadline = System.nanoTime() + timeout.toNanos();
-        while (System.nanoTime() < deadline) {
-            WechatLoginResult result = client.pollQrStatus(qrcodeId);
-            if (result.connected() || result.expired()) {
-                return result;
-            }
-            Thread.sleep(3_000);
-        }
-        throw new IllegalStateException("等待扫码超时");
-    }
-
-    private static final class WechatRuntimeController {
-        private final Renderer renderer;
-        private WechatMessageLoop loop;
-        private Thread thread;
-        private WechatAccount account;
-
-        private WechatRuntimeController(Renderer renderer) {
-            this.renderer = renderer;
-        }
-
-        synchronized String start(WechatAccount account) {
-            if (isRunning()) {
-                return "微信通道已在运行，账号: " + this.account.accountId();
-            }
-            this.account = account;
-            this.loop = new WechatMessageLoop(new IlinkClient(), WechatAccountStore.createDefault(), account, renderer);
-            this.thread = new Thread(() -> {
-                try {
-                    loop.run();
-                } catch (Exception e) {
-                    System.err.println("微信通道已退出: " + e.getMessage());
-                }
-            }, "codeagent-wechat-channel");
-            this.thread.setDaemon(true);
-            this.thread.start();
-            return "微信通道已启动，账号: " + account.accountId();
-        }
-
-        synchronized void stop() {
-            if (loop != null) {
-                loop.stop();
-            }
-            if (thread != null) {
-                thread.interrupt();
-            }
-            loop = null;
-            thread = null;
-        }
-
-        synchronized String status() {
-            if (isRunning()) {
-                return "微信通道运行中，账号: " + account.accountId()
-                        + "\n工作区: " + account.workspace();
-            }
-            return "微信通道未运行。输入 /wechat 启动。";
-        }
-
-        private boolean isRunning() {
-            return thread != null && thread.isAlive();
         }
     }
 
@@ -2364,10 +2160,6 @@ public class Main {
                 new SlashCommandHint("/browser status", "/browser status", "查看浏览器会话状态"),
                 new SlashCommandHint("/browser tabs", "/browser tabs", "查看 shared 模式真实 Chrome tab"),
                 new SlashCommandHint("/browser disconnect", "/browser disconnect", "切回 isolated 浏览器模式"),
-                new SlashCommandHint("/wechat", "/wechat", "扫码绑定并启动微信 iLink 通道"),
-                new SlashCommandHint("/wechat setup", "/wechat setup", "重新扫码绑定并启动微信通道"),
-                new SlashCommandHint("/wechat status", "/wechat status", "查看微信通道状态"),
-                new SlashCommandHint("/wechat stop", "/wechat stop", "停止当前进程内微信通道"),
                 new SlashCommandHint("/task", "/task", "查看后台任务列表"),
                 new SlashCommandHint("/task add ", "/task add <任务内容>", "提交后台任务"),
                 new SlashCommandHint("/task cancel ", "/task cancel <task_id>", "取消后台任务"),
@@ -2387,8 +2179,6 @@ public class Main {
                 new SlashCommandHint("/snapshot status", "/snapshot status", "查看 Side-Git 快照状态"),
                 new SlashCommandHint("/snapshot clean", "/snapshot clean", "清理当前项目 Side-Git 快照"),
                 new SlashCommandHint("/restore ", "/restore <N>", "恢复到最近第 N 个 pre-turn 快照"),
-                new SlashCommandHint("/index", "/index", "索引当前代码库"),
-                new SlashCommandHint("/index ", "/index [路径]", "索引指定路径代码库"),
                 new SlashCommandHint("/search ", "/search <查询>", "语义检索代码（RAG 辅助）"),
                 new SlashCommandHint("/graph ", "/graph <类名>", "查看代码关系图谱"),
                 new SlashCommandHint("/clear", "/clear", "清空当前对话历史"),

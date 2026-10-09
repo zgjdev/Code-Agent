@@ -660,7 +660,7 @@ src/main/java/com/codeagent/cli/Main.java
 
 ~~~text
 docs/dev/06-memory-context.md
-docs/agents-reference.md
+docs/implementation/01-runtime-and-agent-foundation.md
 AGENTS.md（仅当运行时约束描述需要更新）
 ~~~
 

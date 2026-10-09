@@ -1,6 +1,6 @@
 # 异步任务与 Runtime API
 
-> 实现状态更新（2026-10-03）：本文对 `DurableTaskManager/runtime_tasks` 的主体分析描述的是重构前实现。inline/plain CLI 现已按 [31-unified-background-execution-runtime.md](31-unified-background-execution-runtime.md) 改为统一 `runtime_executions`：普通输入、`/react`、`/plan`、`/task add` 共用单 workspace Worker、Session FIFO、typed outcome、execution-scoped cancellation、Session execution envelope 与 InteractionBroker。SessionExecutionContextRegistry 已接入 Main，独占 Session Agent/上下文与 writable handle；旧 `runtime_tasks` 仅做非破坏迁移。Runtime HTTP API、WeChat、Lanterna TUI 仍保持原路径。下文涉及旧后台任务实现的内容、源码行号及旧缺陷列表保留作为演进记录，不应再作为当前 inline/plain CLI 行为说明。
+> 实现状态更新（2026-10-03）：本文对 `DurableTaskManager/runtime_tasks` 的主体分析描述的是重构前实现。inline/plain CLI 现已按 [31-unified-background-execution-runtime.md](31-unified-background-execution-runtime.md) 改为统一 `runtime_executions`：普通输入、`/react`、`/plan`、`/task add` 共用单 workspace Worker、Session FIFO、typed outcome、execution-scoped cancellation、Session execution envelope 与 InteractionBroker。SessionExecutionContextRegistry 已接入 Main，独占 Session Agent/上下文与 writable handle；旧 `runtime_tasks` 仅做非破坏迁移。Runtime HTTP API、Lanterna TUI 仍保持原路径。下文涉及旧后台任务实现的内容、源码行号及旧缺陷列表保留作为演进记录，不应再作为当前 inline/plain CLI 行为说明。
 
 当前 CLI 可以在 Agent 运行时直接输入后续任务，无需 `/task add`；等待审批/计划评审时，普通输入优先作为回答，`/task add` 显式追加。EOF/shutdown 保留未完成任务以供恢复，进程退出后无独立后台服务继续执行。`CODEAGENT_TASK_WORKERS` 只属于旧 DurableTaskManager，不影响新队列的单 Worker。Main 的旧 `openTaskManager` 已删除，`runHeadlessTask` 仍由 Runtime API 使用；最新验证结果和环境限制见文档 31 第 7.4 节。
 
@@ -710,7 +710,7 @@ sequenceDiagram
 - **Store 的写入是串行的**：`createThread`、`exists`、`appendEvent`、`events`、`close` 都是 `synchronized`（`RuntimeThreadStore.java:35`、`:50`、`:61`、`:79`、`:126-127`），因为整个 Store 只有一条 JDBC 连接（`:12`）。锁只覆盖数据库操作，**不覆盖 runner 执行**。
 - **关闭不做清理**：`close()` 是 `server.stop(0)` 加 `executor.shutdownNow()`（`:186-190`），没有等待、没有把「正在跑的 Turn」标记成失败。已提交的任务行没有，已提交的**事件**会缺终态。
 
-端口方面：`parseServePort(args, 内置默认端口)`（`Main.java:1126-1140`）从 `--port` 取值，非法时静默回退默认值；`Main.java:1102` 把结果传给构造器。传 0 会让操作系统分配临时端口，实际端口通过 `server.port()` 打印出来（`Main.java:1115`，`RuntimeApiServer.port()` `:53-55`）——这一点在 `docs/phase-20-runtime-api.md` 的验证命令里用到了。
+端口方面：`parseServePort(args, 内置默认端口)`（`Main.java:1126-1140`）从 `--port` 取值，非法时静默回退默认值；`Main.java:1102` 把结果传给构造器。传 0 会让操作系统分配临时端口，实际端口通过 `server.port()` 打印出来（`Main.java:1115`，`RuntimeApiServer.port()` `:53-55`）——这一点在 `docs/implementation/08-runtime-api.md` 的验证命令里用到了。
 
 ---
 
@@ -839,7 +839,7 @@ Java 没有安全的通用强制终止手段。`Thread.stop()` 已废弃，因�
 代价有三层：
 
 1. **能不能停下来取决于下层实现**。如果 runner 里的 HTTP 客户端或某个工具不响应中断，取消只是把数据库状态改了，真实执行还在继续，甚至还在产生副作用。
-2. **无头路径没有第二条取消通道**。`TaskRunner` 只有 `run(String prompt)`（`TaskRunner.java:5`），没有注入 `CancellationToken`。而交互式 CLI、TUI、微信通道各自都会建 token（`Main.java:1369-1370`、`TuiSessionController.java:254`、`WechatAgentSession.java:74`），`Agent`、`ToolRegistry`、`LlmRetryPolicy` 都在检查它（`Agent.java:250`、`:289`、`ToolRegistry.java:1166`、`:1305`、`LlmRetryPolicy.java:79`）。**无头执行拿不到这个机制**。
+2. **无头路径没有第二条取消通道**。`TaskRunner` 只有 `run(String prompt)`（`TaskRunner.java:5`），没有注入 `CancellationToken`。而交互式 CLI、TUI各自都会建 token（`Main.java:1369-1370`、`TuiSessionController.java:254`、`WechatAgentSession.java:74`），`Agent`、`ToolRegistry`、`LlmRetryPolicy` 都在检查它（`Agent.java:250`、`:289`、`ToolRegistry.java:1166`、`:1305`、`LlmRetryPolicy.java:79`）。**无头执行拿不到这个机制**。
 3. **代价外溢到 Worker 线程本身**（2.6 节缺陷一）：一个本意用于「取消任务」的信号，在等待点会变成「杀死消费者线程」，而且杀掉的线程不会被补回来。
 
 顺带澄清一个容易混淆的点：`CancellationContext` / `CancellationToken` 和后台任务的取消**不是同一套机制**。前者是一个进程内的 `AtomicReference` + `InheritableThreadLocal`（`CancellationContext.java:6-7`、`:12-34`），配合 ESC 键监听使用（`Main.java:1387-1392`）；后者是线程 interrupt 加数据库状态。两者目前没有任何代码交汇。
@@ -972,13 +972,13 @@ HTTP API：`src/test/java/com/codeagent/runtime/api/RuntimeApiServerTest.java`�
 mvn test -Dtest=DurableTaskManagerTest,RuntimeApiServerTest,CancellationContextTest
 ```
 
-`docs/phase-20-runtime-api.md` 给的是更宽的一组（含 `CliCommandParserTest`）：
+当前API与命令的验收入口见 `docs/implementation/08-runtime-api.md`，可运行：
 
 ```bash
-mvn test -Dtest=DurableTaskManagerTest,RuntimeApiServerTest,CliCommandParserTest
+mvn test -DskipTests=false "-Dtest=RuntimeApiServerTest,CliCommandParserTest"
 ```
 
-该文档还提供了手工验证 Runtime API 的启动命令（`CODEAGENT_RUNTIME_API_KEY=... java -jar ... serve --http --port 0`，见 `docs/phase-20-runtime-api.md`），这是当前唯一验证「真实进程里的 HTTP 端到端」的方式。
+该文档提供了本机 Runtime API 的启动方法；端口0也可用于临时端口演练。真实进程的HTTP端到端验证应单独记录，不把单元测试等同于实机运行。
 
 ---
 

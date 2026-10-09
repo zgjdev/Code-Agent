@@ -26,7 +26,6 @@ final class CliCommandParser {
         MEMORY_DELETE,
         MEMORY_SEARCH,
         MEMORY_SAVE,
-        INDEX_CODE,
         SEARCH_CODE,
         GRAPH_QUERY,
         CONTEXT_STATUS,
@@ -42,7 +41,6 @@ final class CliCommandParser {
         MCP_RESOURCES,
         MCP_PROMPTS,
         BROWSER,
-        WECHAT,
         TASK,
         SKILL_LIST,
         SKILL_SHOW,
@@ -200,14 +198,6 @@ final class CliCommandParser {
             return new ParsedCommand(CommandType.MEMORY_SAVE, trimmed.substring(6).trim());
         }
 
-        if (trimmed.equalsIgnoreCase("/index")) {
-            return new ParsedCommand(CommandType.INDEX_CODE, null);
-        }
-
-        if (trimmed.regionMatches(true, 0, "/index ", 0, 7)) {
-            return new ParsedCommand(CommandType.INDEX_CODE, trimmed.substring(7).trim());
-        }
-
         if (trimmed.equalsIgnoreCase("/search")) {
             return new ParsedCommand(CommandType.SEARCH_CODE, null);
         }
@@ -270,14 +260,6 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/browser ", 0, 9)) {
             return new ParsedCommand(CommandType.BROWSER, trimmed.substring(9).trim());
-        }
-
-        if (trimmed.equalsIgnoreCase("/wechat")) {
-            return new ParsedCommand(CommandType.WECHAT, "start");
-        }
-
-        if (trimmed.regionMatches(true, 0, "/wechat ", 0, 8)) {
-            return new ParsedCommand(CommandType.WECHAT, trimmed.substring(8).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/task")) {

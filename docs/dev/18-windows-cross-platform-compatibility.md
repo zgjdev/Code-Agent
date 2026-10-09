@@ -28,7 +28,7 @@ Mode Router 针对性测试和项目打包已经通过，但 Windows 环境的 q
 
 - 不引入 Git Bash、WSL 或其他外部运行时依赖。
 - 不改变工具授权链、CommandGuard 规则或 HITL 语义。
-- 不修改 RAG 数据库 schema；旧索引允许通过 `/index` 重建。
+- 不修改 RAG 数据库 schema；项目键变化后，由后台校准重新建立当前项目的派生索引。
 - 不把所有终端输出强制转换为单一平台换行符。
 - 不处理 IDE 占用 `target/classes` 导致的文件锁；这是构建进程外部状态。
 
@@ -86,7 +86,7 @@ percent decoding 继续使用 UTF-8，未编码空格和中文原样保留。
 
 #### RAG 项目键
 
-抽取单一规范化入口，由 `VectorStore` 构造函数统一处理项目路径；`CodeRetriever`、索引和测试不再分别决定字符串形式。旧数据库无需 schema migration，但规范化前写入的项目键需要重新 `/index`。
+抽取单一规范化入口，由 `VectorStore` 构造函数统一处理项目路径；`CodeRetriever`、索引和测试不再分别决定字符串形式。旧数据库无需 schema migration，但规范化前写入的项目键需要重新建立派生索引。
 
 #### Shell 选择
 
@@ -108,7 +108,7 @@ percent decoding 继续使用 UTF-8，未编码空格和中文原样保留。
 
 - 对外路径统一为 `/`，与当前测试、prompt 和 JSON 示例一致。
 - Windows 命令语法改为 PowerShell；类 Unix 行为不变。
-- 旧 RAG 索引如因项目键格式不同无法读取，执行 `/index` 重建。
+- 旧 RAG 索引如因项目键格式不同无法读取，启动交互式 CLI 校准项目索引。
 - 所有修改保持局部，可逐模块回滚。
 
 ## 4. 实现任务与测试矩阵

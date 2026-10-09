@@ -32,7 +32,7 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
     public void setMaintenance(WorkspaceCodeIndexManager manager) { maintenance = manager; }
     public AutoIndexStatus maintenanceStatus(Path root) {
         var manager = maintenance;
-        return manager == null ? AutoIndexStatus.manual() : manager.status(root);
+        return manager == null ? AutoIndexStatus.disabled() : manager.status(root);
     }
     public void reconfigureEmbeddingForProject(EmbeddingResolution resolution, Path root, BooleanSupplier consent) {
         synchronized (lifecycle) {
@@ -97,7 +97,7 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
             durations.putAll(result.durations());
             if (!empty && prepared.isPresent()) durations.merge(new SemanticRetriever().source(context), inferenceMillis, Long::sum);
             var status = maintenanceStatus(request.projectRoot());
-            boolean pending = !Set.of("idle", "manual", "paused").contains(status.state());
+            boolean pending = !Set.of("idle", "disabled", "paused").contains(status.state());
             var diagnostics = new RetrievalDiagnostics(lease.provider.map(EmbeddingProvider::id).orElse("off"),
                     durations, result.hits(), reasons, SqliteRetrievalIndex.SCHEMA_VERSION, freshness, status);
             return new RetrievalResponse(budgeted.hits(), map, diagnostics,
@@ -163,15 +163,6 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
                 return coordinator.commitEmbeddings(batch);
             }
         }
-    }
-    public void clear(Path root) {
-        var manager = maintenance;
-        if (manager != null) { manager.clear(root); return; }
-        directClear(root);
-    }
-    public void directClear(Path root) {
-        lastProjectRoot = root;
-        try (Lease ignored = acquire(root, false)) { coordinator(Optional.empty()).clear(root); }
     }
     private IndexCoordinator coordinator(Optional<EmbeddingProvider> provider) {
         return new IndexCoordinator(index, provider).withCommitGuard(lifecycle, () -> !closed);

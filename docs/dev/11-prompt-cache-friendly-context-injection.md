@@ -28,7 +28,7 @@
 
 ### 1.3 非目标
 
-- 不实现 Anthropic `cache_control`，不向 GLM / DeepSeek 请求体注入未确认兼容的私有 cache 字段（沿用 `docs/phase-12-long-context.md:39-41` 的既有决策）。
+- 不实现 Anthropic `cache_control`，不向 GLM / DeepSeek 请求体注入未确认兼容的私有 cache 字段（沿用 `docs/implementation/03-context-memory-and-retrieval.md` 的既有决策）。
 - 不改变长期记忆的检索时机、打分算法、预算参数与 `MemoryRetriever` 的任何行为。
 - 不改变 `PlanExecuteAgent` / `SubAgent` / `Planner` 的注入位置。
 - 不新增记忆去重、衰减或历史裁剪逻辑；历史中累积的旧检索结果交由既有自动压缩处理。
@@ -348,7 +348,7 @@ mvn test -DskipTests=false
 - [x] 记忆检索的预算、打分、返回条数与改动前一致（`MemoryRetriever` 未被触碰，`git diff` 无该文件）。
 - [x] `mvn test -Pquick` 已运行：915 个测试、10 个失败、2 个跳过。基线（同一机器、同一命令、`git stash` 掉本次 src 改动）为 913 个测试、10 个失败、2 个跳过，**失败集合逐条相同**，均为 Windows 环境相关的既有失败（`ImageReferenceParserTest` 路径 URI ×3、`CodeIndexTest` ×2、`MemoryManagerTest` 路径分隔符、`CodeRetrieverTest`、`InlineRendererTest`、`CodeSearchGoldenSetTest`、`TerminalMarkdownRendererTest`）。本次改动**零新增失败**，测试数 +2 即两个新用例。
 - [x] `git diff --check` 通过（仅有 LF→CRLF 提示，无空白错误）。
-- [x] `docs/dev/01-react-agent.md`、`docs/dev/06-memory-context.md`、`docs/agents-reference.md`、`README.md` 中关于注入位置的描述已同步。`AGENTS.md` 未提及注入位置，无需改动。
+- [x] `docs/dev/01-react-agent.md`、`docs/dev/06-memory-context.md`、`docs/implementation/01-runtime-and-agent-foundation.md`、`README.md` 中关于注入位置的描述已同步。`AGENTS.md` 未提及注入位置，无需改动。
 
 ### 缓存收益度量（未执行，待补）
 

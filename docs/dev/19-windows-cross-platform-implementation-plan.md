@@ -12,7 +12,7 @@
 
 - 不安装或依赖 Git Bash/WSL。
 - 不修改 ToolPolicy/HITL/AuditLog/PathGuard/CommandGuard 的授权顺序。
-- 不修改 RAG schema；旧索引通过 `/index` 重建。
+- 不修改 RAG schema；项目键变化后，由后台校准重新建立当前项目的派生索引。
 - 不使用 worktree，不执行 commit/push/PR。
 
 ---

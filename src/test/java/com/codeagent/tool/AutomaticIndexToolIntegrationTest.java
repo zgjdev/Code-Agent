@@ -18,7 +18,7 @@ class AutomaticIndexToolIntegrationTest {
         try (var index = new SqliteRetrievalIndex(temp.resolve("index.db"));
              var service = new DefaultCodeRetrievalService(index, new EmbeddingResolution(Optional.empty(), "off", false))) {
             registry.setCodeRetrievalService(service);
-            assertEquals("manual", service.maintenanceStatus(root).state());
+            assertEquals("disabled", service.maintenanceStatus(root).state());
             try (var manager = registry.startAutomaticIndex(config)) {
                 manager.awaitIdle(root, Duration.ofSeconds(5));
                 var output = registry.executeToolOutput("write_file", "{\"path\":\"Store.java\",\"content\":\"class Store { void saveData() {} }\"}");

@@ -12,7 +12,7 @@
 
 - 普通 inline/plain 顶层任务由 Mode Router 自动选择 ReAct 或统一的多 Agent 协作 Plan-and-Execute。
 - `/react` 与 `/plan` 仅覆盖当前轮；非取消性路由失败回退 ReAct。
-- Lanterna TUI、Runtime API 和 WeChat 不宣称已接入自动路由。
+- Lanterna TUI、Runtime API 不宣称已接入自动路由。
 - Planner、Task Worker、Reviewer 是 Plan 路径内部角色，不是第三套顶层执行模式。
 - 不修改路由、授权、并发、持久化或恢复逻辑。
 - 不执行 `git commit`、`git push`、创建 PR 或合并。
@@ -79,10 +79,10 @@ Expected: `BUILD SUCCESS`，三个测试类全部通过。
 **Files:**
 - Modify: `CODEAGENT.md`
 - Modify: `README.md`
-- Modify: `docs/agents-reference.md`
+- Modify: `docs/implementation/01-runtime-and-agent-foundation.md`
 - Modify: `src/main/resources/skills/web-access/SKILL.md`
 - Modify as evidence requires: `ROADMAP.md`
-- Modify as evidence requires: `docs/phase-*.md`
+- Modify as evidence requires: `docs/implementation/*.md`
 - Modify as evidence requires: `src/main/java/com/codeagent/tui/pane/StatusPane.java`
 - Modify as evidence requires: `src/test/resources/code-search/golden-set.json`
 

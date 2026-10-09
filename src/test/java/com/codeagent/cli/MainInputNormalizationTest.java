@@ -211,7 +211,10 @@ class MainInputNormalizationTest {
                 .map(Main.SlashCommandHint::display)
                 .toList();
 
-        assertTrue(commands.contains("/index [路径]"));
+        assertTrue(Main.slashCommandHints().stream()
+                .noneMatch(hint -> hint.insertText().startsWith("/index")));
+        assertTrue(Main.slashCommandHints().stream()
+                .noneMatch(hint -> hint.insertText().startsWith("/wechat")));
         assertTrue(commands.contains("/search <查询>"));
         assertTrue(commands.contains("/graph <类名>"));
         assertTrue(commands.contains("/compact"));

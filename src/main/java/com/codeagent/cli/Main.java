@@ -258,6 +258,7 @@ public class Main {
             System.exit(1);
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
+        AtomicReference<com.codeagent.rag.WorkspaceCodeIndexManager> automaticIndexRef = new AtomicReference<>();
 
         try (Terminal terminal = TerminalBuilder.builder().system(true).dumb(true).build()) {
             refreshTerminalColumns(terminal);
@@ -319,6 +320,14 @@ public class Main {
             renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, null));
 
             String startupNote = "";
+            try {
+                var automaticIndex = hitlToolRegistry.startAutomaticIndex(config);
+                automaticIndexRef.set(automaticIndex);
+                if (automaticIndex != null) Runtime.getRuntime().addShutdownHook(
+                        new Thread(automaticIndex::close, "codeagent-index-shutdown"));
+            } catch (Exception e) {
+                startupNote = "自动索引维护未启用: " + e.getClass().getSimpleName();
+            }
             try {
                 McpConfigBootstrapResult bootstrapResult = ensureDefaultMcpConfig(Path.of(System.getProperty("user.home")));
                 if (!bootstrapResult.message().isBlank()) {
@@ -1402,6 +1411,9 @@ public class Main {
         } catch (IOException e) {
             System.err.println("❌ 终端初始化失败: " + e.getMessage());
             System.exit(1);
+        } finally {
+            var automaticIndex = automaticIndexRef.get();
+            if (automaticIndex != null) automaticIndex.close();
         }
     }
 
@@ -2626,8 +2638,13 @@ public class Main {
                         return "已拒绝远程 Embedding；继续使用本地检索";
                     }
                     config.save();
-                    registry.getCodeRetrievalService().reconfigureEmbedding(
-                            new EmbeddingProviderFactory().resolve(config, projectRoot, capability.orElseThrow()));
+                    var resolution = new EmbeddingProviderFactory().resolve(config, projectRoot, capability.orElseThrow());
+                    if (registry.getCodeRetrievalService() instanceof com.codeagent.rag.DefaultCodeRetrievalService service) {
+                        service.reconfigureEmbeddingForProject(resolution, projectRoot, () -> {
+                            try { return new RemoteEmbeddingConsentStore().find(request).isPresent(); }
+                            catch (IOException failure) { return false; }
+                        });
+                    } else registry.getCodeRetrievalService().reconfigureEmbedding(resolution);
                     return "✅ 已授权并启用远程 Embedding: " + provider;
                 }
             }

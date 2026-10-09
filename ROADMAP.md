@@ -69,6 +69,7 @@
 - 代码向量化（Embedding），支持本地 Ollama 和远程 API
 - 向量数据库（SQLite + 内存余弦检索）
 - 代码分块与索引（文件/类/方法粒度）
+- 交互式 CLI 索引自动维护（启动 Hash 对账、文件监听去抖、周期校准、词法先更新与向量异步补齐；设计和验收见 docs/dev/40-automatic-code-index-maintenance.md）
 - 语义检索（自然语言搜代码）
 - 代码关系图谱（类、方法依赖）
 

@@ -33,6 +33,12 @@ For the primary entry point, see `/AGENTS.md`.
 
 系统属性 > 环境变量 > 默认值：`codeagent.snapshot.enabled`(true) / `codeagent.snapshot.max`(50) / `codeagent.snapshot.excludes`(.git,.codeagent/snapshots,target,node_modules,dist,.idea,*.class,*.jar) / `codeagent.snapshot.dir`(~/.codeagent/snapshots)
 
+### 代码索引自动维护
+
+交互式 CLI 显式启动 `WorkspaceCodeIndexManager`，共享一个数据库写协调器；构造普通 ToolRegistry、Runtime API、WeChat 或 headless 不启动该服务。启动完整 Hash 对账，递归 WatchService 合并脏路径（默认1500ms去抖、最长10000ms），每300秒校准兜底；词法先提交，向量在独立 Worker 补齐。单 Connection 的全部访问共享 index monitor，查询向量在锁外计算，查询候选在同一读取窗口取得。词法提交及向量条件提交服从生命周期门禁，向量额外核对文件/chunk Hash、任务及模型代次、远程项目授权。
+
+`autoIndex.enabled=false` 保留手动模式；手动 `/index` 与后台共用协调器，clear 暂停该项目自动补齐，显式刷新或重启恢复。模型失败不回滚词法，有限重试/错误诊断可见；模型重配后重新补齐。provider lease 在推理结束后才释放，关闭停止接收与提交，超时不强行关闭在用资源。`maintenance_state` 和待办计数只表示已知维护状态，不替代候选 Hash 和 read_file。实现与平台安全边界详见 [40-automatic-code-index-maintenance.md](dev/40-automatic-code-index-maintenance.md)。
+
 ### Embedding Config
 
 配置文件 > 环境变量 > 默认值：`EMBEDDING_MODE`(local)。`local` 默认使用 Qwen3-Embedding-0.6B ONNX FP32（1024 维），通过 `embedding.localModelDirectory` / `EMBEDDING_LOCAL_MODEL_DIR` 指定固定 artifact 目录，默认 `~/.codeagent/models/qwen3-embedding-0.6b/c25a394dd583836952667c12f008335071b3f43d`。使用 `scripts/install-qwen3-model.ps1` 显式安装并校验；运行时 lazy 加载、不自动联网，初始化失败缓存到关闭或重配，仅降级语义路径。`embedding.provider=bge` 是本地回滚；`off` 仅关闭语义层。`remote` 需要 provider/model/endpoint/API Key 和当前项目的显式授权，可选 `glm`、`jina`、`openai-compatible`。

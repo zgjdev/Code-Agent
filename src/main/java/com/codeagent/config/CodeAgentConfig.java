@@ -23,6 +23,34 @@ public class CodeAgentConfig {
     private String defaultProvider = "glm";
     private Map<String, ProviderConfig> providers = new LinkedHashMap<>();
     private EmbeddingConfig embedding = new EmbeddingConfig();
+    private AutoIndexConfig autoIndex = new AutoIndexConfig();
+
+    public AutoIndexConfig getAutoIndex() { return autoIndex; }
+    public void setAutoIndex(AutoIndexConfig options) {
+        autoIndex = options == null ? new AutoIndexConfig() : options;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class AutoIndexConfig {
+        private boolean enabled = true;
+        private long debounceMillis = 1500;
+        private long maxDebounceMillis = 10000;
+        private long reconcileIntervalSeconds = 300;
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean value) { enabled = value; }
+        public long getDebounceMillis() { return debounceMillis; }
+        public void setDebounceMillis(long value) { debounceMillis = value; }
+        public long getMaxDebounceMillis() { return maxDebounceMillis; }
+        public void setMaxDebounceMillis(long value) { maxDebounceMillis = value; }
+        public long getReconcileIntervalSeconds() { return reconcileIntervalSeconds; }
+        public void setReconcileIntervalSeconds(long value) { reconcileIntervalSeconds = value; }
+        public void validate() {
+            if (debounceMillis < 0 || maxDebounceMillis < Math.max(1, debounceMillis)
+                    || reconcileIntervalSeconds < 1 || reconcileIntervalSeconds > 86400
+                    || maxDebounceMillis > 60000)
+                throw new IllegalArgumentException("Invalid autoIndex timing configuration");
+        }
+    }
     private WebToolsConfig webTools = new WebToolsConfig();
 
     @JsonIgnoreProperties(ignoreUnknown = true)

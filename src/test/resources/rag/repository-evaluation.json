@@ -428,7 +428,7 @@
         "path": "src/main/java/com/codeagent/rag/IndexCoordinator.java",
         "marker": "private IndexRefreshResult execute(IndexRefreshRequest request, boolean rebuild)",
         "requiredText": [
-          "boolean lexicalChanged = old == null || !old.contentHash().equals(file.contentHash());"
+          "boolean lexicalChanged = rebuild || old == null || !old.contentHash().equals(file.contentHash());"
         ]
       }
     ]
@@ -442,7 +442,7 @@
         "path": "src/main/java/com/codeagent/rag/IndexCoordinator.java",
         "marker": "private IndexRefreshResult execute(IndexRefreshRequest request, boolean rebuild)",
         "requiredText": [
-          "boolean lexicalChanged = old == null || !old.contentHash().equals(file.contentHash());"
+          "boolean lexicalChanged = rebuild || old == null || !old.contentHash().equals(file.contentHash());"
         ]
       }
     ]
@@ -456,7 +456,7 @@
         "path": "src/main/java/com/codeagent/rag/IndexCoordinator.java",
         "marker": "private IndexRefreshResult execute(IndexRefreshRequest request, boolean rebuild)",
         "requiredText": [
-          "boolean lexicalChanged = old == null || !old.contentHash().equals(file.contentHash());"
+          "boolean lexicalChanged = rebuild || old == null || !old.contentHash().equals(file.contentHash());"
         ]
       }
     ]
@@ -716,11 +716,11 @@
   {
     "id": "scan-identifier",
     "category": "identifier",
-    "query": "IndexFileScanner sensitive",
+    "query": "IndexPathPolicy sensitive",
     "evidence": [
       {
-        "path": "src/main/java/com/codeagent/rag/IndexFileScanner.java",
-        "marker": "private static boolean sensitive(Path file)",
+        "path": "src/main/java/com/codeagent/rag/IndexPathPolicy.java",
+        "marker": "private static boolean sensitive(String name)",
         "requiredText": [
           "name.equals(\"secrets.json\") || name.endsWith(\".jsonl\")"
         ]
@@ -733,8 +733,8 @@
     "query": "代码索引如何排除密钥和原始会话文件？",
     "evidence": [
       {
-        "path": "src/main/java/com/codeagent/rag/IndexFileScanner.java",
-        "marker": "private static boolean sensitive(Path file)",
+        "path": "src/main/java/com/codeagent/rag/IndexPathPolicy.java",
+        "marker": "private static boolean sensitive(String name)",
         "requiredText": [
           "name.equals(\"secrets.json\") || name.endsWith(\".jsonl\")"
         ]
@@ -747,8 +747,8 @@
     "query": "建代码知识库时，哪里避免把环境变量文件和私钥收进去？",
     "evidence": [
       {
-        "path": "src/main/java/com/codeagent/rag/IndexFileScanner.java",
-        "marker": "private static boolean sensitive(Path file)",
+        "path": "src/main/java/com/codeagent/rag/IndexPathPolicy.java",
+        "marker": "private static boolean sensitive(String name)",
         "requiredText": [
           "name.equals(\"secrets.json\") || name.endsWith(\".jsonl\")"
         ]
@@ -803,8 +803,8 @@
     "query": "建代码索引时如何排除秘密文件，并只更新发生变化的源码？",
     "evidence": [
       {
-        "path": "src/main/java/com/codeagent/rag/IndexFileScanner.java",
-        "marker": "private static boolean sensitive(Path file)",
+        "path": "src/main/java/com/codeagent/rag/IndexPathPolicy.java",
+        "marker": "private static boolean sensitive(String name)",
         "requiredText": [
           "name.equals(\"secrets.json\") || name.endsWith(\".jsonl\")"
         ]
@@ -813,7 +813,7 @@
         "path": "src/main/java/com/codeagent/rag/IndexCoordinator.java",
         "marker": "private IndexRefreshResult execute(IndexRefreshRequest request, boolean rebuild)",
         "requiredText": [
-          "boolean lexicalChanged = old == null || !old.contentHash().equals(file.contentHash());"
+          "boolean lexicalChanged = rebuild || old == null || !old.contentHash().equals(file.contentHash());"
         ]
       }
     ]

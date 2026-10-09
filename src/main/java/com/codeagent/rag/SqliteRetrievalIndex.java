@@ -42,7 +42,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         initializeSchema();
     }
 
-    public Optional<FileSnapshot> findFile(Path projectRoot, Path relativePath) throws SQLException {
+    public synchronized Optional<FileSnapshot> findFile(Path projectRoot, Path relativePath) throws SQLException {
         String sql = """
                 SELECT file_path, content_hash, size_bytes, modified_millis, language, index_status, last_error
                 FROM indexed_files_v2 WHERE project_path=? AND file_path=?
@@ -61,7 +61,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         }
     }
 
-    public List<FileSnapshot> listFiles(Path projectRoot) throws SQLException {
+    public synchronized List<FileSnapshot> listFiles(Path projectRoot) throws SQLException {
         String sql = """
                 SELECT file_path, content_hash, size_bytes, modified_millis, language, index_status, last_error
                 FROM indexed_files_v2 WHERE project_path=? ORDER BY file_path
@@ -81,7 +81,17 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         return List.copyOf(files);
     }
 
-    public List<IndexedChunk> listChunks(Path projectRoot, Path relativePath) throws SQLException {
+    public synchronized int countChunks(Path projectRoot, Path relativePath) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT COUNT(*) FROM code_chunks_v2 WHERE project_path=? AND file_path=?")) {
+            statement.setString(1, projectKey(projectRoot));
+            statement.setString(2, relativeKey(relativePath));
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next() ? rows.getInt(1) : 0;
+            }
+        }
+    }
+
+    public synchronized List<IndexedChunk> listChunks(Path projectRoot, Path relativePath) throws SQLException {
         String sql = """
                 SELECT start_line,end_line,chunk_type,symbol,symbol_id,content,search_terms,content_hash
                 FROM code_chunks_v2 WHERE project_path=? AND file_path=? ORDER BY start_line,end_line,id
@@ -102,7 +112,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         return List.copyOf(chunks);
     }
 
-    public List<RepositorySymbol> listSymbols(Path projectRoot) throws SQLException {
+    public synchronized List<RepositorySymbol> listSymbols(Path projectRoot) throws SQLException {
         String sql = """
                 SELECT file_path,symbol_id,qualified_name,simple_name,signature,symbol_kind,start_line,end_line
                 FROM code_symbols_v2 WHERE project_path=?
@@ -121,7 +131,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         return List.copyOf(result);
     }
 
-    public List<RepositoryRelation> listRelations(Path projectRoot) throws SQLException {
+    public synchronized List<RepositoryRelation> listRelations(Path projectRoot) throws SQLException {
         String sql = """
                 SELECT file_path,from_symbol_id,to_symbol_id,target_text,relation_type,line_number
                 FROM code_relations_v2 WHERE project_path=? ORDER BY file_path,line_number,id
@@ -139,7 +149,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         return List.copyOf(result);
     }
 
-    public boolean hasCompleteEmbeddings(Path projectRoot, Path relativePath,
+    public synchronized boolean hasCompleteEmbeddings(Path projectRoot, Path relativePath,
             String embeddingSpaceId, int expectedCount) throws SQLException {
         String sql = """
                 SELECT COUNT(*) FROM chunk_embeddings_v2 e JOIN code_chunks_v2 c ON c.id=e.chunk_id
@@ -156,7 +166,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         }
     }
 
-    public void clearProject(Path projectRoot) throws SQLException {
+    public synchronized void clearProject(Path projectRoot) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "DELETE FROM indexed_files_v2 WHERE project_path=?")) {
             statement.setString(1, projectKey(projectRoot));
@@ -164,7 +174,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         }
     }
 
-    public void replaceLexicalFile(FileIndexBatch batch) throws SQLException {
+    public synchronized void replaceLexicalFile(FileIndexBatch batch) throws SQLException {
         String project = projectKey(batch.projectRoot());
         String file = relativeKey(batch.relativePath());
         boolean autoCommit = connection.getAutoCommit();
@@ -184,12 +194,47 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         }
     }
 
-    public void replaceFileEmbeddings(FileEmbeddingBatch batch) throws SQLException {
+    public synchronized void replaceFileEmbeddings(FileEmbeddingBatch batch) throws SQLException {
+        // Compatibility-only synchronous entry: bind a version while holding the same connection monitor.
+        if (batch.expectedFileContentHash() == null) {
+            Optional<FileSnapshot> current = findFile(batch.projectRoot(), batch.relativePath());
+            if (current.isEmpty()) {
+                return;
+            }
+            batch = new FileEmbeddingBatch(batch.projectRoot(), batch.relativePath(), batch.space(),
+                    batch.embeddings(), current.get().contentHash());
+        }
+        replaceFileEmbeddingsIfCurrent(batch);
+    }
+
+    public synchronized boolean replaceFileEmbeddingsIfCurrent(FileEmbeddingBatch batch) throws SQLException {
+        if (batch.expectedFileContentHash() == null) {
+            return false;
+        }
         String project = projectKey(batch.projectRoot());
         String file = relativeKey(batch.relativePath());
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
+            // Take the SQLite writer lock before checking the expected version, including other processes.
+            try (PreparedStatement lock = connection.prepareStatement("UPDATE indexed_files_v2 SET content_hash=content_hash WHERE project_path=? AND file_path=?")) {
+                lock.setString(1, project);
+                lock.setString(2, file);
+                lock.executeUpdate();
+            }
+            Optional<FileSnapshot> current = findFile(batch.projectRoot(), batch.relativePath());
+            if (current.isEmpty() || batch.expectedFileContentHash() != null && !batch.expectedFileContentHash().equals(current.get().contentHash())) {
+                connection.rollback();
+                return false;
+            }
+            for (ChunkEmbedding embedding : batch.embeddings()) {
+                try {
+                    findChunkId(project, file, embedding);
+                } catch (StaleChunkException stale) {
+                    connection.rollback();
+                    return false;
+                }
+            }
             upsertEmbeddingSpace(batch.space());
             try (PreparedStatement delete = connection.prepareStatement("""
                     DELETE FROM chunk_embeddings_v2
@@ -207,6 +252,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
                 insertEmbedding(chunkId, batch.space(), embedding);
             }
             connection.commit();
+            return true;
         } catch (SQLException | RuntimeException e) {
             connection.rollback();
             throw e;
@@ -215,7 +261,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         }
     }
 
-    public void deleteFile(Path projectRoot, Path relativePath) throws SQLException {
+    public synchronized void deleteFile(Path projectRoot, Path relativePath) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "DELETE FROM indexed_files_v2 WHERE project_path=? AND file_path=?")) {
             statement.setString(1, projectKey(projectRoot));
@@ -224,12 +270,12 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         }
     }
 
-    public List<RetrievalCandidate> searchTerms(
+    public synchronized List<RetrievalCandidate> searchTerms(
             Path projectRoot, String normalizedQuery, int limit) throws SQLException {
         return searchTerms(projectRoot, normalizedQuery, limit, false);
     }
 
-    public List<RetrievalCandidate> searchAnyTerms(
+    public synchronized List<RetrievalCandidate> searchAnyTerms(
             Path projectRoot, String normalizedQuery, int limit) throws SQLException {
         return searchTerms(projectRoot, normalizedQuery, limit, true);
     }
@@ -253,7 +299,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         }, true);
     }
 
-    public List<RetrievalCandidate> searchSymbols(
+    public synchronized List<RetrievalCandidate> searchSymbols(
             Path projectRoot, String query, int limit) throws SQLException {
         if (query == null || query.isBlank() || limit <= 0) return List.of();
         String sql = """
@@ -281,7 +327,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         }, false);
     }
 
-    public List<RetrievalCandidate> searchRelations(
+    public synchronized List<RetrievalCandidate> searchRelations(
             Path projectRoot, Set<String> seedSymbolIds, int limit) throws SQLException {
         if (seedSymbolIds == null || seedSymbolIds.isEmpty() || limit <= 0) return List.of();
         String placeholders = String.join(",", seedSymbolIds.stream().map(ignored -> "?").toList());
@@ -317,7 +363,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         }
     }
 
-    public List<RetrievalCandidate> searchVector(
+    public synchronized List<RetrievalCandidate> searchVector(
             Path projectRoot, String embeddingSpaceId, float[] query, int limit) throws SQLException {
         if (query == null || query.length == 0 || limit <= 0) return List.of();
         String sql = """
@@ -351,7 +397,7 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
         return results.size() > limit ? List.copyOf(results.subList(0, limit)) : List.copyOf(results);
     }
 
-    public RetrievalIndexStatus status(Path projectRoot) throws SQLException {
+    public synchronized RetrievalIndexStatus status(Path projectRoot) throws SQLException {
         String project = projectKey(projectRoot);
         return new RetrievalIndexStatus(true,
                 legacyDatabase != null && Files.exists(legacyDatabase),
@@ -541,15 +587,16 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
     }
 
     private long findChunkId(String project, String file, ChunkEmbedding embedding) throws SQLException {
-        String sql = "SELECT id FROM code_chunks_v2 WHERE project_path=? AND file_path=? AND start_line=? AND end_line=? AND symbol_id IS ?";
+        String sql = "SELECT id FROM code_chunks_v2 WHERE project_path=? AND file_path=? AND start_line=? AND end_line=? AND symbol_id IS ? AND content_hash=?";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, project); statement.setString(2, file);
             statement.setInt(3, embedding.startLine()); statement.setInt(4, embedding.endLine());
             statement.setString(5, embedding.symbolId());
+            statement.setString(6, embedding.sourceContentHash());
             try (ResultSet result = statement.executeQuery()) {
-                if (!result.next()) throw new SQLException("Embedding references an unknown chunk");
+                if (!result.next()) throw new StaleChunkException("Embedding references an unknown chunk");
                 long id = result.getLong(1);
-                if (result.next()) throw new SQLException("Embedding chunk identity is ambiguous");
+                if (result.next()) throw new StaleChunkException("Embedding chunk identity is ambiguous");
                 return id;
             }
         }
@@ -645,8 +692,14 @@ public final class SqliteRetrievalIndex implements AutoCloseable {
     }
 
     @Override
-    public void close() throws SQLException {
+    public synchronized void close() throws SQLException {
         connection.close();
+    }
+
+    private static final class StaleChunkException extends SQLException {
+        StaleChunkException(String message) {
+            super(message);
+        }
     }
 
     @FunctionalInterface

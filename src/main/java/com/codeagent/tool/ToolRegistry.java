@@ -87,6 +87,28 @@ public class ToolRegistry {
     private final long toolBatchTimeoutSeconds;
     private static final int DEFAULT_FETCH_MAX_CHARS = 8_000;
     private String projectPath = System.getProperty("user.dir");
+    private volatile com.codeagent.rag.WorkspaceCodeIndexManager automaticIndex;
+
+    /** Called only by an explicit lifecycle owner; ordinary/headless registries start no threads. */
+    public com.codeagent.rag.WorkspaceCodeIndexManager startAutomaticIndex(CodeAgentConfig config) throws IOException {
+        config.getAutoIndex().validate();
+        if (!config.getAutoIndex().isEnabled()) return null;
+        if (!(getCodeRetrievalService() instanceof DefaultCodeRetrievalService service)) return null;
+        var manager = new com.codeagent.rag.WorkspaceCodeIndexManager(service, config.getAutoIndex());
+        try {
+            manager.register(Path.of(projectPath));
+            automaticIndex = manager;
+            return manager;
+        } catch (Exception failure) {
+            manager.abortStartup();
+            throw failure;
+        }
+    }
+
+    private void notifyIndexWrite(Path safePath) {
+        var manager = automaticIndex;
+        if (manager != null) try { manager.pathChanged(Path.of(projectPath), safePath); } catch (Exception ignored) { }
+    }
     private PathGuard pathGuard = new PathGuard(projectPath);
     private final AuditLog auditLog = new AuditLog();
     private NetworkPolicy networkPolicy;
@@ -143,6 +165,8 @@ public class ToolRegistry {
             this.snapshotService.close();
             this.snapshotService = SnapshotService.forProject(Path.of(projectPath));
         }
+        var manager = automaticIndex;
+        if (manager != null) try { manager.register(Path.of(projectPath)); } catch (IOException ignored) { }
     }
 
     /**
@@ -350,6 +374,7 @@ public class ToolRegistry {
                             Files.createDirectories(parent);
                         }
                         Files.writeString(safe, content);
+                        notifyIndexWrite(safe);
                         try {
                             writeFileObserver.accept(path, new String[]{before, content});
                         } catch (Exception ignored) {
@@ -1175,6 +1200,8 @@ public class ToolRegistry {
         boolean shouldAudit = shouldAudit(name);
         long start = System.nanoTime();
         BrowserAuditMetadata auditMetadata = null;
+        Path executionRoot = Path.of(projectPath);
+        boolean localStarted = false;
 
         try {
             McpRegisteredTool mcpTool = mcpTools.get(name);
@@ -1220,6 +1247,7 @@ public class ToolRegistry {
             Map<String, String> argMap = new HashMap<>();
             args.fields().forEachRemaining(entry ->
                     argMap.put(entry.getKey(), entry.getValue().asText()));
+            localStarted = true;
             ToolOutput output = switch (name) {
                 case "web_search" -> webSearchOutput(
                         argMap.get("query"), parseInt(argMap.get("top_k"), 5));
@@ -1245,6 +1273,10 @@ public class ToolRegistry {
             }
             return ToolOutput.failure(ToolOutput.FailureKind.EXECUTION_ERROR,
                     "工具执行失败: " + e.getMessage());
+        } finally {
+            var manager = automaticIndex;
+            if (localStarted && manager != null && ("execute_command".equals(name) || "revert_turn".equals(name)))
+                try { manager.workspaceChanged(executionRoot); } catch (Exception ignored) { }
         }
     }
 

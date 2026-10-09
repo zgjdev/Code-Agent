@@ -1,6 +1,6 @@
 # CodeAgent 项目开发指南
 
-本文件是仓库中 Agent 和新线程的首读入口。它约束开发流程、架构边界和交付质量；详细实现说明见 [docs/agents-reference.md](docs/agents-reference.md)。
+本文件是仓库中 Agent 和新线程的首读入口。它约束开发流程、架构边界和交付质量；详细实现说明见 [docs/implementation/01-runtime-and-agent-foundation.md](docs/implementation/01-runtime-and-agent-foundation.md)。
 
 ## 1. 信息优先级与项目快照
 
@@ -67,11 +67,11 @@ flowchart LR
 
 ```mermaid
 graph TB
-    CLI[CLI / Runtime API / WeChat] --> ROUTE[命令与入口解析]
+    CLI[CLI / Runtime API] --> ROUTE[命令与入口解析]
     ROUTE --> QUEUE[inline/plain: RuntimeExecutionQueue]
     QUEUE --> WORKER[workspace 单 Worker + Session Context lease]
     WORKER --> MODE{执行模式}
-    ROUTE -->|Runtime API / WeChat / Lanterna 原路径| MODE
+    ROUTE -->|Runtime API / Lanterna 原路径| MODE
     MODE --> REACT[Agent ReAct]
     MODE --> PLAN[PlanExecuteAgent 统一多 Agent 协作]
     REACT --> CORE[Prompt + Context + ConversationLedger]
@@ -149,7 +149,7 @@ sequenceDiagram
 
 ## 6. 必须遵守的运行时约束
 
-- 默认 inline/plain 终端的普通顶层输入、`/react <任务>`、`/plan <任务>` 与 `/task add <任务>` 先持久化为 `runtime_executions`，由当前 workspace 的单顶层 Worker 串行执行；运行中仍可继续提交后续消息。Execution 首次 RUNNING 时才展开 @path/MCP resource，Router 只读取原始 `submittedInput` 与当时 Parent Session 的 Top-level Conversation，严格返回 REACT/PLAN，非取消性失败回退 ReAct。`/react` 与 `/plan` 是 one-turn override；Lanterna TUI、Runtime API 和 WeChat 尚不接入该统一队列。
+- 默认 inline/plain 终端的普通顶层输入、`/react <任务>`、`/plan <任务>` 与 `/task add <任务>` 先持久化为 `runtime_executions`，由当前 workspace 的单顶层 Worker 串行执行；运行中仍可继续提交后续消息。Execution 首次 RUNNING 时才展开 @path/MCP resource，Router 只读取原始 `submittedInput` 与当时 Parent Session 的 Top-level Conversation，严格返回 REACT/PLAN，非取消性失败回退 ReAct。`/react` 与 `/plan` 是 one-turn override；Lanterna TUI、Runtime API 尚不接入该统一队列。
 - 运行中直接输入即追加到同一队列；等待 Plan/HITL 时，普通输入由 InteractionInputRouter 优先作为交互回答，非法审批输入不得自动批准或入队，`/task add` 可显式追加任务。CLI 输入循环是唯一终端输入所有者，Worker 经 InteractionBroker 等待回答。
 - SessionExecutionContextRegistry 独占每个 Session 的 writable SessionHandle、Agent、ParentConversationContext、MemoryManager 与 SkillContextBuffer；启动上下文收养、其他 Session 懒加载。共享 ToolRegistry/MCP/Browser/HITL 保留进程级单 writable lease，执行前重绑 Session 协作者。Worker 与 CLI Session/Runtime mutation 共用互斥锁，CLI 修改使用 tryLock 失败关闭。当前 UI 指针不负责关闭 handle；仅空闲、非当前且无 pending interaction 的 Context 可驱逐。EOF/shutdown 释放运行态并保留非终态 Execution 恢复，不提前写 SESSION_END；后台任务不在进程退出后独立运行。
 - Planner、Mode Router 与 Reviewer 的 JSON 输出统一通过 LLM 层 `StructuredJsonExecutor` 校验：总尝试最多 2 次，首次语法/结构/业务约束失败只允许一次格式修复；Hunyuan/TokenHub 使用原生 JSON Schema，DeepSeek/Step 使用 JSON Object，未验证 Provider 不发送 `response_format`。兼容端点明确拒绝结构化参数时只回退普通 Chat 请求，本地校验仍必须通过。格式修复不得扩大工具、URL、路径或 HITL 权限；Reviewer 连续失败按不可用/拒绝处理，禁止用自然语言关键词猜测批准。
@@ -172,7 +172,7 @@ sequenceDiagram
 - Side-Git snapshot 独立于系统 git；revert 前先创建 pre-restore snapshot，并纳入 HITL/AuditLog。
 - raw session JSONL 可能含敏感内容：用户目录权限按平台收紧，禁止提交、复制或在报告中泄露正文、工具参数、结果、图片 payload、Memory 正文和 secret。
 
-- 交互式 CLI（inline/plain/TUI）显式拥有 WorkspaceCodeIndexManager：启动 Hash 对账、递归监听去抖、300秒周期校准；词法先提交、向量异步补齐，搜索本身不触发全库回填。autoIndex.enabled=false、Runtime API、WeChat、headless 不启动后台维护，索引更新由宿主显式调用底层接口；普通 ToolRegistry 构造不得创建维护线程。程序调用刷新共用协调器；不提供手动索引命令。单 JDBC Connection 的访问共享可重入门禁，推理锁外执行；写入受生命周期门禁、文件/chunk Hash 与任务/provider代次约束，旧任务不得覆盖新版本。背景远程任务按项目授权发送及提交前重验，不弹HITL；失败保留FTS且有限重试。退出停止维护，活动provider lease结束后释放，不在Session驱逐时关闭进程级索引。maintenance_state只表示已知待办，不保证全库实时新鲜。
+- 交互式 CLI（inline/plain/TUI）显式拥有 WorkspaceCodeIndexManager：启动 Hash 对账、递归监听去抖、300秒周期校准；词法先提交、向量异步补齐，搜索本身不触发全库回填。autoIndex.enabled=false、Runtime API、headless 不启动后台维护，索引更新由宿主显式调用底层接口；普通 ToolRegistry 构造不得创建维护线程。程序调用刷新共用协调器；不提供手动索引命令。单 JDBC Connection 的访问共享可重入门禁，推理锁外执行；写入受生命周期门禁、文件/chunk Hash 与任务/provider代次约束，旧任务不得覆盖新版本。背景远程任务按项目授权发送及提交前重验，不弹HITL；失败保留FTS且有限重试。退出停止维护，活动provider lease结束后释放，不在Session驱逐时关闭进程级索引。maintenance_state只表示已知待办，不保证全库实时新鲜。
 
 ## 7. 命令与文档联动门禁
 
@@ -208,7 +208,7 @@ TUI：mvn test -Pphase16-smoke
 
 ## 10. 协作准则
 
-使用中文沟通；大规模重构先进入 Plan Mode；优先最小化、可回滚的改动；遇到不确定的协议或安全边界先停下来核对代码和测试。长期记忆只在用户明确要求或执行 /save 时写入，不自动提取事实；同义重复与明确更新必须走统一写入关系解析，不能仅凭 embedding 相似度覆盖旧事实。形成稳定协作规则时更新本文件，具体实现细节补充到 docs/agents-reference.md。
+使用中文沟通；大规模重构先进入 Plan Mode；优先最小化、可回滚的改动；遇到不确定的协议或安全边界先停下来核对代码和测试。长期记忆只在用户明确要求或执行 /save 时写入，不自动提取事实；同义重复与明确更新必须走统一写入关系解析，不能仅凭 embedding 相似度覆盖旧事实。形成稳定协作规则时更新本文件，具体实现细节补充到 docs/implementation/01-runtime-and-agent-foundation.md。
 
 ### 分支、提交与文档约束
 

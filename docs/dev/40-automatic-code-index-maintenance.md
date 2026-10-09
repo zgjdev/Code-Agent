@@ -43,7 +43,7 @@ flowchart LR
 
 本任务不修改召回融合比例、分块粒度、模型权重、长期记忆、grep 实现或顶层任务队列，不增加独立常驻守护进程、跨进程可靠任务队列、远程工作区同步、全新向量数据库或内容寻址的跨文件向量缓存。
 
-首期默认接入交互式 CLI，包括 inline/plain 与 TUI。Runtime API、WeChat、独立测试及 headless 调用不因构造 ToolRegistry 而偷偷启动线程；这些入口由宿主显式调用底层索引接口，后续如接入，必须显式提供生命周期所有者。
+首期默认接入交互式 CLI，包括 inline/plain 与 TUI。Runtime API、独立测试及 headless 调用不因构造 ToolRegistry 而偷偷启动线程；这些入口由宿主显式调用底层索引接口，后续如接入，必须显式提供生命周期所有者。
 
 影响范围为 `rag/`、配置、ToolRegistry 的变更通知、CLI 生命周期、检索诊断及对应文档和测试。Graph 不参与 RAG 融合；现有符号/关系派生数据仍随词法批次更新。
 
@@ -245,7 +245,7 @@ sequenceDiagram
 
 优先保持数据库 schema v2：条件写入复用文件及 chunk Hash，新增状态以进程内派生为主；如实施中发现必须持久化代次或增加约束，需要先在本文补充 schema 迁移、旧 JAR 兼容与回滚评审，不能直接覆盖 schema 版本。
 
-禁用 `autoIndex.enabled` 即停止自动维护；停止后台线程后保留已有可用索引。模型回滚继续通过现有 provider/空间机制隔离向量。实现时同步 README、AGENTS、docs/agents-reference.md、配置示例及工具提示词；这些文档在功能完成前不能宣称已经支持自动维护。
+禁用 `autoIndex.enabled` 即停止自动维护；停止后台线程后保留已有可用索引。模型回滚继续通过现有 provider/空间机制隔离向量。实现时同步 README、AGENTS、docs/implementation/01-runtime-and-agent-foundation.md、配置示例及工具提示词；这些文档在功能完成前不能宣称已经支持自动维护。
 
 ## 4. 实现任务与测试矩阵
 

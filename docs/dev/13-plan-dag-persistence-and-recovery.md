@@ -364,7 +364,7 @@ stateDiagram-v2
 
 5. **文档同步**
    - `AGENTS.md`
-   - `docs/agents-reference.md`
+   - `docs/implementation/01-runtime-and-agent-foundation.md`
    - `docs/dev/03-multi-agent-collaboration.md`
    - `README.md`
    - 命令提示/completer（若存在独立枚举）。

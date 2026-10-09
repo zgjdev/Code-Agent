@@ -18,7 +18,7 @@ inline/plain CLI 的普通顶层任务会先持久化到本地 Execution 队列�
 - **可恢复的长任务**：会话事件追加写入，Plan 状态持久化到 SQLite，中断后可从 Task 边界继续。
 - **本地优先的代码理解**：精确定位优先使用 glob、grep 和文件读取，语义检索默认使用进程内 Qwen3 FP32（1024 维），模型需预先安装。
 - **明确的安全边界**：工具调用经过策略、HITL、路径和命令防护；危险操作写入脱敏审计日志。
-- **可扩展运行时**：支持 MCP、项目/用户级 Skill、Prompt 覆盖、Runtime API 和微信 iLink 通道。
+- **可扩展运行时**：支持 MCP、项目/用户级 Skill、Prompt 覆盖、Runtime API。
 - **终端原生体验**：默认 inline 流式界面，保留 transcript，并提供状态栏、折叠工具块和行内 diff。
 
 ## 运行要求
@@ -97,7 +97,7 @@ java -jar target/codeagent-1.0-SNAPSHOT.jar
 - 输出严格限制为 `REACT` 或 `PLAN`。
 - 非取消性失败回退 ReAct；取消或线程中断终止当前 Turn。
 
-Lanterna TUI、Runtime API 和微信通道目前不接入自动路由。
+Lanterna TUI、Runtime API目前不接入自动路由。
 
 ### ReAct
 
@@ -165,7 +165,7 @@ CodeAgent 把实时确定性工具与索引式 RAG 分开：
 
 混合问题按目标和已有线索协作：例如“看一下 store.save()”先实时定位并读取；“保存失败的事务和异常处理”可用 RAG 寻找相关机制。`search_code.query`保留行为描述，`lexical_query`可提供来自问题或已读取源码的词法软线索，不限制语义候选范围；中文夹杂驼峰名称、点号调用等也会自动提取线索。词法线索最多占一半候选池，其余保留原问题关键词补充。RAG 不自动调用 grep，检索请求本身不触发全库回填。
 
-交互式 CLI（inline/plain/TUI）默认在后台维护代码索引：启动时 Hash 校准，保存后去抖更新词法，再异步补齐向量；监听失效或漏事件由每300秒校准兜底。首次启动自动建立词法索引，后续启动复用已有数据并增量更新；模型仍需显式预装。检索诊断 `maintenance_state` 展示更新/补齐状态，`idle` 不保证全库实时新鲜。Runtime API、WeChat 和 headless 入口不启动后台维护，由宿主显式调用底层索引接口。
+交互式 CLI（inline/plain/TUI）默认在后台维护代码索引：启动时 Hash 校准，保存后去抖更新词法，再异步补齐向量；监听失效或漏事件由每300秒校准兜底。首次启动自动建立词法索引，后续启动复用已有数据并增量更新；模型仍需显式预装。检索诊断 `maintenance_state` 展示更新/补齐状态，`idle` 不保证全库实时新鲜。Runtime API 和 headless 入口不启动后台维护，由宿主显式调用底层索引接口。
 
 可在 `~/.codeagent/config.json` 设置：
 
@@ -338,7 +338,7 @@ inline/plain CLI 的普通输入、`/react <任务>`、`/plan <任务>` 和 `/ta
 /task log <execution-id>
 ```
 
-当前 workspace 的顶层 Execution 严格串行；Plan 内部仍可按资源声明并行执行最多 4 个无冲突 DAG 节点。`/cancel` 取消当前 RUNNING Execution。Lanterna TUI、Runtime HTTP API 和 WeChat 暂未接入该队列。
+当前 workspace 的顶层 Execution 严格串行；Plan 内部仍可按资源声明并行执行最多 4 个无冲突 DAG 节点。`/cancel` 取消当前 RUNNING Execution。Lanterna TUI、Runtime HTTP API 暂未接入该队列。
 
 Agent 运行时可以直接输入下一条任务并回车，无需 `/task add`。新任务排队等待，开始执行时读取前序任务完成后的最新 Session 上下文；它不会中途修改正在运行的任务。等待 HITL 审批或 Plan 人工评审时，普通输入优先作为交互回答处理，无效审批输入不会变成任务；此时使用 `/task add <任务>` 可以明确追加任务。
 
@@ -356,16 +356,6 @@ CODEAGENT_RUNTIME_API_KEY=your_local_api_key \
 - `POST /v1/threads`
 - `POST /v1/threads/{id}/turns`
 - `GET /v1/threads/{id}/events`
-
-### 微信 iLink 通道
-
-```bash
-java -jar target/codeagent-1.0-SNAPSHOT.jar wechat setup
-java -jar target/codeagent-1.0-SNAPSHOT.jar wechat start
-java -jar target/codeagent-1.0-SNAPSHOT.jar wechat status
-```
-
-交互式 CLI 中也可以使用 `/wechat`、`/wechat setup`、`/wechat status` 和 `/wechat stop`。微信通道当前是文本 MVP，不接入自动模式路由。
 
 ## Provider
 
@@ -430,11 +420,11 @@ raw session、日志和导出可能包含敏感内容，请勿提交或公开复
 
 ```mermaid
 graph TB
-    CLI[CLI / Runtime API / WeChat] --> ENTRY[命令与入口解析]
+    CLI[CLI / Runtime API] --> ENTRY[命令与入口解析]
     ENTRY --> QUEUE[inline/plain: RuntimeExecutionQueue]
     QUEUE --> WORKER[workspace 单 Worker + Session Context lease]
     WORKER --> MODE{执行模式}
-    ENTRY -->|Runtime API / WeChat / Lanterna 原路径| MODE
+    ENTRY -->|Runtime API / Lanterna 原路径| MODE
     MODE --> REACT[Agent ReAct]
     MODE --> PLAN[PlanExecuteAgent]
     REACT --> CORE[Prompt + Context + Conversation Ledger]
@@ -464,7 +454,7 @@ graph TB
 | MCP/浏览器 | `/mcp`、`/mcp logs <name>`、`/browser connect`、`/browser tabs` |
 | Skill | `/skill list`、`/skill show <name>`、`/skill on|off <name>` |
 | 执行队列 | `/task`、`/task add <任务>`、`/task cancel <execution-id>`、`/task log <execution-id>` |
-| 其他 | `/init`、`/cancel`、`/history clear`、`/better-harness`、`/wechat`、`/exit` |
+| 其他 | `/init`、`/cancel`、`/history clear`、`/better-harness`、`/exit` |
 
 输入 `/` 后可通过终端补全查看完整命令和说明。未知斜杠命令会在 CLI 层报错，不会作为普通任务发送给模型。
 
@@ -507,15 +497,17 @@ src/main/java/com/codeagent/
 ├── snapshot/    Side-Git 快照
 ├── tool/        工具注册与统一执行入口
 ├── tui/         Lanterna TUI
-├── web/         搜索与正文抓取
-└── wechat/      微信 iLink 通道
+└── web/         搜索与正文抓取
 
 src/main/resources/
 ├── prompts/     分层系统提示词
 └── skills/      内置 Skill
 
 src/test/java/   自动化测试
-docs/            架构、协议和实现说明
+docs/
+├── implementation/  核心实现过程（9篇）
+├── dev/             功能改造、实验与验收记录
+└── superpowers/     历史工作流记录
 ```
 
 ## 开发与验证
@@ -538,18 +530,20 @@ mvn clean package
 
 ## 进一步阅读
 
-- [架构与实现参考](docs/agents-reference.md)
-- [ReAct Agent](docs/dev/01-react-agent.md)
-- [统一多 Agent 协作](docs/dev/03-multi-agent-collaboration.md)
-- [Memory 与上下文](docs/dev/06-memory-context.md)
-- [Plan 证据门禁与冲突感知调度](docs/dev/12-plan-evidence-and-conflict-aware-scheduling.md)
-- [Plan DAG 持久化与恢复](docs/dev/13-plan-dag-persistence-and-recovery.md)
-- [跨模式会话连续性](docs/dev/14-plan-session-conversation-continuity.md)
-- [自动执行模式路由](docs/dev/15-auto-execution-mode-routing.md)
-- [MCP 协议核心](docs/phase-10-mcp-core.md)
-- [Skill 系统](docs/phase-15-skill-system.md)
-- [Runtime API](docs/phase-20-runtime-api.md)
-- [微信通道](docs/phase-23-wechat-channel.md)
+核心实现过程按从零搭建的依赖顺序整理为九篇：
+
+1. [运行时与Agent基础](docs/implementation/01-runtime-and-agent-foundation.md)
+2. [工具、安全与恢复](docs/implementation/02-tools-policy-and-recovery.md)
+3. [上下文、记忆与检索](docs/implementation/03-context-memory-and-retrieval.md)
+4. [MCP与Web接入](docs/implementation/04-mcp-and-web-integration.md)
+5. [浏览器会话与隔离](docs/implementation/05-browser-session-and-guard.md)
+6. [Skill与Prompt装配](docs/implementation/06-skills-and-prompt-assembly.md)
+7. [终端渲染与输入](docs/implementation/07-terminal-rendering-and-input.md)
+8. [Runtime API](docs/implementation/08-runtime-api.md)
+9. [验证与评测](docs/implementation/09-verification-and-evaluation.md)
+
+各次功能改造、实验和验收保留在 [docs/dev](docs/dev/)。
+
 - [第三方组件声明](THIRD_PARTY_NOTICES.md)
 
 ## 贡献

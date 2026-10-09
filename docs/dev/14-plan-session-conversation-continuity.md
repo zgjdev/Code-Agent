@@ -1114,7 +1114,7 @@ git diff --check
 - [ ] 不新增第三套 conversation persistence file。
 - [ ] event schemaVersion 不提升，旧 Provider Surface 可回滚读取。
 - [ ] 针对性测试、quick、全量测试、package、diff-check 全部通过。
-- [ ] 实现完成后同步 `AGENTS.md`、`docs/agents-reference.md` 与必要 README。
+- [ ] 实现完成后同步 `AGENTS.md`、`docs/implementation/01-runtime-and-agent-foundation.md` 与必要 README。
 
 ---
 

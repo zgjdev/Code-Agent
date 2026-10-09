@@ -83,7 +83,7 @@ Session
 - 不改变 Plan 内部最多 4 路无冲突 Task 并行、ResourceClaims、Evidence Gate、Reviewer。
 - 不实现多进程 lease、heartbeat、priority、dead-letter、exactly-once。
 - 不让一个 CLI/runtime 实例领取其它 workspace 的 Execution；跨 workspace 并行留待具备 lease/owner 隔离后单独设计。
-- 不一次性迁移 Runtime HTTP API、WeChat、Lanterna TUI；第一阶段只改目前有 Auto Router 的 inline/plain CLI。
+- 不一次性迁移 Runtime HTTP API、Lanterna TUI；第一阶段只改目前有 Auto Router 的 inline/plain CLI。
 - 不取消现有 Plan 人工审阅或 HITL；执行线程化后通过 InteractionBroker 接回 CLI。
 - 不把 queued message 提前写入 ParentConversationContext。
 - 不再为 /task add 创建独立 Background Session 或 fork。
@@ -826,7 +826,7 @@ Plan supplement 可以接收自由文本并调整当前 Plan goal，但不得扩
 
 ### 3.16 Cancellation、终态提交与 runtime shutdown
 
-CancellationContext 保持唯一读取入口，但底层改为 execution-scoped token。所有异步边界——CLI worker、Scheduler worker、Plan Task executor、ToolRegistry 并行工具执行——都必须显式 capture/install/clear token；TUI、WeChat 保留旧入口的兼容适配，但不得再依赖进程级 `CURRENT`。
+CancellationContext 保持唯一读取入口，但底层改为 execution-scoped token。所有异步边界——CLI worker、Scheduler worker、Plan Task executor、ToolRegistry 并行工具执行——都必须显式 capture/install/clear token；TUI 保留旧入口的兼容适配，但不得再依赖进程级 `CURRENT`。
 
 区分：
 
@@ -1259,9 +1259,9 @@ runtime_tasks -> runtime_executions 必须用旧 schema fixture 验证。
 
 第一阶段只保证 inline/plain CLI。
 
-Runtime HTTP API、WeChat、TUI 后续可提交到同一 Execution Store，但本次不强行一起重写。
+Runtime HTTP API、TUI 后续可提交到同一 Execution Store，但本次不强行一起重写。
 
-因为 `CancellationContext` 是共享基础设施，本次仍必须给 TUI/WeChat 保留兼容适配并运行回归测试；“不接入 Queue”不等于允许其取消语义损坏。
+因为 `CancellationContext` 是共享基础设施，本次仍必须给 TUI 保留兼容适配并运行回归测试；“不接入 Queue”不等于允许其取消语义损坏。
 
 ---
 
@@ -1327,7 +1327,7 @@ ReAct / Plan
 当前适用范围与验证限制：
 
 - `CliUiEventBridge` 已串行化队列、状态和交互提示；Agent/Plan streaming 复用 `Renderer.stream()`，`InlineRendererTest` 已验证 LineReader 读取态改走 `printAbove`。真实 Windows inline 终端的人工作业验收仍建议保留；
-- Runtime HTTP API、WeChat、Lanterna TUI 按 scope 未接队列，只做共享取消语义回归；
+- Runtime HTTP API、Lanterna TUI 按 scope 未接队列，只做共享取消语义回归；
 - terminal Plan / Runtime 非终态窗口已补齐：按 `execution_id` 读取终态 lineage 并直接映射 typed outcome，不重新 Planner 或调用 LLM；
 - 早期提交阶段 quick、全量和干净构建通过记录保留在 7.4。最新 package 成功，clean 受 target/classes 删除失败阻塞，尚不能声称当前 clean package 已通过。
 
@@ -1344,7 +1344,7 @@ ReAct / Plan
 - `PlanExecuteRecoveryTest,PlanStateStoreTest,SessionExecutionContextRegistryTest,InlineRendererTest,CancellationContextTest,WechatRendererTest`：58 tests，全部通过；其中终态 Plan 收敛测试确认不重新 Planner、不调用 LLM；
 - `mvn test -Pquick`：1197 tests，0 failure / 0 error / 4 skipped；
 - `mvn test -DskipTests=false`：1255 tests，0 failure / 0 error / 10 skipped；
-- `mvn test -Pphase16-smoke`：106 tests，0 failure / 0 error / 0 skipped；覆盖 inline/plain renderer、HITL、输入规范化和 TUI bootstrap；全量测试同时覆盖 Runtime API 与 WeChat 回归；
+- `mvn test -Pphase16-smoke`：106 tests，0 failure / 0 error / 0 skipped；覆盖 inline/plain renderer、HITL、输入规范化和 TUI bootstrap；全量测试同时覆盖 Runtime API 回归；
 - `mvn clean package -DskipTests`：`BUILD SUCCESS`（shade 插件仅报告既有重复资源 warning）。
 - `git diff --check`：exit 0；仅有仓库既有的 LF -> CRLF 提示。
 - Session Context 最终接线后，`SessionExecutionContextRegistryTest,SessionExecutionContextFactoryTest,SessionExecutionContextTest,MainSessionCommandTest,WorkspaceAwareExecutionSchedulerTest,RuntimeExecutionQueueTest,ExecutionFinalizerTest,ExecutionControlPolicyTest,MainExecutionModeRoutingTest,MainPlanAgentFactoryTest`：26 tests，全部通过；覆盖启动 Context 收养、lazy resume、跨 Session 全局 lease、失败释放 writable handle、idle eviction、CLI mutation 分类与 Main 路由回归；
@@ -1395,7 +1395,7 @@ ReAct / Plan
 - [x] 所有 CliCommandParser CommandType 都有运行中 Control Plane 分类，未知新命令默认 fail closed。
 - [x] legacy runtime_tasks migration 有旧 schema 测试且失败不丢数据。
 - [x] migration 可重入、未知状态回滚、旧表保留；legacy-unbound row 使用 NULL session/ordinal 且永不 claim。
-- [x] Runtime HTTP API / WeChat / TUI 未被本次重构意外回归。
+- [x] Runtime HTTP API / TUI 未被本次重构意外回归。
 - [x] 针对性测试通过。
 - [x] 全量验证范围与限制已记录；最新无排除全量尚未通过验收，不能将排除测试的回归称为完整通过。
 - [x] 构建通过。

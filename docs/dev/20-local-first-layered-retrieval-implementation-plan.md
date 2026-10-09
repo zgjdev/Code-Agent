@@ -327,7 +327,7 @@ public record RemoteEmbeddingConsent(
 
 `projectFingerprint` 为真实项目根规范化后 SHA-256；配置中不保存代码路径和代码内容。provider/model/endpoint/授权文案版本任一变化必须重新询问。授权记录保存在 `~/.codeagent/rag/remote-consents.json`，按平台收紧为仅当前用户可读写；`/config embedding revoke` 删除当前项目授权。批准、拒绝和撤销写入 AuditLog，但不记录项目路径、查询或代码正文。拒绝授权只关闭远程语义层，不能中止词法索引维护。
 
-入口层负责取得授权并构造不可伪造的 `RemoteEmbeddingCapability`，`EmbeddingProviderFactory` 只消费 capability，不依赖 Renderer、Main 或 HITL UI。CLI 可以在用户显式选择 remote 时询问；Agent 的只读 `search_code`、Runtime API 和 WeChat 在 capability 缺失时只能降级，不能在工具执行中临时弹出审批。授权说明必须同时覆盖“索引代码块”和“为查询生成向量”两类远程发送。
+入口层负责取得授权并构造不可伪造的 `RemoteEmbeddingCapability`，`EmbeddingProviderFactory` 只消费 capability，不依赖 Renderer、Main 或 HITL UI。CLI 可以在用户显式选择 remote 时询问；Agent 的只读 `search_code`、Runtime API 在 capability 缺失时只能降级，不能在工具执行中临时弹出审批。授权说明必须同时覆盖“索引代码块”和“为查询生成向量”两类远程发送。
 
 #### 3.1.5 SQLite v2 schema
 
@@ -612,7 +612,7 @@ Embedding 配置复用 `/config`，不新增新的顶级斜杠命令：
 #### 3.2.6 安全、并发与恢复
 
 - 索引为只读文件访问，不触发 HITL；后台维护只更新 CodeAgent 自己的派生索引，必须精确绑定 project fingerprint。
-- remote consent 由入口层的 `RemoteEmbeddingConsentCoordinator` 通过已有 HITL/Renderer 通道获取并签发 capability；Runtime API、WeChat 和 Agent 工具执行不得临时询问，缺少 capability 时直接关闭远程层。
+- remote consent 由入口层的 `RemoteEmbeddingConsentCoordinator` 通过已有 HITL/Renderer 通道获取并签发 capability；Runtime API 和 Agent 工具执行不得临时询问，缺少 capability 时直接关闭远程层。
 - 单项目同一时刻只允许一个 writer；查询使用独立只读连接并看到最近一次提交。
 - 本地 Embedding executor 最大线程数为 `min(availableProcessors, 4)`，避免抢占 ToolRegistry 的并发池。
 - remote batch 默认 32 个 chunk；`408/429/5xx` 最多 3 次，读取 `Retry-After`。词法事务不得包含远程调用；任何已经成功写入的文件词法 transaction 不回滚。
@@ -690,7 +690,7 @@ pom.xml
 AGENTS.md
 CODEAGENT.md
 README.md
-docs/agents-reference.md
+docs/implementation/01-runtime-and-agent-foundation.md
 docs/dev/04-code-rag-graph.md
 src/main/java/com/codeagent/config/CodeAgentConfig.java
 src/main/java/com/codeagent/cli/CliCommandParser.java
@@ -1023,7 +1023,7 @@ record EmbeddingConfigCommand(Action action, String provider) {
 
 - [x] **Step 1:** 编写 Embedding 配置命令的合法参数与未知子命令测试；明确断言 `/config embedding ollama` 是未知命令且不会进入 service。
 - [x] **Step 2:** 写补全与帮助文本测试。
-- [x] **Step 3:** 写 remote 首次确认、拒绝、撤销、同项目复用、provider/model/endpoint/policy-version 变化重问，以及 Agent tool/WeChat/Runtime 非交互降级测试。
+- [x] **Step 3:** 写 remote 首次确认、拒绝、撤销、同项目复用、provider/model/endpoint/policy-version 变化重问，以及 Agent tool/Runtime 非交互降级测试。
 - [x] **Step 4:** 运行测试确认 FAIL。
 - [x] **Step 5:** 实现 parser、completer 和 Main handler；确认必须通过已有 HITL/Renderer 通道，不直接 `System.out.println`。配置成功后调用共享 service 的 `reconfigureEmbedding`，后续操作立即生效。
 - [x] **Step 6:** 重跑命令解析矩阵，预期 PASS。
@@ -1065,7 +1065,7 @@ public final class RepositoryMapSelector {
 - Modify: `AGENTS.md`
 - Modify: `CODEAGENT.md`
 - Modify: `README.md`
-- Modify: `docs/agents-reference.md`
+- Modify: `docs/implementation/01-runtime-and-agent-foundation.md`
 - Modify: `docs/dev/04-code-rag-graph.md`
 - Create: `THIRD_PARTY_NOTICES.md`
 - Test: `src/test/java/com/codeagent/rag/LegacyRagMigrationTest.java`

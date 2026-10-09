@@ -336,7 +336,7 @@ sequenceDiagram
 4. Mode Router 接入
 5. Planner 接入
 6. Reviewer 接入并移除关键词批准 fallback
-7. 文档同步：`AGENTS.md`、`docs/agents-reference.md`、`README.md`
+7. 文档同步：`AGENTS.md`、`docs/implementation/01-runtime-and-agent-foundation.md`、`README.md`
 
 ### 4.2 测试矩阵
 

@@ -26,7 +26,7 @@ final class ExecutionControlPolicy {
                  PLAN_RESUME, PLAN_ABANDON -> Category.SESSION_MUTATION;
             case INIT_PROJECT_MEMORY, SWITCH_MODEL, SWITCH_HITL,
                  SNAPSHOT, RESTORE_SNAPSHOT, MCP_RESTART, MCP_DISABLE, MCP_ENABLE,
-                 BROWSER, WECHAT, SKILL_ON, SKILL_OFF, SKILL_RELOAD,
+                 BROWSER, SKILL_ON, SKILL_OFF, SKILL_RELOAD,
                  BETTER_HARNESS, CONFIG, EXPORT -> Category.RUNTIME_MUTATION;
             case UNKNOWN_COMMAND -> Category.DENIED;
         };

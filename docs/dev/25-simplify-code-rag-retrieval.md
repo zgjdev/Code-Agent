@@ -297,7 +297,7 @@ git diff --check
 
 - `AGENTS.md`：将 RAG 现行说明改为 term FTS + semantic + graph，明确 Symbol 是 Graph 内部设施。
 - `README.md`：把“词法 FTS、符号和关系召回”改为三路架构与工具职责。
-- `docs/agents-reference.md`：补充 RAG stage 与 `grep_code` 的边界。
+- `docs/implementation/01-runtime-and-agent-foundation.md`：补充 RAG stage 与 `grep_code` 的边界。
 - `docs/dev/20-local-first-layered-retrieval-implementation-plan.md`：保留历史实现正文，在顶部增加“已被 25 号设计进一步精简”的现状注记和链接。
 - `docs/dev/04-code-rag-graph.md`：保持 v1 历史正文，在顶部将现行架构链接更新为 25 号设计，并避免读者把六路说明当现状。
 

@@ -233,7 +233,7 @@ Expected: all selected tests pass.
 - Modify: `README.md`
 - Modify: `.env.example`
 - Modify: `AGENTS.md`
-- Modify: `docs/agents-reference.md`
+- Modify: `docs/implementation/01-runtime-and-agent-foundation.md`
 - Update: `docs/dev/27-unified-web-tool-routing.md` only if implementation differs from the approved design
 
 **Interfaces:**

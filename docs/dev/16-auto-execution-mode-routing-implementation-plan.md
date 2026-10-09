@@ -13,7 +13,7 @@
 - 自动路由始终开启，不增加环境变量、系统属性或持久化配置开关。
 - Router 不注册工具、不获得权限、不读取展开后的 `taskInput`、不写 Parent Session。
 - 非取消性失败回退 ReAct；取消或中断终止整个 Turn。
-- Lanterna TUI、Runtime API、WeChat 和 Plan 恢复命令不接入 Router。
+- Lanterna TUI、Runtime API 和 Plan 恢复命令不接入 Router。
 - 不改变 Session、checkpoint 或 Plan SQLite schema。
 
 ---
@@ -98,7 +98,7 @@
 **文件：**
 - Modify: `AGENTS.md`
 - Modify: `README.md`
-- Modify: `docs/agents-reference.md`
+- Modify: `docs/implementation/01-runtime-and-agent-foundation.md`
 - Modify: `docs/dev/15-auto-execution-mode-routing.md`
 
 - [x] 将设计状态改为已实现，并同步普通输入自动路由、`/plan`/`/react` 单轮覆盖及 Lanterna 不在范围内。

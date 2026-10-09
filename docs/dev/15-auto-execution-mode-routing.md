@@ -1,11 +1,11 @@
 # ReAct / Plan 自动执行模式路由方案
 
-> 后续实现说明（2026-10-03）：当前 inline/plain 普通输入先持久化到统一 Execution 队列，Worker 取得 Session 写租约后再调用 Router；路由选择写入 Execution 状态。下文的入口接线和改造前源码片段属于本次 Router 设计背景。当前提交、恢复与审批输入分流见 [统一后台执行 Runtime](31-unified-background-execution-runtime.md)。Runtime API、WeChat 和 Lanterna 仍不接入自动路由。
+> 后续实现说明（2026-10-03）：当前 inline/plain 普通输入先持久化到统一 Execution 队列，Worker 取得 Session 写租约后再调用 Router；路由选择写入 Execution 状态。下文的入口接线和改造前源码片段属于本次 Router 设计背景。当前提交、恢复与审批输入分流见 [统一后台执行 Runtime](31-unified-background-execution-runtime.md)。Runtime API 和 Lanterna 仍不接入自动路由。
 
 > 状态：已实现（针对性回归通过；全量回归仍受 Windows 平台现存的非 Router 用例失败阻塞）
 > 适用范围：默认终端主路径（`Main` + inline/plain Renderer）的普通顶层任务
 > 依赖前置：`docs/dev/14-plan-session-conversation-continuity.md` 已完成的 Parent Session / Top-level Conversation 统一
-> 明确不包含：Lanterna 全屏 TUI、Runtime API、WeChat、运行中跨模式迁移、Plan 自动恢复、Task Worker 上下文共享、长期记忆策略变更
+> 明确不包含：Lanterna 全屏 TUI、Runtime API、运行中跨模式迁移、Plan 自动恢复、Task Worker 上下文共享、长期记忆策略变更
 
 ## 1. 背景、目标与非目标
 
@@ -138,7 +138,7 @@ Mode Router
 - 不修改 Planner、Worker、Reviewer 的核心执行语义。
 - 不接入 `TuiBootstrap -> TuiSessionController` 的 Lanterna 全屏 TUI 路径。
 - 不修改 Lanterna TUI 当前的 `/plan` 命令语义、自动通过 Plan review 的行为或其独立历史展示逻辑。
-- 不接入 Runtime API / WeChat / DurableTaskManager 的模式选择。
+- 不接入 Runtime API / DurableTaskManager 的模式选择。
 - 不单独引入廉价 Router 模型配置；第一版复用当前 Turn 的活动 `LlmClient`。
 - 不把 Router usage 强行聚合进现有状态栏；第一版只要求在 routing decision / ledger 中可追踪。
 
@@ -816,7 +816,7 @@ src/main/resources/prompts/modes/router.md
 ```text
 AGENTS.md
 README.md
-docs/agents-reference.md
+docs/implementation/01-runtime-and-agent-foundation.md
 docs/dev/15-auto-execution-mode-routing.md
 ```
 
@@ -1052,7 +1052,7 @@ Lanterna TUI 当前普通输入在 `TuiSessionController` 内固定走 ReAct，`
 ## 6. 验收清单
 
 - [x] 本次改造范围仅为默认 `Main` inline/plain 终端主路径。
-- [x] Lanterna `TuiSessionController`、Runtime API、WeChat 行为保持不变。
+- [x] Lanterna `TuiSessionController`、Runtime API 行为保持不变。
 - [x] 普通默认终端任务始终进入 AUTO Router。
 - [x] `ExecutionMode` 只有 REACT / PLAN，不把 AUTO 当第三种执行模式。
 - [x] AUTO Router 只读取 `submittedInput` 和 Top-level Conversation。
@@ -1083,7 +1083,7 @@ Lanterna TUI 当前普通输入在 `TuiSessionController` 内固定走 ReAct，`
 - [ ] 模型行为 smoke 覆盖简单任务、复杂任务、历史依赖任务和“重构”关键词边界。
 - [x] ReAct / Plan 原有 Parent Conversation 连续性测试全部通过。
 - [x] Plan Task isolation 和权限边界没有变化。
-- [x] `README.md`、`AGENTS.md`、`docs/agents-reference.md` 已同步。
+- [x] `README.md`、`AGENTS.md`、`docs/implementation/01-runtime-and-agent-foundation.md` 已同步。
 - [ ] `mvn test -Pquick` 通过。
 - [ ] `mvn test -DskipTests=false` 通过。
 - [ ] `mvn clean package` 通过。

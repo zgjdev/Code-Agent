@@ -87,7 +87,7 @@ flowchart LR
 | 编译诊断 | Javac 17 `-Xlint:all` | 0 warning |
 | MCP/资源 | MCP JSON-RPC、Client、Transport 测试 | 通过且无资源告警 |
 | Memory/RAG | Memory、CodeIndex/Retrieval、Embedding 测试 | 行为不变 |
-| Renderer/WeChat | Plain、WeChat Renderer/Loop 测试 | 输出和关闭语义不变 |
+| Renderer | Plain Renderer/Loop 测试 | 输出和关闭语义不变 |
 | 全局回归 | `mvn test -Pquick` | 通过 |
 | 交付检查 | `git diff --check` | 通过 |
 

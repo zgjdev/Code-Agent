@@ -51,12 +51,12 @@
 - 删除/关闭所有 Embedding provider 后，`/search` 仍能返回中文词项 FTS、trigram、符号和关系结果。
 - 本地模式不会发出 Embedding HTTP 请求。
 - 远程模式第一次对某项目索引前必须确认，拒绝后无网络请求且本地检索继续工作。
-- 同一文件及其 chunker/preprocessing 版本未变化时 `/index` 不重新切块；Embedding 空间未变化时不重新生成向量。文件变化后只替换该文件的词法/结构数据，再独立补齐向量。
+- 同一文件及其 chunker/preprocessing 版本未变化时，后台校准不重新切块；Embedding 空间未变化时不重新生成向量。文件变化后只替换该文件的词法/结构数据，再独立补齐向量。
 - 结果包含路径、行号、符号、命中来源和可解释分数，不返回不可追溯的纯文本摘要。
 
 ### 1.5 全局约束
 
-- 只有 JDK 17、没有 Ollama、没有 Embedding API Key 时，CLI、`/index`、`/search` 和 `search_code` 必须可用。
+- 只有 JDK 17、没有 Ollama、没有 Embedding API Key 时，CLI、`/search` 和 `search_code` 必须可用。
 - 默认不启动外部进程、不监听端口、不访问网络；本地 ONNX 模型只在索引或语义查询真正需要时懒加载。
 - `grep_code` 继续承担最新磁盘内容的精确定位；`search_code` 是模糊语义、FTS 和结构关系的辅助入口。
 - 远程 Embedding 只有项目级显式同意后才能接收代码；历史对话、LLM 推断或其他项目同意不能作为授权来源。
@@ -75,7 +75,7 @@
 
 ```mermaid
 flowchart LR
-    CLI["/index /search"] --> CI[CodeIndex]
+    CLI["后台索引与 /search"] --> CI[CodeIndex]
     TOOL[search_code] --> CR[CodeRetriever]
     CI --> CC[CodeChunker]
     CI --> EC[EmbeddingClient]
@@ -106,7 +106,7 @@ flowchart LR
 - 索引运行状态、部分失败和恢复 checkpoint；
 - Embedding provider 可用性与失败隔离。
 
-当前 `/index` 是内存中全量构建后 `clearProject()` + 全量插入。大型仓库会同时持有全部正文、关系和向量，且中断后无法从文件边界恢复。
+改造前的索引实现是在内存中全量构建后 `clearProject()` + 全量插入。大型仓库会同时持有全部正文、关系和向量，且中断后无法从文件边界恢复。
 
 ### 2.3 核心时序与失败路径
 
@@ -325,9 +325,9 @@ public record RemoteEmbeddingConsent(
 ) {}
 ```
 
-`projectFingerprint` 为真实项目根规范化后 SHA-256；配置中不保存代码路径和代码内容。provider/model/endpoint/授权文案版本任一变化必须重新询问。授权记录保存在 `~/.codeagent/rag/remote-consents.json`，按平台收紧为仅当前用户可读写；`/config embedding revoke` 删除当前项目授权。批准、拒绝和撤销写入 AuditLog，但不记录项目路径、查询或代码正文。拒绝授权只关闭远程语义层，不能中止 `/index`。
+`projectFingerprint` 为真实项目根规范化后 SHA-256；配置中不保存代码路径和代码内容。provider/model/endpoint/授权文案版本任一变化必须重新询问。授权记录保存在 `~/.codeagent/rag/remote-consents.json`，按平台收紧为仅当前用户可读写；`/config embedding revoke` 删除当前项目授权。批准、拒绝和撤销写入 AuditLog，但不记录项目路径、查询或代码正文。拒绝授权只关闭远程语义层，不能中止词法索引维护。
 
-入口层负责取得授权并构造不可伪造的 `RemoteEmbeddingCapability`，`EmbeddingProviderFactory` 只消费 capability，不依赖 Renderer、Main 或 HITL UI。CLI 可以在用户显式选择 remote 或执行 `/index` 时询问；Agent 的只读 `search_code`、Runtime API 和 WeChat 在 capability 缺失时只能降级，不能在工具执行中临时弹出审批。授权说明必须同时覆盖“索引代码块”和“为查询生成向量”两类远程发送。
+入口层负责取得授权并构造不可伪造的 `RemoteEmbeddingCapability`，`EmbeddingProviderFactory` 只消费 capability，不依赖 Renderer、Main 或 HITL UI。CLI 可以在用户显式选择 remote 时询问；Agent 的只读 `search_code`、Runtime API 和 WeChat 在 capability 缺失时只能降级，不能在工具执行中临时弹出审批。授权说明必须同时覆盖“索引代码块”和“为查询生成向量”两类远程发送。
 
 #### 3.1.5 SQLite v2 schema
 
@@ -466,7 +466,7 @@ schema 初始化同时创建 `(project_path, file_path)`、`(project_path, simpl
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> SCANNING: /index refresh
+    IDLE --> SCANNING: 自动校准
     SCANNING --> LEXICAL: 生成 changed/deleted/unchanged
     LEXICAL --> LEXICAL: 每个文件提交 chunks/FTS/symbols/relations
     LEXICAL --> EMBEDDING: 词法层完成且语义层启用
@@ -566,21 +566,11 @@ Repo map 不自动全量注入每个 turn。只有以下情况使用：
 
 #### 3.2.5 CLI 与工具行为
 
-保持已有命令兼容：
+代码查询命令：
 
 ```text
-/index [路径]          增量 refresh，默认当前项目
 /search <查询>         分层检索，不要求 Embedding
 /graph <符号>          查询结构关系
-```
-
-新增 `/index` 子命令：
-
-```text
-/index status
-/index refresh [路径]
-/index rebuild [路径]
-/index clear [路径]
 ```
 
 Embedding 配置复用 `/config`，不新增新的顶级斜杠命令：
@@ -621,7 +611,7 @@ Embedding 配置复用 `/config`，不新增新的顶级斜杠命令：
 
 #### 3.2.6 安全、并发与恢复
 
-- 索引为只读文件访问，不触发 HITL；`/index clear/rebuild` 只删除 CodeAgent 自己的派生索引，但必须精确绑定 project fingerprint。
+- 索引为只读文件访问，不触发 HITL；后台维护只更新 CodeAgent 自己的派生索引，必须精确绑定 project fingerprint。
 - remote consent 由入口层的 `RemoteEmbeddingConsentCoordinator` 通过已有 HITL/Renderer 通道获取并签发 capability；Runtime API、WeChat 和 Agent 工具执行不得临时询问，缺少 capability 时直接关闭远程层。
 - 单项目同一时刻只允许一个 writer；查询使用独立只读连接并看到最近一次提交。
 - 本地 Embedding executor 最大线程数为 `min(availableProcessors, 4)`，避免抢占 ToolRegistry 的并发池。
@@ -632,8 +622,8 @@ Embedding 配置复用 `/config`，不新增新的顶级斜杠命令：
 ### 3.3 兼容性、迁移与回滚
 
 - 若只有旧 `codebase.db` 且没有 v2 数据库，`status()` 返回 `LEGACY_REBUILD_REQUIRED`；新版本不从 v1 数据推断 v2 已就绪。
-- 第一次 `/index` 在独立 `codebase-v2.db` 事务创建 schema；成功提交首个完整 lexical manifest 后查询才切到 v2。旧 `codebase.db` 永不修改。
-- `CODEAGENT_RAG_SCHEMA=v1` 不是公开开关，不引入双写。回滚运行旧 JAR 时读取的是冻结的 v1 快照，可能过期；用户必须用旧 JAR 重新 `/index` 才能得到当前代码索引。文档和测试不得把“能够打开旧库”表述成“索引内容无损回滚”。
+- 首次打开独立的 `codebase-v2.db` 时创建 schema；后台维护逐文件事务提交词法数据。旧 `codebase.db` 永不修改。
+- `CODEAGENT_RAG_SCHEMA=v1` 不是公开开关，不引入双写。回滚运行旧 JAR 时读取的是冻结的 v1 快照，可能过期；旧版本需要使用其对应索引实现重新建立派生数据。文档和测试不得把“能够打开旧库”表述成“索引内容无损回滚”。
 - 原 `EMBEDDING_MODEL/BASE_URL/API_KEY` 继续读取一个发布周期；`EMBEDDING_PROVIDER=ollama` 或旧配置中的 `embedding.mode=ollama` 不设专用兼容逻辑，和其他未知值一样输出稳定的 `unsupported_embedding_provider` 警告并解析为本地 BGE。解析过程不得创建 HTTP client、探测端口或访问 `localhost:11434`。
 - `.env.example` 删除全部 Ollama 配置和示例，只保留本地 BGE、关闭语义层及受授权的远程 provider 示例。
 
@@ -1014,7 +1004,6 @@ public interface CodeSearchService {
 
 **Files:**
 
-- Create: `src/main/java/com/codeagent/cli/IndexCommandParser.java`
 - Create: `src/main/java/com/codeagent/cli/EmbeddingConfigCommandParser.java`
 - Modify: `src/main/java/com/codeagent/cli/CliCommandParser.java`
 - Modify: `src/main/java/com/codeagent/cli/CodeAgentCompleter.java`
@@ -1027,22 +1016,17 @@ public interface CodeSearchService {
 **Interfaces:**
 
 ```java
-record IndexCommand(Action action, String path) {
-    enum Action { STATUS, REFRESH, REBUILD, CLEAR }
-}
-
 record EmbeddingConfigCommand(Action action, String provider) {
     enum Action { STATUS, LOCAL, OFF, REMOTE_PROVIDER, REVOKE }
 }
 ```
 
-- [x] **Step 1:** 写所有合法命令、空参数、未知子命令、Windows 路径和旧 `/index [路径]` 兼容测试；明确断言 `/config embedding ollama` 是未知命令且不会进入 service。
+- [x] **Step 1:** 编写 Embedding 配置命令的合法参数与未知子命令测试；明确断言 `/config embedding ollama` 是未知命令且不会进入 service。
 - [x] **Step 2:** 写补全与帮助文本测试。
 - [x] **Step 3:** 写 remote 首次确认、拒绝、撤销、同项目复用、provider/model/endpoint/policy-version 变化重问，以及 Agent tool/WeChat/Runtime 非交互降级测试。
 - [x] **Step 4:** 运行测试确认 FAIL。
 - [x] **Step 5:** 实现 parser、completer 和 Main handler；确认必须通过已有 HITL/Renderer 通道，不直接 `System.out.println`。配置成功后调用共享 service 的 `reconfigureEmbedding`，后续操作立即生效。
 - [x] **Step 6:** 重跑命令解析矩阵，预期 PASS。
-- [x] **Step 7:** Review checkpoint：未知 `/index xyz` 的兼容解释必须明确——已有路径按路径处理，不存在且匹配已知 action 才按子命令处理。
 
 #### Task 9：Repo map 与结构上下文预算
 
@@ -1110,7 +1094,7 @@ public final class RepositoryMapSelector {
   git diff --check
   ```
 
-- [ ] **Step 9:** 在 Windows x64、Linux x64、macOS x64 与 macOS arm64 分别执行：启动 CLI、`/index`、本地 `/search`、关闭 Embedding 后 `/search`、远程拒绝路径。Windows x64 已在隔离 home/微型工程完成上述实机 smoke；fat JAR 已确认包含 Linux x64、Linux arm64、macOS x64、macOS arm64 native，但当前环境没有 Docker、WSL 或 macOS runner，其余平台仍保持“未实机验证”，不得据此标记支持。
+- [ ] **Step 9:** 在 Windows x64、Linux x64、macOS x64 与 macOS arm64 分别执行：启动 CLI、本地 `/search`、关闭 Embedding 后 `/search`、远程拒绝路径。Windows x64 已在隔离 home/微型工程完成上述实机 smoke；fat JAR 已确认包含 Linux x64、Linux arm64、macOS x64、macOS arm64 native，但当前环境没有 Docker、WSL 或 macOS runner，其余平台仍保持“未实机验证”，不得据此标记支持。
 - [x] **Step 10:** Review checkpoint：检查 diff 无 `.env`、API Key、模型缓存、target、数据库、raw session 和审计正文。
 
 ### 4.5 测试矩阵

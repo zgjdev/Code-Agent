@@ -37,7 +37,7 @@ For the primary entry point, see `/AGENTS.md`.
 
 交互式 CLI 显式启动 `WorkspaceCodeIndexManager`，共享一个数据库写协调器；构造普通 ToolRegistry、Runtime API、WeChat 或 headless 不启动该服务。启动完整 Hash 对账，递归 WatchService 合并脏路径（默认1500ms去抖、最长10000ms），每300秒校准兜底；词法先提交，向量在独立 Worker 补齐。单 Connection 的全部访问共享 index monitor，查询向量在锁外计算，查询候选在同一读取窗口取得。词法提交及向量条件提交服从生命周期门禁，向量额外核对文件/chunk Hash、任务及模型代次、远程项目授权。
 
-`autoIndex.enabled=false` 保留手动模式；手动 `/index` 与后台共用协调器，clear 暂停该项目自动补齐，显式刷新或重启恢复。模型失败不回滚词法，有限重试/错误诊断可见；模型重配后重新补齐。provider lease 在推理结束后才释放，关闭停止接收与提交，超时不强行关闭在用资源。`maintenance_state` 和待办计数只表示已知维护状态，不替代候选 Hash 和 read_file。实现与平台安全边界详见 [40-automatic-code-index-maintenance.md](dev/40-automatic-code-index-maintenance.md)。
+`autoIndex.enabled=false` 停止后台维护，仅查询既有索引；非交互宿主如需更新可显式调用底层刷新接口，与后台共用协调器。模型失败不回滚词法，有限重试/错误诊断可见；模型重配后重新补齐。provider lease 在推理结束后才释放，关闭停止接收与提交，超时不强行关闭在用资源。`maintenance_state` 和待办计数只表示已知维护状态，不替代候选 Hash 和 read_file。实现与平台安全边界详见 [40-automatic-code-index-maintenance.md](dev/40-automatic-code-index-maintenance.md)。
 
 ### Embedding Config
 
@@ -226,7 +226,7 @@ AnySearchResultParser验证完整Markdown结果包络；StepSearchResultParser�
 - 普通任务和斜杠命令提交后都会以 `>` 暗色整行块回写原始输入，避免 JLine accept 后清掉编辑行导致结果区看不到刚执行的命令
 - InlineRenderer 不使用独立 JLine `Display.update()` 维护 thinking 临时区；真实终端验证发现独立 Display 会在 transcript/status 输出后从错误位置向上清屏。当前实现用固定高度 live 区重写自身行，content/tool 边界先清理 live 区再追加 transcript。
 - 交互期输出优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`SubAgent` 都可接收同一个 renderer 输出流，避免绕过 inline renderer 直接写 stdout
-- `CodeIndex` 通过 `ProgressListener` 上报索引开始 / 文件数量 / 进度 / 完成或失败，`/index` 绑定当前 renderer 输出流；内部异常细节写 logger
+- `CodeIndex` 通过 `ProgressListener` 上报索引开始 / 文件数量 / 进度 / 完成或失败，调用方可注入进度监听器；内部异常细节写 logger
 
 ### LSP Diagnostics (Phase 17)
 

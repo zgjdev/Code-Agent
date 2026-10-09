@@ -309,19 +309,10 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
             }
         }
     }
-    public void clear(Path root) {
-        synchronized (lexicalGate) {
-            synchronized (state) {
-                Project project = projects.get(canonical(root));
-                if (project != null) { project.paused = true; invalidate(project); project.full = false; }
-            }
-            service.directClear(root);
-        }
-    }
     public AutoIndexStatus status(Path root) {
         synchronized (state) {
             Project project = projects.get(canonical(root));
-            if (project == null) return AutoIndexStatus.manual();
+            if (project == null) return AutoIndexStatus.disabled();
             int pending = (int) vectors.stream().filter(task -> task.project == project).count()
                     + (project.activeVector == null ? 0 : 1);
             String mode = project.paused ? "paused" : project.lexicalRunning || project.full || !project.dirty.isEmpty()
@@ -337,7 +328,7 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
         synchronized (state) {
             while (true) {
                 var current = status(root);
-                if (Set.of("idle", "paused", "manual", "degraded").contains(current.state())) return;
+                if (Set.of("idle", "paused", "disabled", "degraded").contains(current.state())) return;
                 long remaining = deadline - System.nanoTime();
                 if (remaining <= 0) throw new TimeoutException("Index maintenance still pending");
                 TimeUnit.NANOSECONDS.timedWait(state, remaining);
@@ -410,7 +401,7 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
     @Override public void close() {
         shutdown(true);
     }
-    /** Roll back an unsuccessful attachment without making the existing manual service unusable. */
+    /** Roll back an unsuccessful attachment without making the existing retrieval service unusable. */
     public void abortStartup() {
         shutdown(false);
         service.setMaintenance(null);

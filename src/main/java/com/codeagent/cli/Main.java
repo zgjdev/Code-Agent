@@ -1287,33 +1287,6 @@ public class Main {
                         handleExportCommand(ui, currentAgent);
                         continue;
                     }
-                    case INDEX_CODE -> {
-                        try {
-                            var parsed = new IndexCommandParser().parse(command.payload());
-                            String indexPath = parsed.path() == null ? currentAgent.getToolRegistry().getProjectPath() : parsed.path();
-                            String absPath = new File(indexPath).getAbsolutePath();
-                            currentAgent.getToolRegistry().setProjectPath(absPath);
-                            currentAgent.getMemoryManager().setProjectPath(absPath);
-                            var service = currentAgent.getToolRegistry().getCodeRetrievalService();
-                            if (parsed.action() == IndexCommandParser.IndexCommand.Action.STATUS) {
-                                ui.println("索引状态: " + service.status());
-                            } else if (parsed.action() == IndexCommandParser.IndexCommand.Action.CLEAR
-                                    && service instanceof com.codeagent.rag.DefaultCodeRetrievalService defaultService) {
-                                defaultService.clear(Path.of(absPath));
-                                ui.println("✅ 已清除当前项目 v2 索引");
-                            } else {
-                                boolean rebuild = parsed.action() == IndexCommandParser.IndexCommand.Action.REBUILD;
-                                var refresh = service.refresh(new com.codeagent.rag.IndexRefreshRequest(Path.of(absPath), rebuild));
-                                ui.println(String.format("✅ 索引完成：变更 %d，未变 %d，删除 %d，失败 %d",
-                                        refresh.changedFiles(), refresh.unchangedFiles(),
-                                        refresh.deletedFiles(), refresh.failedFiles()));
-                            }
-                        } catch (Exception e) {
-                            ui.println("❌ " + e.getMessage());
-                        }
-                        ui.println();
-                        continue;
-                    }
                     case SEARCH_CODE -> {
                         String query = command.payload();
                         if (query == null || query.isEmpty()) {
@@ -2387,8 +2360,6 @@ public class Main {
                 new SlashCommandHint("/snapshot status", "/snapshot status", "查看 Side-Git 快照状态"),
                 new SlashCommandHint("/snapshot clean", "/snapshot clean", "清理当前项目 Side-Git 快照"),
                 new SlashCommandHint("/restore ", "/restore <N>", "恢复到最近第 N 个 pre-turn 快照"),
-                new SlashCommandHint("/index", "/index", "索引当前代码库"),
-                new SlashCommandHint("/index ", "/index [路径]", "索引指定路径代码库"),
                 new SlashCommandHint("/search ", "/search <查询>", "语义检索代码（RAG 辅助）"),
                 new SlashCommandHint("/graph ", "/graph <类名>", "查看代码关系图谱"),
                 new SlashCommandHint("/clear", "/clear", "清空当前对话历史"),

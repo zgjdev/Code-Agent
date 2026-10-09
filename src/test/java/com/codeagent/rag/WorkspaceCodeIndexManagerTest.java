@@ -10,7 +10,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.*;
 
 class WorkspaceCodeIndexManagerTest {
-    @Test void startupChangesDeletionAndClearPauseWithoutManualIndex(@TempDir Path temp) throws Exception {
+    @Test void startupChangesDeletionAndRecreationAreIndexedAutomatically(@TempDir Path temp) throws Exception {
         Path root = Files.createDirectory(temp.resolve("project"));
         Path source = root.resolve("Store.java");
         Files.writeString(source, "class Store { void saveData() {} }");
@@ -31,11 +31,10 @@ class WorkspaceCodeIndexManagerTest {
             manager.pathChanged(root, source);
             manager.awaitIdle(root, Duration.ofSeconds(5));
             assertEquals(0, index.status(root).indexedFileCount());
-            manager.clear(root);
             Files.writeString(source, "class Store { void saveData() {} }");
             manager.pathChanged(root, source);
-            assertEquals("paused", manager.status(root).state());
-            assertEquals(0, index.status(root).indexedFileCount());
+            manager.awaitIdle(root, Duration.ofSeconds(5));
+            assertFalse(index.searchTerms(root, "saveData", 10).isEmpty());
         }
     }
 

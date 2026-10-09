@@ -172,7 +172,7 @@ sequenceDiagram
 - Side-Git snapshot 独立于系统 git；revert 前先创建 pre-restore snapshot，并纳入 HITL/AuditLog。
 - raw session JSONL 可能含敏感内容：用户目录权限按平台收紧，禁止提交、复制或在报告中泄露正文、工具参数、结果、图片 payload、Memory 正文和 secret。
 
-- 交互式 CLI（inline/plain/TUI）显式拥有 WorkspaceCodeIndexManager：启动 Hash 对账、递归监听去抖、300秒周期校准；词法先提交、向量异步补齐，搜索本身不触发全库回填。autoIndex.enabled=false、Runtime API、WeChat、headless 保留手动模式；普通 ToolRegistry 构造不得创建维护线程。/index 手动操作共用协调器，clear 暂停自动补齐，显式刷新或重启恢复。单 JDBC Connection 的访问共享可重入门禁，推理锁外执行；写入受生命周期门禁、文件/chunk Hash 与任务/provider代次约束，旧任务不得覆盖新版本。背景远程任务按项目授权发送及提交前重验，不弹HITL；失败保留FTS且有限重试。退出停止维护，活动provider lease结束后释放，不在Session驱逐时关闭进程级索引。maintenance_state只表示已知待办，不保证全库实时新鲜。
+- 交互式 CLI（inline/plain/TUI）显式拥有 WorkspaceCodeIndexManager：启动 Hash 对账、递归监听去抖、300秒周期校准；词法先提交、向量异步补齐，搜索本身不触发全库回填。autoIndex.enabled=false、Runtime API、WeChat、headless 不启动后台维护，索引更新由宿主显式调用底层接口；普通 ToolRegistry 构造不得创建维护线程。程序调用刷新共用协调器；不提供手动索引命令。单 JDBC Connection 的访问共享可重入门禁，推理锁外执行；写入受生命周期门禁、文件/chunk Hash 与任务/provider代次约束，旧任务不得覆盖新版本。背景远程任务按项目授权发送及提交前重验，不弹HITL；失败保留FTS且有限重试。退出停止维护，活动provider lease结束后释放，不在Session驱逐时关闭进程级索引。maintenance_state只表示已知待办，不保证全库实时新鲜。
 
 ## 7. 命令与文档联动门禁
 

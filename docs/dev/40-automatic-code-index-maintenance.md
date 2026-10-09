@@ -1,18 +1,38 @@
 # 40. 代码 RAG 索引自动维护实现设计
 
-本文合并自动索引维护的设计、实施记录与验收证据。实现位于 `feat/automatic-code-index-maintenance` 分支；以下设计参数与行为以实施记录中的最终接口为准。
+## 本次调整：仅保留自动维护入口
+
+- 目标：交互式 CLI 完全通过启动校准、文件监听和周期校准维护代码索引；删除旧手动命令的解析、执行、补全、专用清理 API 和文档说明。
+- 非目标：不删除底层增量刷新、重建参数和数据库事务接口，它们继续服务后台维护、隔离评测及非交互集成；不改变检索算法、模型安装和授权边界。
+- 影响：CliCommandParser、ExecutionControlPolicy、Main、WorkspaceCodeIndexManager、DefaultCodeRetrievalService、命令/维护测试与现有文档。
+- 设计评审：只移除用户入口及无剩余调用者的清理包装；保留程序调用 refresh 的统一并发门禁。关闭自动维护后仅查询既有索引，不再建议用户使用手动命令。非交互入口仍需宿主显式调用底层索引接口。
+- 实施顺序：先验证旧命令被拒绝且补全不暴露入口，再删除命令及专用解析器；删除清理包装并验证文件删除后重新创建仍能自动入库；同步全部文档；运行命令/RAG测试、quick回归、构建及diff检查。
+- 验收：已删除入口由 CLI 作为未知命令拒绝，绝不进入 Agent；保留搜索与关系查询；自动启动、监听、增量删除和向量补齐回归通过；文档不包含旧命令说明。
+
+```mermaid
+flowchart LR
+    CLI[交互式 CLI 启动] --> Manager[自动索引维护器]
+    Watch[文件变化与周期校准] --> Manager
+    Manager --> FTS[词法事务更新]
+    FTS --> Vector[异步向量补齐]
+    Search[搜索与关系查询] --> Index[持久化索引]
+    FTS --> Index
+    Vector --> Index
+```
+
+本文合并自动索引维护的设计、实施记录与验收证据。初始实现位于 `feat/automatic-code-index-maintenance` 分支；移除手动入口的后续调整位于 `refactor/remove-manual-index-command` 分支。以下设计参数与行为以实施记录中的最终接口为准。
 
 ## 1. 背景、目标与非目标
 
 ### 1.1 背景
 
-当前代码 RAG 已接入 SQLite FTS5、BM25 与 Qwen3-Embedding-0.6B FP32。查询时会自动计算查询向量，但代码文件的词法索引和向量索引仍由 `/index` 显式更新。候选文件 Hash 校验只能发现已返回候选过期，不能发现未建立索引的新文件，也不能替代全库更新。
+当前代码 RAG 已接入 SQLite FTS5、BM25 与 Qwen3-Embedding-0.6B FP32。查询时会自动计算查询向量，代码文件的词法索引与向量索引通过后台服务自动更新。候选文件 Hash 校验只能发现已返回候选过期，不能发现未建立索引的新文件，也不能替代全库更新。
 
-希望将 `/index` 从日常必需操作调整为手动刷新、重建和故障修复入口，由进程内后台服务维护索引。自动维护解决时效与使用成本，不直接改变融合算法；未实测前不能承诺提高既有黄金集召回率。
+由进程内后台服务负责代码索引的建立与增量更新，用户不需要执行索引命令。自动维护解决时效与使用成本，不直接改变融合算法；未实测前不能承诺提高既有黄金集召回率。
 
 ### 1.2 目标与验收行为
 
-1. 交互式 CLI 启动后后台校准当前项目，无需用户先执行 `/index`。先建立可用词法索引，再异步补齐向量。
+1. 交互式 CLI 启动后后台校准当前项目，无需用户执行索引命令。先建立可用词法索引，再异步补齐向量。
 2. IDE 保存、外部命令、Agent 写文件、删除、重命名和分支切换产生的变化最终自动反映到索引。
 3. 不变文件不重复解析或生成向量；连续保存合并处理。新文件、删除文件与遗漏监听事件均有恢复路径。
 4. 更新期间仍可检索；响应说明后台状态与已知时效限制。旧计算结果不得覆盖新文件版本。
@@ -23,9 +43,9 @@
 
 本任务不修改召回融合比例、分块粒度、模型权重、长期记忆、grep 实现或顶层任务队列，不增加独立常驻守护进程、跨进程可靠任务队列、远程工作区同步、全新向量数据库或内容寻址的跨文件向量缓存。
 
-首期默认接入交互式 CLI，包括 inline/plain 与 TUI。Runtime API、WeChat、独立测试及 headless 调用不因构造 ToolRegistry 而偷偷启动线程；这些入口保留原手动行为，后续如接入，必须显式提供生命周期所有者。
+首期默认接入交互式 CLI，包括 inline/plain 与 TUI。Runtime API、WeChat、独立测试及 headless 调用不因构造 ToolRegistry 而偷偷启动线程；这些入口由宿主显式调用底层索引接口，后续如接入，必须显式提供生命周期所有者。
 
-影响范围为 `rag/`、配置、ToolRegistry 的变更通知、CLI 生命周期与 `/index`、检索诊断及对应文档和测试。Graph 不参与 RAG 融合；现有符号/关系派生数据仍随词法批次更新。
+影响范围为 `rag/`、配置、ToolRegistry 的变更通知、CLI 生命周期、检索诊断及对应文档和测试。Graph 不参与 RAG 融合；现有符号/关系派生数据仍随词法批次更新。
 
 ## 2. 现状分析（源码证据、已知约束）
 
@@ -35,7 +55,7 @@
 
 | 文件及接口 | 已验证行为 | 改造意义 |
 |---|---|---|
-| `src/main/java/com/codeagent/cli/Main.java`，`INDEX_CODE` 分支 | 解析 `/index`，设置项目路径并调用索引刷新 | 保留命令语义，转交统一维护协调器 |
+| `src/main/java/com/codeagent/cli/Main.java`，交互式启动与退出 | 注入自动维护器并注册当前项目 | 生命周期显式拥有后台服务，退出停止维护 |
 | `src/main/java/com/codeagent/tool/ToolRegistry.java`，`getCodeRetrievalService()` | 懒创建并缓存检索服务，默认打开 `~/.codeagent/rag/codebase-v2.db`；支持 `codeagent.rag.dir` | 后台任务不能读取不断重绑的当前项目字段 |
 | 同文件，`setProjectPath()` | 重绑 PathGuard、LSP 等协作者；没有自动建立新索引 | 注册项目与权限绑定必须显式处理 |
 | `src/main/java/com/codeagent/rag/DefaultCodeRetrievalService.java` | `refresh()` 同步调用 IndexCoordinator；provider 读锁允许并发读路径 | 现有锁不是数据库事务串行化机制 |
@@ -122,7 +142,7 @@ graph TD
 
 在交互式 CLI 已建立合法 workspace 和配置后显式启动管理器，后台完成初次扫描；不等待模型推理后才允许用户输入。共享 ToolRegistry 注入管理器的通知接口，Session 驱逐不关闭进程级管理器。项目绑定变更时完成注册/注销与代次更新；不得仅修改一个字符串而让旧任务获得新项目权限。
 
-后台服务只派生索引，不能提交顶层 Agent 任务、占用 Session writable lease、修改 ConversationLedger 或调用可交互工具。CLI 的单 Worker 和工具策略链保持原契约。管理器及其数据库访问门禁同时覆盖前台手动索引与查询。
+后台服务只派生索引，不能提交顶层 Agent 任务、占用 Session writable lease、修改 ConversationLedger 或调用可交互工具。CLI 的单 Worker 和工具策略链保持原契约。管理器及其数据库访问门禁同时覆盖程序调用的索引刷新与查询。
 
 建议一个词法 Worker、一个 Embedding Worker，并允许监听与定时任务独立唤醒；首期不并发多路本地 Qwen 文档推理。查询和后台文档推理通过 provider 级推理门禁协调，查询任务优先于下一批后台任务；限制文档批次大小，记录排队时间。运行中的单次 ONNX 推理可能无法抢占，不能承诺查询零等待。
 
@@ -150,7 +170,7 @@ provider 使用可关闭 lease：重配先发布新 epoch，使旧任务不能�
 | maxPendingEmbeddingFiles | 256 | 超限保留向量补齐标志，由下一轮扫描恢复 |
 | embeddingBatchSize | 8 | 限制推理批次，可根据实际延迟调整 |
 
-拟在 CodeAgentConfig 增加 `autoIndex` 对象及验证，示例为 `{"autoIndex":{"enabled":true,"debounceMillis":1500,"maxDebounceMillis":10000,"reconcileIntervalSeconds":300}}`。队列与批次上限先作为内部常量，避免配置面过大；新字段缺失使用默认值，非法数值拒绝启动该后台功能并明确诊断。禁用后保留手动索引。
+拟在 CodeAgentConfig 增加 `autoIndex` 对象及验证，示例为 `{"autoIndex":{"enabled":true,"debounceMillis":1500,"maxDebounceMillis":10000,"reconcileIntervalSeconds":300}}`。队列与批次上限先作为内部常量，避免配置面过大；新字段缺失使用默认值，非法数值拒绝启动该后台功能并明确诊断。禁用后保留已有索引，不启动自动更新。
 
 触发规则：
 
@@ -215,17 +235,17 @@ sequenceDiagram
 - 重启/中断：队列不持久化，下次启动用文件 Hash 和当前空间向量完整性重建；事务保证不出现半批词法或半批向量。
 - 多 CLI 进程：SQLite 事务和 busy_timeout 防止损坏，但首期不承诺跨进程唯一推理和去重；同项目多进程可能重复耗费模型资源，提交仍核对版本。跨进程最新性以文件 Hash 为依据，不能使用仅进程内 generation 冒充全局版本。
 
-### 3.3 手动命令、诊断、兼容性与回滚
+### 3.3 诊断、兼容性与回滚
 
-`/index` 的既有解析语法与路径行为继续由 IndexCommandParser 决定，手动刷新、重建与清理全部进入同一维护协调器。显式手动操作可等待对应请求完成并沿用 Renderer 进度输出，不另建并行更新路径。清理先取消该项目任务并递增代次，保持暂停自动补齐，避免用户刚清空就被后台重建；随后显式刷新/重新注册项目或重启才恢复。
+不提供用户手动索引命令。程序调用底层刷新接口时，仍通过统一维护协调器与后台任务串行，完成后触发校准；不得持有状态锁等待后台结果。
 
-手动重建期间暂停同项目自动事件执行，仍合并事件；完成后执行一次校准。命令处理不得持有项目状态锁等待后台结果，避免 CLI/Worker 死锁。主执行队列与用户输入可用性继续遵守原运行时边界。
+检索诊断增补 `maintenance_state`、词法/向量待办数、最后完整校准时间与监听降级原因。文本只表达“后台更新中/语义补齐中/监听降级/自动维护未启用”等真实状态；`idle` 只代表当前没有已知待办，不能解释为全库实时一致。两个搜索入口共享状态，正文预算与融合顺序保持既有契约。查询仍只验证返回候选，修改前 `read_file` 核实当前源码。
 
-检索诊断增补 `maintenance_state`、词法/向量待办数、最后完整校准时间与监听降级原因。文本只表达“后台更新中/语义补齐中/监听降级/手动维护”等真实状态；`idle` 只代表当前没有已知待办，不能解释为全库实时一致。两个搜索入口共享状态，正文预算与融合顺序保持既有契约。查询仍只验证返回候选，修改前 `read_file` 核实当前源码。
+未注入维护器或未注册项目时，`maintenance_state` 为 `disabled`；这不代表索引为空，也不提供用户手动维护入口。
 
 优先保持数据库 schema v2：条件写入复用文件及 chunk Hash，新增状态以进程内派生为主；如实施中发现必须持久化代次或增加约束，需要先在本文补充 schema 迁移、旧 JAR 兼容与回滚评审，不能直接覆盖 schema 版本。
 
-禁用 `autoIndex.enabled` 即退回手动模式；停止后台线程后保留已有可用索引。模型回滚继续通过现有 provider/空间机制隔离向量。实现时同步 README、AGENTS、docs/agents-reference.md、配置示例及工具提示词；这些文档在功能完成前不能宣称已经支持自动维护。
+禁用 `autoIndex.enabled` 即停止自动维护；停止后台线程后保留已有可用索引。模型回滚继续通过现有 provider/空间机制隔离向量。实现时同步 README、AGENTS、docs/agents-reference.md、配置示例及工具提示词；这些文档在功能完成前不能宣称已经支持自动维护。
 
 ## 4. 实现任务与测试矩阵
 
@@ -239,7 +259,7 @@ sequenceDiagram
 | 2 | `rag/SqliteRetrievalIndex.java`、`FileEmbeddingBatch.java`、`ChunkEmbedding.java`、`DefaultCodeRetrievalService.java` | 单连接访问门禁、Hash 条件提交与 provider lease；测试并发事务、旧向量拒绝、关闭竞态 |
 | 3 | `rag/IndexCoordinator.java`、拟新增调度与状态类型 | 单路径词法更新、向量补齐、删除对账、有界去抖；测试词法不等待推理、失败恢复 |
 | 4 | 拟新增 WorkspaceFileWatcher/WorkspaceCodeIndexManager | 启动校准、递归监听、定期兜底与项目生命周期；测试 OVERFLOW、新目录、隔离与退出 |
-| 5 | `config/CodeAgentConfig.java`、`tool/ToolRegistry.java`、`cli/Main.java` | 显式生命周期注入、工具通知、配置与手动命令协同；构造测试 Registry 不自动启动线程 |
+| 5 | `config/CodeAgentConfig.java`、`tool/ToolRegistry.java`、`cli/Main.java` | 显式生命周期注入、工具通知、配置与底层索引刷新协调；构造测试 Registry 不自动启动线程 |
 | 6 | 检索诊断/格式化类、相关 prompt 与项目文档 | 状态展示一致；空索引不因查询同步回填；Top10/16000 与 grep 协作回归 |
 | 7 | Windows 实机与性能记录 | 保存/删除/重命名/分支切换/重启演练；记录延迟、CPU、内存及查询竞争 |
 
@@ -252,11 +272,11 @@ sequenceDiagram
 | IndexPathPolicyTest / FileContentSnapshotTest | 根路径准入、链接逃逸、敏感文件零读取、忽略更新、Hash 与正文同源、连续写入重新排队 |
 | SqliteRetrievalIndexConcurrencyTest | search/status/refresh/close 同 Connection 互斥；事务回滚无半批；同行范围但内容变更不能接受旧向量 |
 | IndexCoordinatorIncrementalTest | 仅修改文件更新；不变文件不推理；先可检索词法再补齐向量；删除完整级联；不完整扫描不全局删除 |
-| IndexMaintenanceSchedulerTest | 去抖和最大等待、队列上限、项目公平性、词法优先、错误退避、清理暂停、重启补齐 |
+| IndexMaintenanceSchedulerTest | 去抖和最大等待、队列上限、项目公平性、词法优先、错误退避、文件删除后重新创建、重启补齐 |
 | WorkspaceFileWatcherTest | 新目录、重复事件、重命名、key 失效、OVERFLOW；无监听事件也能经周期校准发现变化 |
 | WorkspaceCodeIndexManagerTest | 项目 A/B 隔离、Session 驱逐不关闭共享服务、provider 重配/撤销、活动任务关闭与 lease 恰好释放一次 |
 | Remote Embedding 契约测试 | 未授权零网络请求、授权作用域匹配、撤销后不再发送/提交、远程失败保留 FTS |
-| ToolRegistry / Main / 配置测试 | 写入成功通知，失败命令可能修改时仍通知；没有生命周期注入时零后台线程；默认/禁用/非法配置；手动命令共用协调器 |
+| ToolRegistry / Main / 配置测试 | 写入成功通知，失败命令可能修改时仍通知；没有生命周期注入时零后台线程；默认/禁用/非法配置；程序调用刷新共用协调器 |
 | 既有检索黄金集与架构测试 | 同一内容且队列排空后排名和证据覆盖不退化；双入口默认预算一致；空结果诊断及候选时效契约保留 |
 
 去抖、退避与竞态测试使用注入 Clock、FakeWatcher、可控 executor 和 latch；不以真实 sleep 猜测顺序。ONNX/API 用假 provider；默认单测不下载模型、不访问远端、不读取真实用户 memory/session 数据。真实 WatchService 行为另外在 Windows 临时项目做集成演练。
@@ -279,7 +299,7 @@ git diff --check
 
 验收硬条件是正确性、最终收敛和未变文件不重复生成向量。延迟阈值先以固定测试仓库和硬件建立基线，再写入本节；1500ms 去抖不等于1500ms内向量可用，300秒校准也不等于300秒内完成全库推理。查询与后台推理竞争、完整 Hash 扫描 I/O 成本是需要实测的主要风险。
 
-比较召回率时使用同一黄金集、同一模型/融合/预算，等待索引就绪后对比；另测“代码改动但未执行 /index”的时效场景，不能把自动维护收益归因为模型准确率变化。
+比较召回率时使用同一黄金集、同一模型/融合/预算，等待索引就绪后对比；另测“代码改动后自动更新”的时效场景，不能把自动维护收益归因为模型准确率变化。
 
 ### 4.4 实施记录与评审修正
 
@@ -288,7 +308,7 @@ git diff --check
 3. SqliteRetrievalIndex 全部公开数据库方法共享可重入 monitor；条件向量提交在取得 SQLite 写事务后核对文件与 chunk Hash。条件 API 拒绝缺失期望 Hash，legacy 四参数入口只用于兼容同步调用并保留 chunk Hash 校验，不供后台任务绕过版本门禁。
 4. IndexCoordinator 增加 reconcileLexical、refreshPaths、missingEmbeddingWork、computeEmbeddings、commitEmbeddings 与生命周期提交门禁；任务只存元信息。重建改为强制逐文件事务替换，不预先清空库，单文件失败保留旧版；不完整扫描不全局删除。
 5. DefaultCodeRetrievalService 使用 provider lease 与 epoch；查询向量在数据库窗口外计算，后台按最多8个输入分批释放推理门禁，查询优先。模型重配立即发布新代次，活动实例延迟释放；关闭后提交门禁拒绝后续写入。
-6. WorkspaceCodeIndexManager 实现有界脏路径、去抖、启动/周期对账、递归监听、词法/向量两个 Worker、项目隔离及手动命令串联。普通构造 ToolRegistry 不启动线程，Main 显式拥有服务并覆盖 TUI、EOF 与 shutdown；启动失败回滚不关闭手动检索服务。
+6. WorkspaceCodeIndexManager 实现有界脏路径、去抖、启动/周期对账、递归监听、词法/向量两个 Worker、项目隔离及程序调用刷新串联。普通构造 ToolRegistry 不启动线程，Main 显式拥有服务并覆盖 TUI、EOF 与 shutdown；启动失败回滚不关闭检索服务。
 7. 工具通知成功写入的准确路径；命令执行、快照恢复即使部分失败也保守校准其捕获的 workspace。检索增加维护状态，预算、融合、grep 和 Memory 行为不变。
 8. 独立评审发现重建预清空、缺少文件 Hash、协议异常误归为 stale、失败次数未在成功后归零、无向量时路径代次泄漏及发现待办异常无退避。已补专用 stale 异常、连续有限重试、成功重置、词法后元信息回收及失败诊断，并补回归测试。复审又修正监听注册失败导致连续扫描、旧故障污染新 provider 状态，向量发现顺序按项目轮转。取消查询等待者时通知推理门禁，避免后台遗漏唤醒。
 9. 黄金集中的敏感文件过滤证据迁移至 IndexPathPolicy，重建正文证据同步强制更新条件；样本数量及问题意图保持一致，标识符问题使用新的职责类名称。旧数字不能直接当作本分支全库质量评测结果。
@@ -307,7 +327,7 @@ git diff --check
 
 ### 5.2 实施验收
 
-- [x] 无 `/index` 时启动可自动建立索引；阻塞向量推理期间词法仍可更新。
+- [x] 启动可自动建立索引；阻塞向量推理期间词法仍可更新。
 - [x] 保存、创建、删除、新目录单测通过；真实 Git checkout、重命名和根忽略规则变化实机演练通过。
 - [x] 无通知的周期校准和重启恢复通过；扫描失败不全局误删，监听注册失败按周期降级且不忙循环（源码复审）。
 - [x] 文件/模型过期及远程授权撤销后禁止回写，另一已建立词法索引的项目未获得远程能力。
@@ -342,3 +362,18 @@ git diff --check
 全量跳过包含现有需要外部环境/显式开关的测试；新增原生符号链接用例因Windows缺少创建权限跳过。实机Git提交仅用于target内合成夹具，项目功能分支未commit/push，未创建PR或合并。
 
 性能证据边界：3174ms是多个轻量词法场景的合计，不是p50/p95，更不是Qwen Embedding耗时。本次验证真实本地监听和SQLite，但向量并发使用受控provider，没有另跑真实Qwen/远程API吞吐或大型仓库CPU/内存压测。后续可按第4.3节量化默认批次与校准间隔；本次不声称召回率或最终回答准确率提高。
+
+### 5.5 自动维护入口清理验证（2026-10-09，Windows / Java17）
+
+删除 CLI 手动索引命令的枚举、解析、执行分支、帮助补全、专用解析器及其测试；删除维护器与服务无剩余调用者的清理包装。底层刷新接口及统一并发协调保留，自动维护关闭状态改为 `disabled`。文档与提示词统一说明自动维护或非交互宿主调用方式。
+
+| 命令/验证 | 结果 |
+|---|---|
+| 命令拒绝与补全测试先行 | 删除实现前2项测试按预期失败：命令仍被识别，补全仍显示入口 |
+| `mvn test -DskipTests=false "-Dtest=CliCommandParserTest,MainInputNormalizationTest,ExecutionControlPolicyTest,WorkspaceCodeIndexManagerTest,AutomaticIndexConcurrencyTest,AutomaticIndexToolIntegrationTest,IndexCoordinatorTest,RetrievalProviderLifecycleTest"` | 101项，0失败、0错误、0跳过；退出码0 |
+| `mvn test -Pquick` | 1396项，0失败、0错误、18跳过；退出码0 |
+| `mvn clean package` | IDE Java语言服务并发生成target导致首次clean失败；清理已校验路径内的可再生classes目录后重试成功，退出码0；本命令按项目默认跳过测试，测试结果见上述独立命令 |
+| JAR条目与命令枚举检查 | 已删除的解析器及命令枚举值不存在；自动维护器仍存在 |
+| 文档引用与 `git diff --check` | 无旧手动命令使用说明；差异格式通过 |
+
+验收范围：旧命令在CLI层作为未知命令拒绝，不发送给Agent；启动、监听、修改、删除后重新创建及并发向量补齐测试通过。没有重新测量召回率或模型吞吐，本次不改变检索算法。修改位于清理分支，经用户明确要求后提交，未推送。

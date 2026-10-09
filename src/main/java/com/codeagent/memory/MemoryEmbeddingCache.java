@@ -2,11 +2,15 @@ package com.codeagent.memory;
 
 import com.codeagent.rag.embedding.EmbeddingException;
 import com.codeagent.rag.embedding.EmbeddingProvider;
-import com.codeagent.rag.embedding.InProcessBgeEmbeddingProvider;
+import com.codeagent.rag.embedding.InProcessQwen3EmbeddingProvider;
+import com.codeagent.rag.embedding.EmbeddingInputPolicy;
+import com.codeagent.config.CodeAgentConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.InvalidPathException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -27,23 +31,49 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class MemoryEmbeddingCache implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(MemoryEmbeddingCache.class);
 
-    private final EmbeddingProvider provider;
+    private EmbeddingProvider provider;
+    private final String configuredModelDirectory;
+    private Path projectRoot;
+    private boolean closed;
+    private final EmbeddingInputPolicy inputPolicy = new EmbeddingInputPolicy();
     private final Map<String, float[]> cache = new ConcurrentHashMap<>();
 
     public MemoryEmbeddingCache() {
-        this(new InProcessBgeEmbeddingProvider());
+        this(CodeAgentConfig.load().getEmbedding(), Path.of(System.getProperty("user.dir")));
+    }
+
+    MemoryEmbeddingCache(CodeAgentConfig.EmbeddingConfig config, Path projectRoot) {
+        this.configuredModelDirectory = Objects.requireNonNull(config).getLocalModelDirectory();
+        this.projectRoot = Objects.requireNonNull(projectRoot).toAbsolutePath().normalize();
+        this.provider = InProcessQwen3EmbeddingProvider.forMemory(this.projectRoot, configuredModelDirectory);
     }
 
     MemoryEmbeddingCache(EmbeddingProvider provider) {
         this.provider = Objects.requireNonNull(provider, "provider");
+        this.configuredModelDirectory = null;
     }
 
-    public Optional<float[]> embedQuery(String query) {
-        if (query == null || query.isBlank()) {
+    /** Rebind relative model directories to the actual workspace, retaining absolute/default providers. */
+    synchronized void setProjectPath(Path root) {
+        if (closed || configuredModelDirectory == null) return;
+        Path normalized = Objects.requireNonNull(root).toAbsolutePath().normalize();
+        if (normalized.equals(projectRoot)) return;
+        try {
+            if (Path.of(configuredModelDirectory).isAbsolute()) return;
+        } catch (InvalidPathException e) {
+            return; // The lazy provider reports this as semantic unavailability.
+        }
+        releaseProvider();
+        projectRoot = normalized;
+        provider = InProcessQwen3EmbeddingProvider.forMemory(projectRoot, configuredModelDirectory);
+    }
+
+    public synchronized Optional<float[]> embedQuery(String query) {
+        if (closed || query == null || query.isBlank()) {
             return Optional.empty();
         }
         try {
-            List<float[]> vectors = provider.embedAll(List.of(query));
+            List<float[]> vectors = provider.embedAll(List.of(inputPolicy.prepareQuery(query)));
             if (vectors.size() != 1 || vectors.get(0) == null) {
                 return Optional.empty();
             }
@@ -57,8 +87,8 @@ public final class MemoryEmbeddingCache implements AutoCloseable {
     /**
      * 返回当前 entries 的向量。缺失项会一次批量计算，已缓存项不会重复计算。
      */
-    public Map<String, float[]> embeddingsFor(List<MemoryEntry> entries) {
-        if (entries == null || entries.isEmpty()) {
+    public synchronized Map<String, float[]> embeddingsFor(List<MemoryEntry> entries) {
+        if (closed || entries == null || entries.isEmpty()) {
             return Map.of();
         }
 
@@ -81,7 +111,7 @@ public final class MemoryEmbeddingCache implements AutoCloseable {
         if (!missingEntries.isEmpty()) {
             try {
                 List<String> inputs = missingEntries.stream()
-                        .map(MemoryEntry::getContent)
+                        .map(entry -> inputPolicy.prepareDocument(entry.getContent()))
                         .toList();
                 List<float[]> vectors = provider.embedAll(inputs);
                 if (vectors.size() != missingEntries.size()) {
@@ -112,7 +142,7 @@ public final class MemoryEmbeddingCache implements AutoCloseable {
         return cache.size();
     }
 
-    String embeddingSpaceId() {
+    synchronized String embeddingSpaceId() {
         return provider.space().embeddingSpaceId();
     }
 
@@ -132,7 +162,13 @@ public final class MemoryEmbeddingCache implements AutoCloseable {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
+        if (closed) return;
+        closed = true;
+        releaseProvider();
+    }
+
+    private void releaseProvider() {
         try {
             provider.close();
         } catch (Exception e) {

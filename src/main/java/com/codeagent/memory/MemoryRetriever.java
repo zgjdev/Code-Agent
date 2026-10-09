@@ -17,8 +17,9 @@ import java.util.Set;
 public class MemoryRetriever implements AutoCloseable {
     static final double LEXICAL_WEIGHT = 0.45d;
     static final double SEMANTIC_WEIGHT = 0.55d;
-    static final double SEMANTIC_MIN_SCORE = 0.475d;
-    static final double WRITE_CANDIDATE_MIN_SCORE = 0.45d;
+    // Calibrated on the Qwen memory-instruction golden cases; not the legacy BGE space.
+    static final double SEMANTIC_MIN_SCORE = 0.40d;
+    static final double WRITE_CANDIDATE_MIN_SCORE = 0.35d;
     static final double DECAY_FLOOR = 0.60d;
     static final double DECAY_HALF_LIFE_DAYS = 30.0d;
 
@@ -40,6 +41,10 @@ public class MemoryRetriever implements AutoCloseable {
 
     public List<MemoryEntry> retrieve(String query, int limit) {
         return retrieveLongTerm(query, limit, null);
+    }
+
+    void setProjectPath(java.nio.file.Path projectRoot) {
+        embeddingCache.setProjectPath(projectRoot);
     }
 
     public List<MemoryEntry> retrieveLongTerm(String query, int limit) {

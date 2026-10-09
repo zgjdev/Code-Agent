@@ -13,7 +13,7 @@ CodeAgent 是面向商业使用的 Java Agent CLI 产品，对标 Claude Code；
 ## Architecture
 
 - 两条执行路径共享 `ToolRegistry` / `MemoryManager` / `SnapshotService`，不要为某个模式创建孤立能力。
-- 精确代码定位优先 `glob_files` / `grep_code` / `read_file`；`search_code` 只组合 SQLite FTS5 + BM25、进程内 Qwen3 FP32 1024维 + cosine 两类召回，默认Top10/16000正文字符。语义query保留行为需求，lexical_query是软线索，混合问句也可提取代码名称；不得把grep塞回RAG。候选文件hash诊断不证明全库时效，关键判断/修改前read_file核实当前源码；空索引或失效回到实时定位，不自动全库回填。Graph不参与RAG融合，符号/关系索引继续服务结构地图与`/graph`。Qwen权重需显式预装，故障保留FTS；长期Memory仍BGE，远程Embedding必须有当前项目显式授权。
+- 精确代码定位优先 `glob_files` / `grep_code` / `read_file`；`search_code` 只组合 SQLite FTS5 + BM25、进程内 Qwen3 FP32 1024维 + cosine 两类召回，默认Top10/16000正文字符。语义query保留行为需求，lexical_query是软线索，混合问句也可提取代码名称；不得把grep塞回RAG。候选文件hash诊断不证明全库时效，关键判断/修改前read_file核实当前源码；空索引或失效回到实时定位，不自动全库回填。Graph不参与RAG融合，符号/关系索引继续服务结构地图与`/graph`。Qwen权重需显式预装，故障保留FTS；长期Memory也使用本地Qwen FP32 1024维，采用记忆专用指令并复用本地模型目录，模型失败降级词法，不跟随RAG的remote/off/bge模式。代码RAG远程Embedding必须有当前项目显式授权。
 - system prompt 由 `PromptAssembler` 分层组装，内置 prompt 在 `src/main/resources/prompts/`，支持 `~/.codeagent/prompts/` 和 `.codeagent/prompts/` 覆盖。
 
 ## Things That Will Bite You

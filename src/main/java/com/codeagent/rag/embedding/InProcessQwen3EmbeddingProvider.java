@@ -8,16 +8,28 @@ public final class InProcessQwen3EmbeddingProvider implements EmbeddingProvider 
     public static final String REVISION = "c25a394dd583836952667c12f008335071b3f43d";
     public static final int DIMENSION = 1024;
     private final EngineFactory factory;
-    private final EmbeddingSpaceDescriptor space = EmbeddingSpaceDescriptor.create("local-qwen3",
-            "qwen3-embedding-0.6b-onnx-fp32", "in-process", REVISION + ":fp32", DIMENSION,
-            "last-token", true, 2, 1);
+    private final EmbeddingSpaceDescriptor space;
     private EmbeddingEngine engine;
     private Exception initializationFailure;
     private boolean closed;
 
     public InProcessQwen3EmbeddingProvider(Path directory) { this(directory, () -> new Qwen3OnnxEngine(directory)); }
     InProcessQwen3EmbeddingProvider(Path directory, EngineFactory factory) {
+        this(directory, factory, 2);
+    }
+    private InProcessQwen3EmbeddingProvider(Path directory, EngineFactory factory, int preprocessingVersion) {
         Objects.requireNonNull(directory); this.factory = Objects.requireNonNull(factory);
+        this.space = EmbeddingSpaceDescriptor.create("local-qwen3",
+                "qwen3-embedding-0.6b-onnx-fp32", "in-process", REVISION + ":fp32", DIMENSION,
+                "last-token", true, preprocessingVersion, 1);
+    }
+    /** Local-only memory retrieval; resolve the configured directory lazily, including invalid paths. */
+    public static InProcessQwen3EmbeddingProvider forMemory(Path projectRoot, String modelDirectory) {
+        return new InProcessQwen3EmbeddingProvider(projectRoot, () -> {
+            Path directory = modelDirectory == null || modelDirectory.isBlank() ? defaultModelDirectory()
+                    : projectRoot.resolve(modelDirectory).toAbsolutePath().normalize();
+            return new Qwen3OnnxEngine(directory, Qwen3OnnxEngine.MEMORY_INSTRUCTION);
+        }, 3);
     }
     public static Path defaultModelDirectory() {
         return Path.of(System.getProperty("user.home"), ".codeagent", "models", "qwen3-embedding-0.6b", REVISION);

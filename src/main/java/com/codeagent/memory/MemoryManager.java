@@ -52,6 +52,7 @@ public class MemoryManager implements AutoCloseable {
                 this.longTermMemory, this.retriever, this.relationClassifier);
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
         this.currentProject = defaultProjectKey();
+        this.retriever.setProjectPath(Path.of(this.currentProject));
     }
 
     /** 测试/内部接线入口，允许注入 deterministic embedding 和 classifier。 */
@@ -80,6 +81,7 @@ public class MemoryManager implements AutoCloseable {
             return;
         }
         this.currentProject = normalizeProjectKey(projectPath);
+        this.retriever.setProjectPath(Path.of(this.currentProject));
     }
 
     /**

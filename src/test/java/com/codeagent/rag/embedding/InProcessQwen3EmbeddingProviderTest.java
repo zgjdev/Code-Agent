@@ -9,6 +9,21 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class InProcessQwen3EmbeddingProviderTest {
     @TempDir Path directory;
+    @Test void memoryInstructionHasItsOwnSpaceAndLeavesRagContractUnchanged() {
+        var policy = new EmbeddingInputPolicy();
+        assertEquals("Instruct: " + Qwen3OnnxEngine.MEMORY_INSTRUCTION + "\nQuery: 语言偏好",
+                Qwen3OnnxEngine.adapt(policy.prepareQuery("语言偏好"), Qwen3OnnxEngine.MEMORY_INSTRUCTION));
+        assertEquals("用户偏好中文",
+                Qwen3OnnxEngine.adapt(policy.prepareDocument("用户偏好中文"), Qwen3OnnxEngine.MEMORY_INSTRUCTION));
+        try (var memory = InProcessQwen3EmbeddingProvider.forMemory(directory, "missing");
+             var code = new InProcessQwen3EmbeddingProvider(directory)) {
+            assertEquals(1024, memory.space().dimension());
+            assertEquals(3, memory.space().preprocessingVersion());
+            assertEquals(2, code.space().preprocessingVersion());
+            assertNotEquals(memory.space().embeddingSpaceId(), code.space().embeddingSpaceId());
+            assertThrows(EmbeddingException.class, () -> memory.embedAll(List.of(policy.prepareQuery("语言偏好"))));
+        }
+    }
     @Test void lazyProviderUsesDistinctSpaceAndClosesOnce() throws Exception {
         var creations = new AtomicInteger(); var closes = new AtomicInteger();
         float[] vector = new float[1024]; vector[0] = 1;

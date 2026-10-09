@@ -1,6 +1,10 @@
 package com.codeagent.memory;
 
 import com.codeagent.llm.GLMClient;
+import com.codeagent.config.CodeAgentConfig;
+import com.codeagent.rag.embedding.EmbeddingException;
+import com.codeagent.rag.embedding.EmbeddingInputPolicy;
+import com.codeagent.rag.embedding.EmbeddingProvider;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -9,10 +13,40 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 @SuppressWarnings("resource") // Managers own only method-scoped in-memory embedding fixtures in this class.
 class MemoryManagerTest {
     @TempDir Path tempDir;
+
+    @Test
+    void projectSwitchRebindsRelativeModelDirectoryAndClearsCachedInitializationFailure() throws Exception {
+        var config = new CodeAgentConfig.EmbeddingConfig();
+        config.setLocalModelDirectory("models/qwen");
+        Path startup = tempDir.resolve("startup");
+        Path workspace = tempDir.resolve("workspace");
+        var memory = new LongTermMemory(tempDir.resolve("memory").toFile());
+        var cache = new MemoryEmbeddingCache(config, startup);
+        var retriever = new MemoryRetriever(memory, cache, java.time.Clock.systemUTC());
+        var llm = new MemoryTestLlmClient("{\"action\":\"create\"}");
+        try (var manager = new MemoryManager(llm, com.codeagent.context.ContextProfile.custom(128000),
+                memory, retriever, new MemoryRelationClassifier(llm), startup.toString())) {
+            assertEquals(startup.resolve("models/qwen/model.onnx").toString(), failedModelFile(cache));
+            manager.setProjectPath(workspace.toString());
+            assertEquals(workspace.resolve("models/qwen/model.onnx").toString(), failedModelFile(cache));
+        }
+    }
+
+    // Observe the real engine's filesystem failure without installing weights or adding test-only APIs.
+    private static String failedModelFile(MemoryEmbeddingCache cache) throws Exception {
+        var field = MemoryEmbeddingCache.class.getDeclaredField("provider");
+        field.setAccessible(true);
+        var provider = (EmbeddingProvider) field.get(cache);
+        var failure = assertThrows(EmbeddingException.class,
+                () -> provider.embedAll(List.of(new EmbeddingInputPolicy().prepareQuery("语言偏好"))));
+        return assertInstanceOf(java.nio.file.NoSuchFileException.class, failure.getCause()).getFile();
+    }
 
     @Test
     void shouldReportConversationHistoryAsTheOnlyShortTermContext() {

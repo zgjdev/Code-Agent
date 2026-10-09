@@ -10,10 +10,16 @@ import java.util.*;
 /** Pinned ONNX/tokenizer contract; owns tokenizer/session, never the process-global environment. */
 final class Qwen3OnnxEngine implements InProcessQwen3EmbeddingProvider.EmbeddingEngine {
     static final String INSTRUCTION = "Given a natural-language software-engineering query, retrieve source-code chunks that implement or explain the described behavior.";
+    static final String MEMORY_INSTRUCTION = "Given a query, retrieve relevant long-term memories about user preferences, project facts, and decisions.";
     private final OrtEnvironment environment = OrtEnvironment.getEnvironment();
     private final HuggingFaceTokenizer tokenizer;
     private final OrtSession session;
+    private final String queryInstruction;
     Qwen3OnnxEngine(Path directory) throws Exception {
+        this(directory, INSTRUCTION);
+    }
+    Qwen3OnnxEngine(Path directory, String queryInstruction) throws Exception {
+        this.queryInstruction = Objects.requireNonNull(queryInstruction);
         requireHash(directory.resolve("model.onnx"), "bf27b2f3f9ef9c32ca337d75b361fa99439deaeaefe82e4701b2dbd8439197cc");
         requireHash(directory.resolve("model.onnx_data"), "f0a61604465929a27e68aa6217c8c89ec6186572f0209fdb7711adda48a9b9a9");
         requireHash(directory.resolve("tokenizer.json"), "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a");
@@ -26,13 +32,16 @@ final class Qwen3OnnxEngine implements InProcessQwen3EmbeddingProvider.Embedding
         } catch (Exception e) { tokenizer.close(); throw e; }
     }
     static String adapt(String input) {
+        return adapt(input, INSTRUCTION);
+    }
+    static String adapt(String input, String queryInstruction) {
         String query = "为这个句子生成表示以用于检索相关文章：", document = "代码文档：";
-        if (input.startsWith(query)) return "Instruct: " + INSTRUCTION + "\nQuery: " + input.substring(query.length());
+        if (input.startsWith(query)) return "Instruct: " + queryInstruction + "\nQuery: " + input.substring(query.length());
         if (input.startsWith(document)) return input.substring(document.length());
         throw new IllegalArgumentException("Expected explicit query/document input boundary");
     }
     @Override public float[] embed(String input) throws Exception {
-        var encoding = tokenizer.encode(adapt(input));
+        var encoding = tokenizer.encode(adapt(input, queryInstruction));
         long[] ids = encoding.getIds(), mask = encoding.getAttentionMask();
         if (ids.length == 0 || ids.length > 8192 || mask.length != ids.length)
             throw new IllegalArgumentException("Qwen token budget/shape invalid");

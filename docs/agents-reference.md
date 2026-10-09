@@ -112,7 +112,7 @@ AnySearchResultParser验证完整Markdown结果包络；StepSearchResultParser�
 - `/clear`、历史图片 payload 裁剪和 conversationHistory 压缩只能追加 boundary event，不能覆盖或删除账本旧行。原始工具参数、工具结果和图片 payload 可能敏感；POSIX 下 `history/raw` 为 0700、账本文件为 0600
 - 长期记忆只通过 `/save` 或用户明确要求保存/更新；普通聊天不自动抽取事实
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global；SQLite `memory.db` 是唯一事实源，写入使用 WAL 和事务。legacy JSON 只在无迁移标记时导入，去重合并最新确认时间并重映射生命周期关系，提交后尝试保留 `.migrated.bak`
-- 普通长期记忆检索先过滤当前 scope 可见且 `active` 的条目，再融合 jieba 词法分数与进程内 BGE cosine；entry 向量仅进程内缓存，query 每次重算，embedding 失败降级 lexical-only；最终相关度乘以 `0.6 + 0.4 * 2^(-ageDays/30)`，age 优先取 `metadata.lastConfirmedAt`，缺失/非法时回退 creation timestamp
+- 普通长期记忆检索先过滤当前 scope 可见且 `active` 的条目，再融合 jieba 词法分数与进程内 Qwen FP32 1024 维 cosine（记忆专用指令，读取阈值 0.40 / 写候选阈值 0.35）；entry 向量仅进程内缓存，query 每次重算，embedding 失败降级 lexical-only；最终相关度乘以 `0.6 + 0.4 * 2^(-ageDays/30)`，age 优先取 `metadata.lastConfirmedAt`，缺失/非法时回退 creation timestamp
 - `lastConfirmedAt` 只由显式长期记忆写入更新：CREATE / SUPERSEDE 的新 active 条目初始化为创建时间，exact DUPLICATE 与 classifier DUPLICATE 刷新已有条目；普通 retrieval、prompt 注入、Plan Task 或工具使用都不得自动刷新，避免检索自我强化
 - 长期记忆写入统一由 `MemoryWriteResolver` 判 CREATE / DUPLICATE / SUPERSEDE：`MemoryDeduplicator` 仅保留确定性 canonical exact-equivalence fast-path；本地 embedding 只召回同 type/scope/project 的 active 候选，不能仅凭 cosine 覆盖旧事实；写入候选排序不应用时间衰减；无工具 `MemoryRelationClassifier` 负责语义关系判定
 - CREATE 必须实际持久化成功；并发 exact duplicate 重新读取并确认已有条目，数据库失败且无重复项时明确报错，不能把未保存的候选报告为 CREATED
@@ -316,7 +316,7 @@ grep/RAG协作以用户动作和已有线索为依据，混合问题不要求整
 
 真实生产 Java 语料的离线 RAG 评测、指标口径、历史五组消融和当前双路复测见 [36-rag-repository-evaluation.md](dev/36-rag-repository-evaluation.md)。重实验需显式设置 `-Drag.repository.eval=true`，日常 quick 跳过；`-Drag.repository.corpus=<仓库内源码快照根目录>` 可固定语料作前后比较。结果只表示固定标注集上的检索质量，不代表最终回答正确率。
 
-固定语料上的 BGE / Qwen3 ONNX INT8（1024、512 维）及 FP32（1024 维）受控实验、artifact 校验、成本与量化参考对照见 [26-qwen3-embedding-migration.md 第 10 节](dev/26-qwen3-embedding-migration.md#10-本次受控质量实验方案任务与实施记录)。第 11 节记录生产默认迁移到 Qwen FP32 1024 与融合修正；长期 Memory 和显式 legacy EmbeddingClient 兼容 API 继续使用 BGE。
+固定语料上的 BGE / Qwen3 ONNX INT8（1024、512 维）及 FP32（1024 维）受控实验、artifact 校验、成本与量化参考对照见 [26-qwen3-embedding-migration.md 第 10 节](dev/26-qwen3-embedding-migration.md#10-本次受控质量实验方案任务与实施记录)。第 11 节记录生产默认迁移到 Qwen FP32 1024 与融合修正；长期 Memory 已由 [39-long-term-memory-qwen3-migration.md](dev/39-long-term-memory-qwen3-migration.md) 显式迁移为本地 Qwen（复用本地模型目录，不跟随 RAG mode/provider）；显式 legacy EmbeddingClient 兼容 API 继续使用 BGE。
 
 ### MCP Package
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/

@@ -58,16 +58,47 @@ class RetrievalCoordinationTest {
         }
     }
 
+    @Test void concurrentRefreshCannotVerifyThePreviouslySelectedBody() throws Exception {
+        Path root = Files.createDirectory(temp.resolve("concurrent"));
+        Path file = root.resolve("Store.java");
+        Files.writeString(file, "class Store { void saveData() { int version = 1; } }");
+        var index = new SqliteRetrievalIndex(temp.resolve("concurrent.db"));
+        try (var service = new DefaultCodeRetrievalService(index,
+                new EmbeddingResolution(Optional.empty(), "off", false))) {
+            service.reconcileLexical(new IndexRefreshRequest(root, false));
+            var refreshed = new java.util.concurrent.atomic.AtomicBoolean();
+            // Inject a real refresh precisely when disk validation begins, after ranking has selected its body.
+            Path interleaved = (Path) java.lang.reflect.Proxy.newProxyInstance(Path.class.getClassLoader(),
+                    new Class<?>[]{Path.class}, (proxy, method, arguments) -> {
+                        boolean checkingDisk = Arrays.stream(Thread.currentThread().getStackTrace()).anyMatch(frame ->
+                                frame.getClassName().equals(RetrievalFreshnessChecker.class.getName())
+                                        && frame.getMethodName().equals("check"));
+                        if (method.getName().equals("toString") && checkingDisk && refreshed.compareAndSet(false, true)) {
+                            assertFalse(Thread.holdsLock(index), "disk validation must run outside the database monitor");
+                            Files.writeString(file, "class Store { void saveData() { int version = 2; } }");
+                            service.reconcileLexical(new IndexRefreshRequest(root, false));
+                        }
+                        return method.invoke(root, arguments);
+                    });
+            var response = service.search(new RetrievalRequest(interleaved, "saveData", 10, 16000, false, RetrievalIntent.CHUNKS));
+            assertTrue(refreshed.get(), "refresh must occur during disk validation");
+            assertTrue(response.hits().stream().anyMatch(hit -> hit.content().contains("version = 1")));
+            assertTrue(Files.readString(file).contains("version = 2"));
+            assertEquals("changed", response.diagnostics().fileFreshness().get("Store.java"));
+            assertTrue(response.partial());
+        }
+    }
+
     @Test void checkerRejectsTraversalAndLinksOutsideProject() throws Exception {
         Path root=Files.createDirectories(temp.resolve("safe"));
         Path outside=temp.resolve("secret.java"); Files.writeString(outside,"private data");
         try(var index=new SqliteRetrievalIndex(temp.resolve("safe.db"))) {
             var hit=new RetrievalHit("../secret.java",1,1,"file","secret","old",1,Set.of(RetrievalSource.FTS_TERMS));
-            assertEquals("unavailable",new RetrievalFreshnessChecker().check(root,index,List.of(hit)).get("../secret.java"));
+            assertEquals("unavailable",new RetrievalFreshnessChecker().check(root,Map.of("../secret.java", "fake-hash"),List.of(hit)).get("../secret.java"));
             try {
                 Files.createSymbolicLink(root.resolve("link.java"),outside);
                 var link=new RetrievalHit("link.java",1,1,"file","link","old",1,Set.of(RetrievalSource.FTS_TERMS));
-                assertEquals("unavailable",new RetrievalFreshnessChecker().check(root,index,List.of(link)).get("link.java"));
+                assertEquals("unavailable",new RetrievalFreshnessChecker().check(root,Map.of("link.java", "fake-hash"),List.of(link)).get("link.java"));
             } catch (java.nio.file.FileSystemException | UnsupportedOperationException unavailable) {
                 // Windows without symlink privilege still executes the traversal boundary above.
             }

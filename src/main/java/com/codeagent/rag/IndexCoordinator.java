@@ -74,14 +74,15 @@ public final class IndexCoordinator {
         IndexRefreshResult lexical = reconcileLexical(request);
         Set<String> reasons = new LinkedHashSet<>(lexical.reasonCodes());
         if (embeddingProvider.isPresent())
-            for (EmbeddingWorkItem work : missingEmbeddingWork(request.projectRoot(), Integer.MAX_VALUE)) {
+            for (EmbeddingWorkItem work : missingEmbeddingWork(request.projectRoot(), Integer.MAX_VALUE, lexical.embeddingReadyPaths())) {
                 try {
                     commitEmbeddings(computeEmbeddings(work));
                 } catch (Exception e) {
                     reasons.add("embedding_failed");
                 }
             }
-        return new IndexRefreshResult(lexical.changedFiles(), lexical.unchangedFiles(), lexical.deletedFiles(), lexical.failedFiles(), List.copyOf(reasons));
+        return new IndexRefreshResult(lexical.changedFiles(), lexical.unchangedFiles(), lexical.deletedFiles(), lexical.failedFiles(),
+                List.copyOf(reasons), lexical.embeddingReadyPaths());
     }
 
     public IndexRefreshResult rebuild(IndexRefreshRequest request) {
@@ -104,6 +105,7 @@ public final class IndexCoordinator {
     public IndexRefreshResult refreshPaths(Path root, List<Path> paths) {
         int changed = 0, unchanged = 0, deleted = 0, failed = 0;
         Set<String> reasons = new LinkedHashSet<>();
+        Set<Path> ready = new HashSet<>();
         for (Path path : paths) {
             IndexRefreshResult result = refreshLexicalPath(root, path);
             changed += result.changedFiles();
@@ -111,8 +113,9 @@ public final class IndexCoordinator {
             deleted += result.deletedFiles();
             failed += result.failedFiles();
             reasons.addAll(result.reasonCodes());
+            ready.addAll(result.embeddingReadyPaths());
         }
-        return new IndexRefreshResult(changed, unchanged, deleted, failed, List.copyOf(reasons));
+        return new IndexRefreshResult(changed, unchanged, deleted, failed, List.copyOf(reasons), ready);
     }
 
     public IndexRefreshResult refreshLexicalPath(Path requestedRoot, Path path) {
@@ -134,13 +137,13 @@ public final class IndexCoordinator {
             }
             FileContentSnapshot snapshot = FileContentSnapshot.read(policy, absolute);
             if (old.isPresent() && old.get().contentHash().equals(snapshot.contentHash()))
-                return new IndexRefreshResult(0, 1, 0, 0, List.of());
+                return new IndexRefreshResult(0, 1, 0, 0, List.of(), Set.of(relative));
             var file = new IndexFileScanner.ScannedFile(absolute, relative, snapshot.contentHash(), snapshot.sizeBytes(), snapshot.modifiedMillis(), snapshot.language());
             FileIndexBatch batch = buildLexicalBatch(policy.root(), file, snapshot);
             if (!snapshot.stillCurrent(policy))
                 throw new java.io.IOException("File changed before commit");
             if (!mutate(() -> index.replaceLexicalFile(batch))) return new IndexRefreshResult(0,0,0,1,List.of("maintenance_closed"));
-            return new IndexRefreshResult(1, 0, 0, 0, List.of());
+            return new IndexRefreshResult(1, 0, 0, 0, List.of(), Set.of(relative));
         } catch (Exception e) {
             return new IndexRefreshResult(0, 0, 0, 1, List.of("lexical_index_failed"));
         }
@@ -152,7 +155,17 @@ public final class IndexCoordinator {
         return pendingEmbeddingFiles(root, embeddingProvider.get().space().embeddingSpaceId(), limit);
     }
 
+    public List<EmbeddingWorkItem> missingEmbeddingWork(Path root, int limit, Set<Path> eligiblePaths) {
+        if (embeddingProvider.isEmpty()) return List.of();
+        return pendingEmbeddingFiles(root, embeddingProvider.get().space().embeddingSpaceId(), limit, eligiblePaths::contains);
+    }
+
     public List<EmbeddingWorkItem> pendingEmbeddingFiles(Path requestedRoot, String spaceId, int limit) {
+        return pendingEmbeddingFiles(requestedRoot, spaceId, limit, ignored -> true);
+    }
+
+    private List<EmbeddingWorkItem> pendingEmbeddingFiles(Path requestedRoot, String spaceId, int limit,
+                                                         java.util.function.Predicate<Path> eligible) {
         if (limit <= 0)
             return List.of();
         try {
@@ -161,6 +174,7 @@ public final class IndexCoordinator {
             synchronized (index) {
                 for (FileSnapshot file : index.listFiles(root)) {
                     Path relative = Path.of(file.filePath());
+                    if (!eligible.test(relative)) continue;
                     int count = index.countChunks(root, relative);
                     if (!index.hasCompleteEmbeddings(root, relative, spaceId, count))
                         work.add(new EmbeddingWorkItem(root, relative, file.contentHash(), spaceId));
@@ -210,6 +224,7 @@ public final class IndexCoordinator {
         int deleted = 0;
         int failed = 0;
         Set<String> reasons = new LinkedHashSet<>();
+        Set<Path> ready = new HashSet<>();
         IndexFileScanner.ScanResult scan = scanner.scan(request.projectRoot());
         if (!scan.complete())
             reasons.add("scan_incomplete");
@@ -233,7 +248,7 @@ public final class IndexCoordinator {
                             throw new java.io.IOException("File changed before commit");
                         if (!mutate(() -> index.replaceLexicalFile(batch))) {
                             reasons.add("maintenance_closed");
-                            return new IndexRefreshResult(changed, unchanged, deleted, failed, List.copyOf(reasons));
+                            return new IndexRefreshResult(changed, unchanged, deleted, failed, List.copyOf(reasons), ready);
                         }
                         changed++;
                     } catch (Exception e) {
@@ -244,13 +259,14 @@ public final class IndexCoordinator {
                 } else {
                     unchanged++;
                 }
+                ready.add(file.relativePath());
             }
             if (scan.complete()) {
                 for (FileSnapshot old : previous.values()) {
                     if (!seen.contains(old.filePath())) {
                         if (!mutate(() -> index.deleteFile(root, Path.of(old.filePath())))) {
                             reasons.add("maintenance_closed");
-                            return new IndexRefreshResult(changed, unchanged, deleted, failed, List.copyOf(reasons));
+                            return new IndexRefreshResult(changed, unchanged, deleted, failed, List.copyOf(reasons), ready);
                         }
                         deleted++;
                     }
@@ -261,7 +277,7 @@ public final class IndexCoordinator {
             reasons.add("index_refresh_failed");
         }
         failed += scan.failures().size();
-        return new IndexRefreshResult(changed, unchanged, deleted, failed, List.copyOf(reasons));
+        return new IndexRefreshResult(changed, unchanged, deleted, failed, List.copyOf(reasons), ready);
     }
 
     private FileIndexBatch buildLexicalBatch(Path root, IndexFileScanner.ScannedFile file) throws Exception {

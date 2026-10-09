@@ -99,6 +99,7 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
             Pending previous = project.dirty.get(absolute);
             project.dirty.put(absolute, new Pending(previous == null ? now : previous.first, now));
             project.generations.merge(absolute, 1L, Long::sum);
+            project.embeddingReady.remove(key.relativize(absolute));
             if (project.dirty.size() > MAX_DIRTY) invalidate(project);
             state.notifyAll();
         }
@@ -113,6 +114,7 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
         project.epoch++;
         project.full = true;
         project.dirty.clear(); project.generations.clear();
+        project.embeddingReady.clear();
         vectors.removeIf(task -> task.project == project);
         state.notifyAll();
     }
@@ -120,7 +122,7 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
         synchronized (state) {
             for (Project project : projects.values()) {
                 project.embeddingBlocked = false;
-                project.error = ""; project.retries = 0;
+                project.error = lexicalError(project); project.retries = 0;
                 if (!project.paused) invalidate(project);
             }
         }
@@ -164,11 +166,13 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
         if (selected != null) {
             final Project project = selected;
             IndexRefreshResult result;
+            long lexicalEpoch;
             synchronized (lexicalGate) {
                 synchronized (state) {
                     if (project.paused || closed || projects.get(project.root) != project) {
                         project.lexicalRunning = false; state.notifyAll(); return;
                     }
+                    lexicalEpoch = project.epoch;
                 }
                 result = full ? service.reconcileLexical(new IndexRefreshRequest(project.root, false))
                         : service.refreshLexicalPaths(project.root, paths);
@@ -180,12 +184,22 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
             catch (IOException e) { watcherFailed(project.root); }
             synchronized (state) {
                 project.lexicalRunning = false;
+                if (closed || project.paused || projects.get(project.root) != project || lexicalEpoch != project.epoch) {
+                    state.notifyAll(); return;
+                }
+                if (full) project.embeddingReady.clear();
+                else for (Path path : paths) project.embeddingReady.remove(project.root.relativize(path));
+                project.embeddingReady.addAll(result.embeddingReadyPaths());
+                // A notification arriving during the scan has not been confirmed by this result.
+                for (Path path : project.dirty.keySet()) project.embeddingReady.remove(project.root.relativize(path));
+                project.discoverEmbeddings = true;
                 if (result.failedFiles() == 0 && !result.reasonCodes().contains("scan_incomplete")) {
+                    project.lexicalFailed = false;
                     if (full) project.lastScan = clock.millis();
-                    project.discoverEmbeddings = true;
                     project.nextAttempt = 0;
-                    if (!project.embeddingBlocked) project.error = project.watcherFailed ? "watcher_unavailable" : "";
+                    if (!project.embeddingBlocked) project.error = lexicalError(project);
                 } else {
+                    project.lexicalFailed = true;
                     project.error = "lexical_refresh_failed";
                     project.full = true; project.nextAttempt = clock.millis() + 5000;
                 }
@@ -204,15 +218,18 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
         }
         for (Project project : contexts) {
             int capacity; long epoch;
+            Set<Path> eligiblePaths;
             synchronized (state) {
-                if (closed || project.paused || project.lexicalRunning || project.full || !project.dirty.isEmpty()
+                if (closed || project.paused || project.lexicalRunning
+                        || (project.full && clock.millis() >= project.nextAttempt) || !project.dirty.isEmpty()
                         || project.embeddingBlocked || !project.discoverEmbeddings || clock.millis() < project.nextVectorAttempt) continue;
                 capacity = Math.min(16, MAX_EMBEDDING - vectors.size() - (vectorRunning ? 1 : 0));
                 if (capacity <= 0) break;
                 epoch = project.epoch;
+                eligiblePaths = Set.copyOf(project.embeddingReady);
             }
             List<EmbeddingWorkItem> missing;
-            try { missing = service.missingEmbeddingWork(project.root, capacity); }
+            try { missing = service.missingEmbeddingWork(project.root, capacity, eligiblePaths); }
             catch (RuntimeException failure) {
                 synchronized (state) {
                     if (closed || project.paused || epoch != project.epoch || projects.get(project.root) != project) continue;
@@ -229,6 +246,7 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
                 project.discoverEmbeddings = false;
                 for (var work : missing) {
                     Path absolute = project.root.resolve(work.relativePath());
+                    if (!project.embeddingReady.contains(work.relativePath())) continue;
                     boolean duplicate = vectors.stream().anyMatch(task -> task.project == project && task.absolute.equals(absolute));
                     if (!duplicate && !absolute.equals(project.activeVector)) {
                         vectors.add(new VectorTask(project, work, epoch, project.generations.getOrDefault(absolute, 0L), absolute));
@@ -248,8 +266,12 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
     private void runVector(VectorTask task) {
         String error = ""; boolean permanent = false;
         boolean committed = false;
-        try { committed = service.backfill(task.work, () -> current(task)); }
-        catch (StaleIndexWorkException ignored) { }
+        boolean stale = false;
+        try {
+            committed = service.backfill(task.work, () -> current(task));
+            stale = !committed;
+        }
+        catch (StaleIndexWorkException | IOException ignored) { stale = true; }
         catch (Exception e) {
             if (current(task)) {
                 if (e instanceof EmbeddingException failure) {
@@ -266,8 +288,9 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
                 if (committed && ownsCurrentState) {
                     task.project.retries = 0;
                     task.project.nextVectorAttempt = 0;
-                    task.project.error = "";
+                    task.project.error = lexicalError(task.project);
                 }
+                if (stale && ownsCurrentState) pathChanged(task.project.root, task.absolute);
                 if (!error.isEmpty() && ownsCurrentState) {
                     task.project.error = error;
                     task.project.retries++;
@@ -280,10 +303,14 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
             }
         }
     }
+    private static String lexicalError(Project project) {
+        return project.lexicalFailed ? "lexical_refresh_failed" : project.watcherFailed ? "watcher_unavailable" : "";
+    }
     private boolean current(VectorTask task) {
         synchronized (state) {
             return !closed && !task.project.paused && projects.get(task.project.root) == task.project
                     && task.project.epoch == task.epoch
+                    && task.project.embeddingReady.contains(task.work.relativePath())
                     && task.project.generations.getOrDefault(task.absolute, 0L) == task.generation;
         }
     }
@@ -427,9 +454,10 @@ public final class WorkspaceCodeIndexManager implements AutoCloseable {
         final Path root;
         final Map<Path, Pending> dirty = new LinkedHashMap<>();
         final Map<Path, Long> generations = new HashMap<>();
+        final Set<Path> embeddingReady = new HashSet<>();
         long epoch, lastScan, nextAttempt, nextVectorAttempt;
         int retries;
-        boolean full = true, paused, lexicalRunning, embeddingBlocked, watcherFailed, discoverEmbeddings;
+        boolean full = true, paused, lexicalRunning, lexicalFailed, embeddingBlocked, watcherFailed, discoverEmbeddings;
         Path activeVector;
         String error = "";
         Project(Path root) { this.root = root; }

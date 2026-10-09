@@ -78,6 +78,7 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
             RetrievalStageRunner.Result result;
             RetrievalPipeline.Result budgeted;
             Optional<RepositoryMap> map;
+            Map<String, String> selectedFileHashes = new LinkedHashMap<>();
             synchronized (index) {
                 result = empty ? new RetrievalStageRunner.Result(Map.of(), Map.of(),
                         Map.of(RetrievalSource.FTS_TERMS, 0, new SemanticRetriever().source(context), 0), List.of("index_empty"))
@@ -86,9 +87,15 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
                 map = request.intent() == RetrievalIntent.ARCHITECTURE
                         ? Optional.of(new RepositoryMapSelector(index).select(request.projectRoot(), request.query(), 1500))
                         : Optional.empty();
+                for (String file : budgeted.hits().stream().map(RetrievalHit::filePath).distinct().toList()) {
+                    try {
+                        index.findFile(request.projectRoot(), Path.of(file))
+                                .ifPresent(snapshot -> selectedFileHashes.put(file, snapshot.contentHash()));
+                    } catch (Exception ignored) { /* Missing metadata makes disk verification unavailable. */ }
+                }
             }
             var reasons = new ArrayList<>(result.degradedReasonCodes());
-            var freshness = new RetrievalFreshnessChecker().check(request.projectRoot(), index, budgeted.hits());
+            var freshness = new RetrievalFreshnessChecker().check(request.projectRoot(), Map.copyOf(selectedFileHashes), budgeted.hits());
             freshness.values().stream().filter(s -> !"verified".equals(s)).map(s -> "index_file_" + s)
                     .distinct().sorted().forEach(reasons::add);
             if (lease.provider.isEmpty() && lease.reason != null && !lease.reason.isBlank()
@@ -127,12 +134,12 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
         lastProjectRoot = request.projectRoot();
         var lexical = reconcileLexical(request);
         var reasons = new LinkedHashSet<>(lexical.reasonCodes());
-        for (var work : missingEmbeddingWork(request.projectRoot(), Integer.MAX_VALUE)) {
+        for (var work : missingEmbeddingWork(request.projectRoot(), Integer.MAX_VALUE, lexical.embeddingReadyPaths())) {
             try { backfill(work, () -> true); }
             catch (Exception e) { reasons.add("embedding_failed"); }
         }
         return new IndexRefreshResult(lexical.changedFiles(), lexical.unchangedFiles(), lexical.deletedFiles(),
-                lexical.failedFiles(), List.copyOf(reasons));
+                lexical.failedFiles(), List.copyOf(reasons), lexical.embeddingReadyPaths());
     }
     public IndexRefreshResult reconcileLexical(IndexRefreshRequest request) {
         lastProjectRoot = request.projectRoot();
@@ -150,6 +157,12 @@ public final class DefaultCodeRetrievalService implements CodeRetrievalService {
         try (Lease lease = acquire(root, false)) {
             if (lease.provider.isEmpty()) return List.of();
             return coordinator(lease.provider).missingEmbeddingWork(root, limit);
+        }
+    }
+    public List<EmbeddingWorkItem> missingEmbeddingWork(Path root, int limit, Set<Path> eligiblePaths) {
+        try (Lease lease = acquire(root, false)) {
+            if (lease.provider.isEmpty()) return List.of();
+            return coordinator(lease.provider).missingEmbeddingWork(root, limit, eligiblePaths);
         }
     }
     public boolean backfill(EmbeddingWorkItem work, BooleanSupplier stillCurrent) throws Exception {

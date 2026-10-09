@@ -247,7 +247,65 @@ sequenceDiagram
 
 禁用 `autoIndex.enabled` 即停止自动维护；停止后台线程后保留已有可用索引。模型回滚继续通过现有 provider/空间机制隔离向量。实现时同步 README、AGENTS、docs/implementation/01-runtime-and-agent-foundation.md、配置示例及工具提示词；这些文档在功能完成前不能宣称已经支持自动维护。
 
+### 3.4 2026-10-09 审查发现问题的修复设计
+
+目标：修复返回旧片段却标记 `verified`、单文件扫描失败阻塞全项目向量补齐、漏事件时过期任务重复读取三项问题。非目标：不改检索排名、预算、模型、命令、数据库 schema 或授权策略。基线为 `05daea3`；从与远端一致的 main 创建 `fix/rag-index-consistency`，保留未提交改动，不使用 worktree。
+
+源码证据：`DefaultCodeRetrievalService.search` 的排名锁窗口结束后，`RetrievalFreshnessChecker.check` 重新读取索引 Hash，可能取得与返回正文不同的版本；`WorkspaceCodeIndexManager.tick` 仅在扫描完全成功时发现向量，失败后 full 标志又排除发现；`runVector` 吞掉 stale 异常并立即再次发现相同元信息。前次只读审查已通过合成源码探针复现三种行为。
+
+方案评审比较了延长数据库锁、仅放宽调度、绑定版本并隔离文件三个方向。采用第三种：文件读取保持锁外；调度只消费词法成功确认的路径，避免放宽 full 门禁后把失败旧文件重新排入模型队列。
+
+1. 检索：在同一数据库 monitor 窗口内取得片段与每个命中文件的 Hash，锁外 freshness 只比较这一份不可变 Hash 快照；不再次读取新索引版本。未取得 Hash 时保持 unavailable。路径权限与修改前 read_file 的要求保持不变。
+2. 词法结果：`IndexRefreshResult` 增加不可变 `embeddingReadyPaths`，只包含本批安全读取且已提交或确认不变的相对路径；保留五参数构造器供现有调用兼容。完整扫描替换项目已确认路径，增量刷新移除本批旧资格后合并成功路径。失败、删除、忽略文件不取得资格；不完整扫描继续禁止全局缺失删除。
+3. 发现调度：使用已确认路径过滤待办，过滤发生在候选上限之前。部分扫描失败保留全库重试及错误诊断，在退避窗口内仍补齐正常文件。成功向量提交不清除词法或监听错误；项目代次变化、关闭、暂停继续阻止旧结果发布。该路径集合只在进程内保存元信息，重启重建，不持久化源码。
+4. 过期恢复：当前任务遇到 stale、源文件读取失败或条件提交返回 false，先撤销该路径的向量资格并送入既有去抖词法队列；已被新代次取代的任务不反向污染状态。刷新确认后才重新发现向量。模型协议故障仍按原有有限退避处理，不能把所有异常当作 stale。
+
+```mermaid
+flowchart TD
+    Query[检索 DB 窗口] --> Hit[片段与同版本文件 Hash]
+    Hit --> Check[锁外磁盘 Hash 校验]
+    Scan[词法扫描与逐文件事务] --> Ready[成功确认路径]
+    Scan --> Failure[失败诊断与退避校准]
+    Ready --> Discover[按成功路径过滤向量待办]
+    Failure -->|正常文件继续补齐| Discover
+    Discover --> Vector[锁外推理与条件提交]
+    Vector -->|当前任务过期或源读取失败| Dirty[撤销路径资格并去抖刷新]
+    Dirty --> Scan
+```
+
+兼容与回滚：只扩展进程内刷新结果及内部发现参数；旧调用继续可用，数据库 v2、远程授权与用户配置不迁移。Git 恢复本次文件即可回滚。风险是部分失败下的错误诊断被成功向量覆盖、旧扫描结果污染新代次或过滤前截断造成健康候选饥饿，均列入回归。
+
 ## 4. 实现任务与测试矩阵
+
+### 本次修复执行计划
+
+按本节直接执行，不创建第二份方案。每项先运行失败测试，再实现，再跑对应边界回归。
+
+| 步骤 | 文件 | 测试与验收 |
+|---|---|---|
+| 1 | `RetrievalCoordinationTest`、`RetrievalFreshnessChecker`、`DefaultCodeRetrievalService` | 用确定性刷新交错返回旧正文，断言 changed 和 partial；确认文件 Hash 与排名同窗口，磁盘读取仍锁外 |
+| 2 | `AutomaticIndexConcurrencyTest`、`IndexRefreshResult`、`IndexCoordinator`、`DefaultCodeRetrievalService`、`WorkspaceCodeIndexManager` | 一个非 UTF-8 文件不阻塞正常文件；既有失败文件不吃满候选池、不产生远程发送；保留旧词法及扫描错误，修复后恢复 |
+| 3 | `AutomaticIndexConcurrencyTest`、`WorkspaceCodeIndexManager` | latch 期间修改/删除文件且不通知，条件提交拒绝后触发词法刷新；不等待 300 秒校准，不重复推理旧版本 |
+| 4 | 本文、`docs/implementation/03-context-memory-and-retrieval.md`、README、AGENTS | 同步最终时效和异常恢复契约；执行 targeted、quick、full、构建及 diff 检查，记录真实结果 |
+
+验证命令：`mvn test -DskipTests=false "-Dtest=RetrievalCoordinationTest,AutomaticIndexConcurrencyTest,IndexCoordinatorTest,IndexFoundationTest,WorkspaceCodeIndexManagerTest,SqliteRetrievalIndexTest,RetrievalProviderLifecycleTest,AutomaticIndexToolIntegrationTest"`；`mvn test -Pquick`；`mvn test -DskipTests=false`；`mvn package -DskipTests`；`git diff --check`。构建不使用 clean，保留前次审查探针与日志并避免 IDE 清理竞争。
+
+本次实施记录：
+
+1. 新增 6 项回归：旧正文校验交错；17 个失败旧文件不占据候选池、健康文件补齐及失败诊断保留；发现后无通知变更；推理后无通知修改、删除与源文件不可读。使用受控 provider、latch 和固定 Clock，未加载真实 Qwen 或访问远程 API。
+2. `mvn test -DskipTests=false "-Dtest=RetrievalCoordinationTest,AutomaticIndexConcurrencyTest"` 红灯：16 项、6 失败、0 错误，六个新增断言按预期失败；日志 `target/rag-consistency-red.log`。实现前未修改生产代码。
+3. freshness 边界绿灯：`mvn test -DskipTests=false "-Dtest=RetrievalCoordinationTest"`，5 项、0 失败、0 错误；日志 `target/rag-consistency-freshness-green.log`。后续加强了锁外磁盘校验断言及带 Hash 的路径越界测试，已由 quick 再次覆盖。
+4. 上述八类 targeted 命令：50 项、0 失败、0 错误、1 跳过，退出 0；日志 `target/rag-consistency-targeted.log`。
+5. `mvn test -Pquick`：1373 项、0 失败、0 错误、18 跳过，退出 0；日志 `target/rag-consistency-quick.log`。
+6. 独立只读审查核对路径资格、候选上限、代次、条件提交拒绝、诊断保留和新增用例，无待处理 Critical/Important 问题。Hash 窗口只保障共享单连接的进程内访问，未引入跨连接统一读事务，不将其宣称为跨进程原子快照。
+
+7. `mvn test -DskipTests=false`：1446 项、0 失败、0 错误、24 跳过，退出 0；日志 `target/rag-consistency-full.log`。跳过项包括真实模型/在线评测、stdio 与环境受限链接测试，未把跳过项计为通过。
+8. `mvn package -DskipTests`：2026-10-10 00:00 构建完成，退出 0、BUILD SUCCESS；日志 `target/rag-consistency-package.log`。本命令跳过测试，测试证据由前述独立命令提供；既有 shade 资源重叠警告保留，未改依赖。
+9. 已复核最终生产代码与测试差异、README/AGENTS/implementation03 及本文；`git diff --check` 通过，无无关文件、密钥、raw session 或 target 产物进入变更。保留 `fix/rag-index-consistency` 分支及未提交改动，未提交、推送或创建 PR。
+
+证据边界：新增异常与并发测试使用受控 provider，不代表真实 Qwen/远程 API 性能评测。索引仍为最终一致，修改前需读取当前文件；同进程共享连接的 Hash 快照不扩展为跨进程统一读事务。
+
+提交授权记录：2026-10-10，用户明确要求“提交修改”。本次源码、回归测试及同步文档作为一个修复提交，提交主题为 `fix(rag): preserve retrieval versions and recover index backfill`；提交前复核分支、差异、全量测试和构建日志，仅本地提交，不推送或创建 PR。
 
 ### 4.1 按依赖顺序实施
 
@@ -316,6 +374,16 @@ git diff --check
 本次自动维护测试采用临时项目、受控 provider、latch 与注入 Clock，并包含 Windows 原生监听新目录演练；没有自动下载或调用真实远程模型。最终回归及构建结果在第5节记录。
 
 ## 5. 验收清单
+
+### 本次审查问题修复
+
+- [x] 从最新 main 创建修复分支，目标、非目标、设计评审与实施计划合并在本文。
+- [x] 返回旧正文时不能用同进程更新后的 Hash 标记 verified，文件读取保持数据库锁外。
+- [x] 部分扫描失败不阻塞正常文件向量，失败旧文件不吃满候选池，旧词法和诊断保留。
+- [x] 当前任务 stale、源读取失败及提交拒绝进入路径刷新，修改、删除和不可读用例均通过。
+- [x] 原有 provider 代次、授权、错误有限重试和生命周期回归通过。
+- [x] 红灯、targeted、quick、full、构建、独立评审和 diff 检查完成，文档同步。
+- [x] 保留未提交状态，无敏感文件或构建产物进入差异；真实模型性能与跨进程快照边界明确。
 
 ### 5.1 本次设计文档交付
 

@@ -167,6 +167,8 @@ CodeAgent 把实时确定性工具与索引式 RAG 分开：
 
 交互式 CLI（inline/plain/TUI）默认在后台维护代码索引：启动时 Hash 校准，保存后去抖更新词法，再异步补齐向量；监听失效或漏事件由每300秒校准兜底。首次启动自动建立词法索引，后续启动复用已有数据并增量更新；模型仍需显式预装。检索诊断 `maintenance_state` 展示更新/补齐状态，`idle` 不保证全库实时新鲜。Runtime API 和 headless 入口不启动后台维护，由宿主显式调用底层索引接口。
 
+部分文件扫描失败时，保留失败诊断及旧索引，正常文件继续补向量；不完整扫描不执行全局缺失删除。向量任务发现源文件过期或读取失败时会安排该路径的词法刷新，避免反复处理旧版本。
+
 可在 `~/.codeagent/config.json` 设置：
 
 ```json
@@ -175,7 +177,7 @@ CodeAgent 把实时确定性工具与索引式 RAG 分开：
 
 将 `enabled` 设为 `false` 可关闭自动维护，仅查询已有索引。后台不弹远程授权、不下载模型；缺失或故障保留词法索引。队列有界，退出后停止维护，重启重新对账。设计、并发与平台边界见 [40-索引自动维护](docs/dev/40-automatic-code-index-maintenance.md)。
 
-返回结果的`file_freshness`只核对候选文件：`verified`表示检查时内容hash与索引相同，`changed`/`missing`/`unavailable`表示需回到当前源码确认，旧行号不能直接用于修改。`index_empty`表示当前项目没有已索引chunk，不证明项目没有答案；空结果仍带诊断。关键结论和修改前使用`read_file`核实当前实现，避免重复收集相同正文。协作设计与分层评测见 [38-code-search-rag-coordination.md](docs/dev/38-code-search-rag-coordination.md)。
+返回结果的`file_freshness`只核对候选文件：`verified`表示检查时内容hash与本次返回片段所绑定的索引版本相同，同进程后台刷新不会用新索引版本验证旧正文；`changed`/`missing`/`unavailable`表示需回到当前源码确认，旧行号不能直接用于修改。`index_empty`表示当前项目没有已索引chunk，不证明项目没有答案；空结果仍带诊断。关键结论和修改前使用`read_file`核实当前实现，避免重复收集相同正文。协作设计与分层评测见 [38-code-search-rag-coordination.md](docs/dev/38-code-search-rag-coordination.md)。
 
 ```text
 /search 处理请求重试和 Retry-After 的实现

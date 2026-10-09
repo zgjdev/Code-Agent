@@ -13,6 +13,155 @@ import java.util.function.BooleanSupplier;
 import static org.junit.jupiter.api.Assertions.*;
 
 class AutomaticIndexConcurrencyTest {
+    @Test void partialScanBackfillsHealthyFilesWithoutSendingFailedOldFiles(@TempDir Path temp) throws Exception {
+        Path root = Files.createDirectory(temp.resolve("project"));
+        List<Path> failedFiles = new ArrayList<>();
+        for (int i = 0; i < 17; i++) {
+            Path file = root.resolve("Bad" + i + ".properties");
+            Files.writeString(file, "oldFixtureContent=value");
+            failedFiles.add(file);
+        }
+        Path removed = root.resolve("Removed.java");
+        Files.writeString(removed, "class Removed {}");
+        var calls = new AtomicInteger();
+        var sent = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        var delegate = provider(EmbeddingLocality.IN_PROCESS, () -> {});
+        EmbeddingProvider recording = new EmbeddingProvider() {
+            public String id() { return delegate.id(); }
+            public String modelId() { return delegate.modelId(); }
+            public EmbeddingSpaceDescriptor space() { return delegate.space(); }
+            public EmbeddingLocality locality() { return delegate.locality(); }
+            public List<float[]> embedAll(List<String> inputs) throws EmbeddingException {
+                calls.incrementAndGet(); sent.addAll(inputs); return delegate.embedAll(inputs);
+            }
+        };
+        var now = new AtomicLong(100000);
+        try (var index = new SqliteRetrievalIndex(temp.resolve("index.db"));
+             var service = new DefaultCodeRetrievalService(index, resolution(recording))) {
+            service.reconcileLexical(new IndexRefreshRequest(root, false));
+            String oldHash = index.findFile(root, Path.of("Bad0.properties")).orElseThrow().contentHash();
+            for (Path file : failedFiles) Files.write(file, new byte[]{(byte) 0xff, (byte) 0xfe});
+            Files.delete(removed);
+            Files.writeString(root.resolve("ZGood.java"), "class ZGood { void healthyOperation() {} }");
+            try (var manager = new WorkspaceCodeIndexManager(service, new CodeAgentConfig.AutoIndexConfig(), testClock(now), false)) {
+                manager.register(root);
+                eventually(() -> !vectors(index, root, delegate.space()).isEmpty());
+                assertTrue(terms(index, root, "healthyOperation"));
+                assertEquals(1, calls.get());
+                assertTrue(sent.stream().noneMatch(input -> input.contains("oldFixtureContent")));
+                assertEquals("lexical_refresh_failed", manager.status(root).errorCode(), "vector success must preserve scan errors");
+                assertEquals(oldHash, index.findFile(root, Path.of("Bad0.properties")).orElseThrow().contentHash());
+                assertTrue(index.findFile(root, Path.of("Removed.java")).isPresent(), "incomplete scan must not delete unseen files");
+                for (Path file : failedFiles) Files.delete(file);
+                now.addAndGet(10000);
+                manager.workspaceChanged(root);
+                manager.awaitIdle(root, Duration.ofSeconds(5));
+                assertEquals("idle", manager.status(root).state());
+                assertTrue(manager.status(root).errorCode().isEmpty());
+                assertEquals(1, index.listFiles(root).size());
+                assertEquals(1, calls.get(), "unchanged healthy vectors must be reused");
+            }
+        }
+    }
+
+    @Test void staleDiscoveryRefreshesChangedFileWithoutNotification(@TempDir Path temp) throws Exception {
+        Path root = Files.createDirectory(temp.resolve("project"));
+        Path source = root.resolve("Store.java");
+        Files.writeString(source, "class Store { void oldAction() {} }");
+        var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
+        var first = new AtomicBoolean(true); var calls = new AtomicInteger();
+        var delegate = provider(EmbeddingLocality.IN_PROCESS, calls::incrementAndGet);
+        EmbeddingProvider blockedMetadata = new EmbeddingProvider() {
+            public String id() { return delegate.id(); }
+            public String modelId() { return delegate.modelId(); }
+            public EmbeddingSpaceDescriptor space() {
+                if (first.getAndSet(false)) { entered.countDown(); await(release); }
+                return delegate.space();
+            }
+            public EmbeddingLocality locality() { return delegate.locality(); }
+            public List<float[]> embedAll(List<String> inputs) throws EmbeddingException { return delegate.embedAll(inputs); }
+        };
+        var options = new CodeAgentConfig.AutoIndexConfig(); options.setDebounceMillis(0);
+        try (var index = new SqliteRetrievalIndex(temp.resolve("index.db"));
+             var service = new DefaultCodeRetrievalService(index, resolution(blockedMetadata));
+             var manager = new WorkspaceCodeIndexManager(service, options, testClock(new AtomicLong(100000)), false)) {
+            manager.register(root);
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                Files.writeString(source, "class Store { void newAction() {} }");
+            } finally { release.countDown(); }
+            eventually(() -> terms(index, root, "newAction"));
+            manager.awaitIdle(root, Duration.ofSeconds(5));
+            assertFalse(terms(index, root, "oldAction"));
+            assertEquals(1, calls.get(), "the superseded version must never reach inference");
+            assertFalse(vectors(index, root, delegate.space()).isEmpty());
+        } finally { release.countDown(); }
+    }
+
+    @Test void refusedVectorCommitRefreshesChangedFileWithoutNotification(@TempDir Path temp) throws Exception {
+        recoverUnnotifiedSourceChange(temp, "class Store { void newAction() {} }");
+    }
+
+    @Test void refusedVectorCommitRemovesDeletedFileWithoutNotification(@TempDir Path temp) throws Exception {
+        recoverUnnotifiedSourceChange(temp, null);
+    }
+
+    @Test void unreadableVectorSourceRetainsOldIndexAndBackfillsHealthyFile(@TempDir Path temp) throws Exception {
+        recoverUnnotifiedSourceChange(temp, "invalid-utf8");
+    }
+
+    private static void recoverUnnotifiedSourceChange(Path temp, String replacement) throws Exception {
+        Path root = Files.createDirectory(temp.resolve("project"));
+        Path source = root.resolve("AStore.java");
+        Files.writeString(source, "class Store { void oldAction() {} }");
+        Files.writeString(root.resolve("ZHealthy.java"), "class Healthy { void healthyOperation() {} }");
+        var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
+        var calls = new AtomicInteger();
+        var provider = provider(EmbeddingLocality.IN_PROCESS, () -> {
+            if (calls.incrementAndGet() == 1) { entered.countDown(); await(release); }
+        });
+        var options = new CodeAgentConfig.AutoIndexConfig(); options.setDebounceMillis(0);
+        try (var index = new SqliteRetrievalIndex(temp.resolve("index.db"));
+             var service = new DefaultCodeRetrievalService(index, resolution(provider));
+             var manager = new WorkspaceCodeIndexManager(service, options, testClock(new AtomicLong(100000)), false)) {
+            manager.register(root);
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                if (replacement == null) Files.delete(source);
+                else if (replacement.equals("invalid-utf8")) Files.write(source, new byte[]{(byte) 0xff, (byte) 0xfe});
+                else Files.writeString(source, replacement);
+            } finally { release.countDown(); }
+            if ("invalid-utf8".equals(replacement)) {
+                eventually(() -> manager.status(root).errorCode().equals("lexical_refresh_failed"));
+                eventually(() -> vectors(index, root, provider.space()).stream().anyMatch(hit -> hit.filePath().equals("ZHealthy.java")));
+                assertTrue(terms(index, root, "oldAction"), "failed reading must preserve the committed index");
+                assertEquals(2, calls.get(), "only the initial attempt and healthy file should reach inference");
+            } else {
+                eventually(() -> replacement == null ? indexFileAbsent(index, root, "AStore.java") : terms(index, root, "newAction"));
+                manager.awaitIdle(root, Duration.ofSeconds(5));
+                assertFalse(terms(index, root, "oldAction"));
+                assertEquals(replacement == null ? 2 : 3, calls.get());
+            }
+            assertFalse(vectors(index, root, provider.space()).isEmpty());
+        } finally { release.countDown(); }
+    }
+
+    private static Clock testClock(AtomicLong now) {
+        return new Clock() {
+            public ZoneId getZone() { return ZoneOffset.UTC; }
+            public Clock withZone(ZoneId zone) { return this; }
+            public Instant instant() { return Instant.ofEpochMilli(now.get()); }
+        };
+    }
+    private static List<RetrievalCandidate> vectors(SqliteRetrievalIndex index, Path root, EmbeddingSpaceDescriptor space) {
+        try { return index.searchVector(root, space.embeddingSpaceId(), new float[]{1,0}, 30); }
+        catch (Exception e) { throw new AssertionError(e); }
+    }
+    private static boolean indexFileAbsent(SqliteRetrievalIndex index, Path root, String file) {
+        try { return index.findFile(root, Path.of(file)).isEmpty(); }
+        catch (Exception e) { throw new AssertionError(e); }
+    }
+
     @Test void oldDiscoveryFailureCannotPolluteNewProviderState(@TempDir Path temp) throws Exception {
         Path root = Files.createDirectory(temp.resolve("project"));
         Files.writeString(root.resolve("Store.java"), "class Store { void saveData() {} }");

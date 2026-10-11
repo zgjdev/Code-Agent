@@ -271,6 +271,8 @@ public final class WorkspaceAwareExecutionScheduler implements AutoCloseable {
         final Semaphore slot = new Semaphore(1);
         volatile boolean active = true;
         volatile boolean quarantined;
+        // Retain the lease for quarantined workspaces; it must not be closed while ownership is retained.
+        @SuppressWarnings("unused")
         volatile SharedExecutionResourceLeases.Lease retainedResources;
         volatile Exception lastFailure;
         Entry(WorkspaceIdentity identity, WorkspaceOwnerLease owner, WorkspaceRuntime runtime,

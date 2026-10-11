@@ -78,7 +78,7 @@ class RuntimeExecutionStoreTest {
     @Test
     void routingDecisionIsDurableIdempotentAndRejectsConflict(@TempDir Path tempDir) throws Exception {
         try (RuntimeExecutionStore store = new RuntimeExecutionStore(tempDir.resolve("tasks.db"))) {
-            RuntimeExecution execution = store.enqueue(tempDir, "session", "prompt", null);
+            store.enqueue(tempDir, "session", "prompt", null);
             ExecutionClaim claim = store.claimNext(tempDir).orElseThrow().claim();
 
             RuntimeExecution first = store.commitRoutingDecision(
@@ -112,7 +112,7 @@ class RuntimeExecutionStoreTest {
     @Test
     void terminalCompletionIsIdempotentOnlyForTheSameOutcome(@TempDir Path tempDir) throws Exception {
         try (RuntimeExecutionStore store = new RuntimeExecutionStore(tempDir.resolve("tasks.db"))) {
-            RuntimeExecution execution = store.enqueue(tempDir, "session", "prompt", null);
+            store.enqueue(tempDir, "session", "prompt", null);
             ExecutionClaim claim = store.claimNext(tempDir).orElseThrow().claim();
             RuntimeExecution completed = store.complete(
                     claim, ExecutionOutcome.SUCCEEDED, "done", null);

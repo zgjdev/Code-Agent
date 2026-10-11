@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.sql.DriverManager;
 import java.util.List;
 
@@ -14,11 +15,24 @@ import static org.junit.jupiter.api.Assertions.*;
 class RuntimeExecutionStoreTest {
 
     @Test
+    void migratesExecutionIdentitySchemaToVersionTwo(@TempDir Path tempDir) throws Exception {
+        try (RuntimeExecutionStore ignored = new RuntimeExecutionStore(tempDir.resolve("tasks.db"));
+             var connection = DriverManager.getConnection("jdbc:sqlite:" + tempDir.resolve("tasks.db"));
+             var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT MAX(version) FROM runtime_schema_migrations")) {
+            assertTrue(rows.next());
+            assertEquals(2, rows.getInt(1), "workspace identity requires schema version 2");
+        }
+    }
+
+    @Test
     void enqueuesWithMonotonicSessionOrdinalAndClaimsOnlyCurrentWorkspace(@TempDir Path tempDir)
             throws Exception {
         Path db = tempDir.resolve("tasks.db");
         Path workspaceA = tempDir.resolve("a").toAbsolutePath().normalize();
         Path workspaceB = tempDir.resolve("b").toAbsolutePath().normalize();
+        Files.createDirectories(workspaceA);
+        Files.createDirectories(workspaceB);
         try (RuntimeExecutionStore store = new RuntimeExecutionStore(db)) {
             RuntimeExecution a1 = store.enqueue(workspaceA, "session-a", "one", null);
             RuntimeExecution a2 = store.enqueue(workspaceA, "session-a", "two", ExecutionMode.PLAN);
@@ -35,20 +49,47 @@ class RuntimeExecutionStoreTest {
     }
 
     @Test
+    void bindsEachSessionToOneCanonicalWorkspace(@TempDir Path tempDir) throws Exception {
+        Path workspaceA = Files.createDirectory(tempDir.resolve("a"));
+        Path workspaceB = Files.createDirectory(tempDir.resolve("b"));
+        try (RuntimeExecutionStore store = new RuntimeExecutionStore(tempDir.resolve("tasks.db"))) {
+            RuntimeExecution first = store.enqueue(workspaceA, "session-a", "one", null);
+            RuntimeExecution alias = store.enqueue(
+                    workspaceA.resolve("..").resolve("a"), "session-a", "two", null);
+
+            assertEquals(first.workspaceKey(), alias.workspaceKey());
+            assertThrows(IllegalStateException.class,
+                    () -> store.enqueue(workspaceB, "session-a", "wrong workspace", null));
+            assertEquals(2, store.list(workspaceA, 10).size());
+        }
+    }
+
+    @Test
+    void eachClaimCarriesAnOwnerAndAnAttemptFence(@TempDir Path tempDir) throws Exception {
+        try (RuntimeExecutionStore store = new RuntimeExecutionStore(tempDir.resolve("tasks.db"))) {
+            store.enqueue(tempDir, "session-a", "one", null);
+            RuntimeExecution claimed = store.claimNext(tempDir).orElseThrow();
+
+            assertNotNull(claimed.ownerId());
+            assertTrue(claimed.attempt() > 0);
+        }
+    }
+
+    @Test
     void routingDecisionIsDurableIdempotentAndRejectsConflict(@TempDir Path tempDir) throws Exception {
         try (RuntimeExecutionStore store = new RuntimeExecutionStore(tempDir.resolve("tasks.db"))) {
             RuntimeExecution execution = store.enqueue(tempDir, "session", "prompt", null);
-            store.claimNext(tempDir).orElseThrow();
+            ExecutionClaim claim = store.claimNext(tempDir).orElseThrow().claim();
 
             RuntimeExecution first = store.commitRoutingDecision(
-                    execution.id(), ExecutionMode.REACT, RoutingSource.AUTO_MODEL);
+                    claim, ExecutionMode.REACT, RoutingSource.AUTO_MODEL);
             RuntimeExecution repeated = store.commitRoutingDecision(
-                    execution.id(), ExecutionMode.REACT, RoutingSource.AUTO_MODEL);
+                    claim, ExecutionMode.REACT, RoutingSource.AUTO_MODEL);
 
             assertEquals(ExecutionMode.REACT, first.selectedMode());
             assertEquals(first, repeated);
             assertThrows(IllegalStateException.class, () -> store.commitRoutingDecision(
-                    execution.id(), ExecutionMode.PLAN, RoutingSource.AUTO_MODEL));
+                    claim, ExecutionMode.PLAN, RoutingSource.AUTO_MODEL));
         }
     }
 
@@ -56,11 +97,11 @@ class RuntimeExecutionStoreTest {
     void cancelRequestWinsTerminalRace(@TempDir Path tempDir) throws Exception {
         try (RuntimeExecutionStore store = new RuntimeExecutionStore(tempDir.resolve("tasks.db"))) {
             RuntimeExecution execution = store.enqueue(tempDir, "session", "prompt", null);
-            store.claimNext(tempDir).orElseThrow();
+            ExecutionClaim claim = store.claimNext(tempDir).orElseThrow().claim();
 
             assertEquals(CancelRequestResult.REQUESTED, store.requestCancel(execution.id()));
             RuntimeExecution terminal = store.complete(
-                    execution.id(), ExecutionOutcome.SUCCEEDED, "done", null);
+                    claim, ExecutionOutcome.SUCCEEDED, "done", null);
 
             assertEquals(ExecutionStatus.CANCELED, terminal.status());
             assertEquals(ExecutionOutcome.CANCELED, terminal.outcome());
@@ -72,14 +113,14 @@ class RuntimeExecutionStoreTest {
     void terminalCompletionIsIdempotentOnlyForTheSameOutcome(@TempDir Path tempDir) throws Exception {
         try (RuntimeExecutionStore store = new RuntimeExecutionStore(tempDir.resolve("tasks.db"))) {
             RuntimeExecution execution = store.enqueue(tempDir, "session", "prompt", null);
-            store.claimNext(tempDir).orElseThrow();
+            ExecutionClaim claim = store.claimNext(tempDir).orElseThrow().claim();
             RuntimeExecution completed = store.complete(
-                    execution.id(), ExecutionOutcome.SUCCEEDED, "done", null);
+                    claim, ExecutionOutcome.SUCCEEDED, "done", null);
 
             assertEquals(completed, store.complete(
-                    execution.id(), ExecutionOutcome.SUCCEEDED, "done", null));
+                    claim, ExecutionOutcome.SUCCEEDED, "done", null));
             assertThrows(IllegalStateException.class, () -> store.complete(
-                    execution.id(), ExecutionOutcome.FAILED, null, "different"));
+                    claim, ExecutionOutcome.FAILED, null, "different"));
         }
     }
 
@@ -131,6 +172,8 @@ class RuntimeExecutionStoreTest {
     @Test
     void listsWorkspaceExecutionsAndReportsBusySession(@TempDir Path tempDir) throws Exception {
         Path workspace = tempDir.resolve("workspace");
+        Files.createDirectories(workspace);
+        Files.createDirectories(tempDir.resolve("other"));
         try (RuntimeExecutionStore store = new RuntimeExecutionStore(tempDir.resolve("tasks.db"))) {
             RuntimeExecution first = store.enqueue(workspace, "session-a", "one", null);
             RuntimeExecution second = store.enqueue(workspace, "session-a", "two", null);
@@ -143,7 +186,7 @@ class RuntimeExecutionStoreTest {
 
             RuntimeExecution claimed = store.claimNext(workspace).orElseThrow();
             assertEquals(first.id(), store.running(workspace).orElseThrow());
-            store.complete(claimed.id(), ExecutionOutcome.SUCCEEDED, "done", null);
+            store.complete(claimed.claim(), ExecutionOutcome.SUCCEEDED, "done", null);
             assertTrue(store.hasNonTerminal("session-a"), "the second execution remains queued");
             store.requestCancel(second.id());
             assertFalse(store.hasNonTerminal("session-a"));

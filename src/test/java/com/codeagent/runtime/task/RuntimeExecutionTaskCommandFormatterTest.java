@@ -15,10 +15,13 @@ class RuntimeExecutionTaskCommandFormatterTest {
 
     @Test
     void addListLogAndCancelUseRuntimeExecutionStore(@TempDir Path tempDir) throws Exception {
-        Path workspace = tempDir.resolve("workspace");
+        Path workspace = java.nio.file.Files.createDirectory(tempDir.resolve("workspace"));
+        java.util.concurrent.locks.ReentrantLock gate = new java.util.concurrent.locks.ReentrantLock();
+        gate.lock();
         try (RuntimeExecutionStore store = new RuntimeExecutionStore(tempDir.resolve("tasks.db"));
              WorkspaceAwareExecutionScheduler scheduler = new WorkspaceAwareExecutionScheduler(
-                     store, workspace, (execution, token) -> TopLevelExecutionResult.succeeded("done"))) {
+                     store, workspace, (execution, token) -> TopLevelExecutionResult.succeeded("done"), () -> !gate.isLocked())) {
+            scheduler.start();
             RuntimeExecutionQueue queue = new RuntimeExecutionQueue(store, scheduler, workspace);
             String added = TaskCommandFormatter.handle(
                     queue, "session-1", "add inspect project");
@@ -31,6 +34,6 @@ class RuntimeExecutionTaskCommandFormatterTest {
                     queue, "session-1", "log " + id).contains("session-1"));
             assertTrue(TaskCommandFormatter.handle(
                     queue, "session-1", "cancel " + id).contains("已请求取消"));
-        }
+        } finally { gate.unlock(); }
     }
 }

@@ -3,6 +3,7 @@ package com.codeagent.runtime.execution;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -18,6 +19,8 @@ class WorkspaceAwareExecutionSchedulerTest {
     void bindsClaimsToOneWorkspaceAndSerializesDifferentSessions(@TempDir Path tempDir) throws Exception {
         Path workspace = tempDir.resolve("current");
         Path otherWorkspace = tempDir.resolve("other");
+        Files.createDirectories(workspace);
+        Files.createDirectories(otherWorkspace);
         CountDownLatch firstStarted = new CountDownLatch(1);
         CountDownLatch releaseFirst = new CountDownLatch(1);
         CountDownLatch secondFinished = new CountDownLatch(1);
@@ -110,6 +113,7 @@ class WorkspaceAwareExecutionSchedulerTest {
     @Test
     void claimGateCanBlockAndLaterReleaseWorkspace(@TempDir Path tempDir) throws Exception {
         Path workspace = tempDir.resolve("workspace");
+        Files.createDirectories(workspace);
         java.util.concurrent.atomic.AtomicBoolean allowed = new java.util.concurrent.atomic.AtomicBoolean(false);
         CountDownLatch ran = new CountDownLatch(1);
         try (RuntimeExecutionStore store = new RuntimeExecutionStore(tempDir.resolve("tasks.db"));

@@ -12,6 +12,7 @@ public final class RuntimeExecutionQueue {
     private final RuntimeExecutionStore store;
     private final WorkspaceAwareExecutionScheduler scheduler;
     private final Path workspace;
+    private final RuntimeExecutionHost host;
 
     public RuntimeExecutionQueue(
             RuntimeExecutionStore store,
@@ -20,10 +21,24 @@ public final class RuntimeExecutionQueue {
         this.store = store;
         this.scheduler = scheduler;
         this.workspace = workspace.toAbsolutePath().normalize();
+        this.host = null;
+    }
+
+    public RuntimeExecutionQueue(RuntimeExecutionStore store, RuntimeExecutionHost host, WorkspaceIdentity workspace) {
+        this.store = store; this.host = host; this.scheduler = host.scheduler(); this.workspace = workspace.canonicalRoot();
     }
 
     public RuntimeExecution submit(
             String sessionId, String submittedInput, ExecutionMode explicitMode) throws SQLException {
+        if (host != null) {
+            try {
+                if (store.sessionWorkspace(sessionId).isEmpty()) {
+                    host.attachSession(new WorkspaceIdentityResolver().resolve(workspace).key(), sessionId);
+                }
+                return host.submit(sessionId, submittedInput, explicitMode);
+            } catch (SQLException failure) { throw failure; }
+            catch (Exception failure) { throw new SQLException("Execution submission failed", failure); }
+        }
         RuntimeExecution execution = store.enqueue(
                 workspace, sessionId, submittedInput, explicitMode);
         scheduler.signalWork();
@@ -43,10 +58,19 @@ public final class RuntimeExecutionQueue {
     }
 
     public Optional<RuntimeExecution> find(String executionId) throws SQLException {
-        return store.find(executionId);
+        WorkspaceKey key;
+        try { key = new WorkspaceIdentityResolver().resolve(workspace).key(); }
+        catch (java.io.IOException failure) { throw new SQLException("Workspace is unavailable", failure); }
+        return store.find(executionId).filter(execution -> key.equals(execution.workspaceKey()));
     }
 
     public CancelRequestResult cancel(String executionId) throws SQLException {
+        if (find(executionId).isEmpty()) return CancelRequestResult.NOT_FOUND;
+        if (host != null) {
+            try { return host.cancel(executionId); }
+            catch (SQLException failure) { throw failure; }
+            catch (Exception failure) { throw new SQLException("Execution cancellation failed", failure); }
+        }
         return scheduler.cancel(executionId);
     }
 

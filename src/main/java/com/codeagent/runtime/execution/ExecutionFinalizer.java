@@ -24,9 +24,14 @@ public final class ExecutionFinalizer {
     }
 
     public void ensureStarted(RuntimeExecution execution, SessionStore.SessionHandle session)
-            throws IOException {
+            throws IOException, SQLException {
         Object lock = locks.computeIfAbsent(execution.id(), ignored -> new Object());
         synchronized (lock) {
+            if (!session.sessionId().equals(execution.sessionId())) throw new IllegalStateException("Execution Session mismatch");
+            RuntimeExecution current = store.find(execution.id()).orElseThrow();
+            if (current.status() != ExecutionStatus.RUNNING || !current.claim().equals(execution.claim())) {
+                throw new IllegalStateException("Execution claim is stale: " + execution.id());
+            }
             SessionProjection.ExecutionEnvelope existing =
                     session.projection().executionEnvelopes().get(execution.id());
             if (existing != null) {
@@ -54,13 +59,18 @@ public final class ExecutionFinalizer {
     }
 
     public RuntimeExecution finish(
-            String executionId,
+            ExecutionClaim claim,
             TopLevelExecutionResult proposed,
             SessionStore.SessionHandle session) throws SQLException, IOException {
+        String executionId = claim.executionId();
         Object lock = locks.computeIfAbsent(executionId, ignored -> new Object());
         synchronized (lock) {
             RuntimeExecution current = store.find(executionId)
                     .orElseThrow(() -> new IllegalStateException("Unknown execution: " + executionId));
+            if (!session.sessionId().equals(current.sessionId())) throw new IllegalStateException("Execution Session mismatch");
+            if (!current.claim().equals(claim)) {
+                throw new IllegalStateException("Execution claim is stale: " + executionId);
+            }
             if (current.status() == ExecutionStatus.RUNNING
                     && session.projection().executionEnvelopes().get(executionId) == null) {
                 ensureStarted(current, session);
@@ -93,15 +103,33 @@ public final class ExecutionFinalizer {
                         ? proposed.outcome() : ExecutionOutcome.CANCELED;
                 result = proposed.result();
                 error = proposed.error();
-                appendEnd(current, outcome, statusFor(outcome), session);
             }
-            RuntimeExecution terminal = store.complete(executionId, outcome, result, error);
+            RuntimeExecution terminal = store.completeWithEnvelope(claim, outcome, result, error,
+                    (lockedExecution, effectiveOutcome) -> {
+                        var existingEnd = session.projection().executionEnvelopes().get(executionId);
+                        if (existingEnd != null && existingEnd.ended()) {
+                            verifyEnvelope(existingEnd, lockedExecution.selectedMode(), effectiveOutcome, statusFor(effectiveOutcome));
+                            return;
+                        }
+                        try { appendEnd(lockedExecution, effectiveOutcome, statusFor(effectiveOutcome), session); }
+                        catch (IOException failure) { throw new SQLException("Cannot append execution end", failure); }
+                    });
             SessionProjection.ExecutionEnvelope committed =
                     session.projection().executionEnvelopes().get(executionId);
             verifyEnvelope(committed, terminal.selectedMode(), terminal.outcome(), terminal.status());
             locks.remove(executionId, lock);
             return terminal;
         }
+    }
+
+    void reconcileTerminal(WorkspaceOwnerLease owner, RuntimeExecution execution, SessionStore.SessionHandle session)
+            throws SQLException, IOException {
+        owner.verifyIdentity();
+        RuntimeExecution current = store.find(execution.id()).orElseThrow();
+        if (!current.terminal() || !owner.identity().key().equals(current.workspaceKey())
+                || !session.sessionId().equals(current.sessionId())) throw new IllegalStateException("Invalid terminal reconciliation");
+        var envelope = session.projection().executionEnvelopes().get(execution.id());
+        if (envelope != null) ensureTerminalEnvelope(current, envelope, session);
     }
 
     private void ensureTerminalEnvelope(

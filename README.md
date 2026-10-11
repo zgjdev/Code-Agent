@@ -340,7 +340,9 @@ inline/plain CLI 的普通输入、`/react <任务>`、`/plan <任务>` 和 `/ta
 /task log <execution-id>
 ```
 
-当前 workspace 的顶层 Execution 严格串行；Plan 内部仍可按资源声明并行执行最多 4 个无冲突 DAG 节点。`/cancel` 取消当前 RUNNING Execution。Lanterna TUI、Runtime HTTP API 暂未接入该队列。
+当前 CLI workspace 的顶层 Execution 严格串行；Plan 内部仍可按资源声明并行执行最多 4 个无冲突 DAG 节点。`/cancel` 取消当前 RUNNING Execution。Java 进程内 `RuntimeExecutionHost` 可显式注册多个独立 workspace，在有界池中并行执行，默认并发数为 2，可设置为 1～4；同一 workspace 与同一 Session 仍各自串行。CLI 只注册启动目录，没有切换或注册其他目录的命令。Lanterna TUI、Runtime HTTP API 暂未接入 Host。
+
+Java 宿主入口位于 `com.codeagent.runtime.execution`：构造 `RuntimeExecutionHost(RuntimeExecutionStore, RuntimeExecutionOptions, ExecutionEventSink)`，调用 `registerWorkspace(Path, WorkspaceRuntimeFactory)`、`createSession(WorkspaceKey)` 或 `attachSession(WorkspaceKey, String)`、`start()`，再通过 `submit(String sessionId, String input, ExecutionMode override)` 提交。交互回答使用 `respond(WorkspaceKey, String executionId, String interactionId, String action, String text)`；结束时 `close()`。`RuntimeExecutionOptions.defaults()` 为 2。`DefaultWorkspaceRuntimeFactory(RuntimeExecutionStore, SessionStore, Function<WorkspaceIdentity,LlmClient>)` 接入真实 Agent/ToolRegistry/账本，但 headless 不自动启动 MCP Manager 或后台索引。宿主 API 是可信控制面，目录必须预先注册；共享 Git common-dir 整轮串行，其他非局部副作用必须有明确资源租约。外部命令不受容器级隔离。设计、迁移与恢复边界见 [多工作区执行调度方案](docs/dev/42-multi-workspace-execution-scheduling.md)。
 
 Agent 运行时可以直接输入下一条任务并回车，无需 `/task add`。新任务排队等待，开始执行时读取前序任务完成后的最新 Session 上下文；它不会中途修改正在运行的任务。等待 HITL 审批或 Plan 人工评审时，普通输入优先作为交互回答处理，无效审批输入不会变成任务；此时使用 `/task add <任务>` 可以明确追加任务。
 
@@ -424,7 +426,8 @@ raw session、日志和导出可能包含敏感内容，请勿提交或公开复
 graph TB
     CLI[CLI / Runtime API] --> ENTRY[命令与入口解析]
     ENTRY --> QUEUE[inline/plain: RuntimeExecutionQueue]
-    QUEUE --> WORKER[workspace 单 Worker + Session Context lease]
+    QUEUE --> HOST[RuntimeExecutionHost]
+    HOST --> WORKER[workspace 单顶层 Execution + Session Context lease]
     WORKER --> MODE{执行模式}
     ENTRY -->|Runtime API / Lanterna 原路径| MODE
     MODE --> REACT[Agent ReAct]

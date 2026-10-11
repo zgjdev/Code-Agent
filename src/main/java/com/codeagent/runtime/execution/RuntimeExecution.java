@@ -8,6 +8,7 @@ import java.time.Instant;
 public record RuntimeExecution(
         String id,
         String workspace,
+        WorkspaceKey workspaceKey,
         String sessionId,
         Long ordinal,
         ExecutionStatus status,
@@ -20,6 +21,7 @@ public record RuntimeExecution(
         String result,
         String error,
         int attempt,
+        String ownerId,
         boolean legacyUnbound,
         Instant cancelRequestedAt,
         String interruptionReason,
@@ -30,5 +32,12 @@ public record RuntimeExecution(
 
     public boolean terminal() {
         return status.terminal();
+    }
+
+    public ExecutionClaim claim() {
+        if (ownerId == null || attempt < 1) {
+            throw new IllegalStateException("Execution has no claim identity: " + id);
+        }
+        return new ExecutionClaim(id, ownerId, attempt);
     }
 }

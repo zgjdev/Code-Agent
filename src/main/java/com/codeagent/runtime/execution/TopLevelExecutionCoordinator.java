@@ -38,16 +38,20 @@ public final class TopLevelExecutionCoordinator implements TopLevelExecutionRunn
 
     @Override
     public TopLevelExecutionResult run(RuntimeExecution execution, CancellationToken token) throws Exception {
+        ExecutionClaim claim = execution.claim();
         RuntimeExecution current = requireRunning(execution.id());
+        if (!current.claim().equals(claim)) {
+            throw new IllegalStateException("Execution claim is stale: " + execution.id());
+        }
         ensureNotCancelled(token);
 
         if (current.resolvedTaskInput() == null) {
             String resolved = inputResolver.resolve(current);
-            current = store.commitResolvedInput(current.id(), resolved);
+            current = store.commitResolvedInput(claim, resolved);
         }
 
         RoutingDecision decision = routingDecision(current);
-        current = store.commitRoutingDecision(current.id(), decision.mode(), decision.source());
+        current = store.commitRoutingDecision(claim, decision.mode(), decision.source());
         ensureNotCancelled(token);
 
         RuntimeExecution durable = current;

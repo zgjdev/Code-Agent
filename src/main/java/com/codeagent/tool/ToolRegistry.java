@@ -1110,6 +1110,16 @@ public class ToolRegistry {
                 .toList();
     }
 
+    public boolean hasExternalMutableRuntimeBindings() {
+        return !mcpTools.isEmpty() || browserConnector != null;
+    }
+
+    public void closeWorkspaceResources() {
+        snapshotService.close();
+        CodeRetrievalService retrieval = codeRetrievalService;
+        if (retrieval != null) retrieval.close();
+    }
+
     /**
      * 注册一个 MCP 工具到 ToolRegistry。
      *
@@ -1449,14 +1459,20 @@ public class ToolRegistry {
         });
 
         try {
+            com.codeagent.runtime.CancellationToken batchToken = CancellationContext.current();
+            var batchIdentity = com.codeagent.runtime.interaction.ExecutionInteractionContext.current();
             List<Callable<ToolExecutionResult>> tasks = invocations.stream()
                     .<Callable<ToolExecutionResult>>map(invocation -> () -> {
+                        try (var cancellation = batchToken == null ? null : CancellationContext.install(batchToken);
+                             var interaction = batchIdentity == null ? null : com.codeagent.runtime.interaction.ExecutionInteractionContext.install(
+                                     batchIdentity.executionId(), batchIdentity.sessionId())) {
                         if (CancellationContext.isCancelled()) {
                             return ToolExecutionResult.failed(invocation, "用户取消了此次工具调用");
                         }
                         long startedAt = System.nanoTime();
                         ToolOutput output = executeBatchedToolOutput(invocation, invocations.size() > 1);
                         return ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt));
+                        }
                     })
                     .toList();
 
@@ -1492,7 +1508,7 @@ public class ToolRegistry {
                     .map(invocation -> ToolExecutionResult.failed(invocation, "工具批次执行被中断"))
                     .toList();
         } finally {
-            executor.shutdownNow();
+            com.codeagent.runtime.ExecutorDrain.stopAndAwait(executor);
         }
     }
 

@@ -66,6 +66,13 @@ import com.codeagent.runtime.execution.SessionExecutionContextRegistry;
 import com.codeagent.runtime.execution.TopLevelExecutionCoordinator;
 import com.codeagent.runtime.execution.TopLevelExecutionResult;
 import com.codeagent.runtime.execution.WorkspaceAwareExecutionScheduler;
+import com.codeagent.runtime.execution.RuntimeExecutionHost;
+import com.codeagent.runtime.execution.RuntimeExecutionOptions;
+import com.codeagent.runtime.execution.WorkspaceRuntime;
+import com.codeagent.runtime.execution.WorkspaceIdentity;
+import com.codeagent.runtime.execution.ExecutionEventSink;
+import com.codeagent.runtime.execution.DefaultWorkspaceRuntimeFactory;
+import java.util.Set;
 import com.codeagent.runtime.interaction.BrokerHitlHandler;
 import com.codeagent.runtime.interaction.BrokerPlanReviewHandler;
 import com.codeagent.runtime.interaction.ExecutionInteractionContext;
@@ -244,6 +251,7 @@ public class Main {
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
         AtomicReference<com.codeagent.rag.WorkspaceCodeIndexManager> automaticIndexRef = new AtomicReference<>();
+        AtomicReference<RuntimeExecutionHost> executionHostRef = new AtomicReference<>();
 
         try (Terminal terminal = TerminalBuilder.builder().system(true).dumb(true).build()) {
             refreshTerminalColumns(terminal);
@@ -309,7 +317,10 @@ public class Main {
                 var automaticIndex = hitlToolRegistry.startAutomaticIndex(config);
                 automaticIndexRef.set(automaticIndex);
                 if (automaticIndex != null) Runtime.getRuntime().addShutdownHook(
-                        new Thread(automaticIndex::close, "codeagent-index-shutdown"));
+                        new Thread(() -> {
+                            RuntimeExecutionHost host = executionHostRef.get();
+                            if (host == null || host.safelyStopped()) automaticIndex.close();
+                        }, "codeagent-index-shutdown"));
             } catch (Exception e) {
                 startupNote = "自动索引维护未启用: " + e.getClass().getSimpleName();
             }
@@ -320,7 +331,10 @@ public class Main {
                 }
                 mcpServerManager.loadConfiguredServers();
                 mcpServerManager.startAll(ui, mcpStartupWait());
-                Runtime.getRuntime().addShutdownHook(new Thread(mcpServerManager::close, "codeagent-mcp-shutdown"));
+                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                    RuntimeExecutionHost host = executionHostRef.get();
+                    if (host == null || host.safelyStopped()) mcpServerManager.close();
+                }, "codeagent-mcp-shutdown"));
             } catch (Exception e) {
                 startupNote = "MCP 初始化失败: " + e.getMessage();
             }
@@ -458,7 +472,7 @@ public class Main {
                         }
                         SessionExecutionContext context = sessionContextFactory.load(sessionId);
                         try {
-                            reconcileTerminalExecutionEnvelopes(executionStore, context.session());
+                            // Host reconciles durable envelopes after acquiring workspace ownership.
                             return context;
                         } catch (Exception failure) {
                             context.close();
@@ -495,7 +509,7 @@ public class Main {
                             },
                             (mode, submittedInput, action) -> executionAgent.getToolRegistry()
                                     .getSnapshotService()
-                                    .runTurn(mode.name().toLowerCase(Locale.ROOT),
+                                    .runTurnAndDrain(mode.name().toLowerCase(Locale.ROOT),
                                             submittedInput, action::run),
                             (execution, resolvedInput, token) -> topLevelResult(
                                     executionAgent.runExecution(
@@ -516,16 +530,23 @@ public class Main {
                                 return topLevelResult(planAgent.runOrResumeExecution(
                                         resolvedInput, execution.submittedInput()));
                             });
-            WorkspaceAwareExecutionScheduler executionScheduler =
-                    new WorkspaceAwareExecutionScheduler(executionStore, workspace, (execution, token) -> {
-                        sharedRuntimeLock.lockInterruptibly();
-                        try {
-                            try (SessionExecutionContextRegistry.Lease<SessionExecutionContext> lease =
-                                     sessionContexts.acquire(execution.sessionId());
-                             ExecutionInteractionContext.Scope ignored =
-                                     ExecutionInteractionContext.install(
-                                             execution.id(), execution.sessionId())) {
-                            SessionExecutionContext context = lease.context();
+            RuntimeExecutionHost executionHost = new RuntimeExecutionHost(
+                    executionStore, new RuntimeExecutionOptions(1), ExecutionEventSink.discarding());
+            executionHostRef.set(executionHost);
+            WorkspaceIdentity registeredWorkspace;
+            try {
+                registeredWorkspace = executionHost.registerWorkspace(workspace, (identity, sink) -> {
+                    Set<String> sharedResources = new java.util.HashSet<>(DefaultWorkspaceRuntimeFactory.sharedGitResources(workspace));
+                    sharedResources.add("mcp:global-unknown"); sharedResources.add("browser:global-default");
+                    WorkspaceRuntime runtime = new WorkspaceRuntime(identity, sessionContexts, interactionBroker,
+                            sharedRuntimeLock, sharedResources,
+                            () -> legacyPlanClaimAllowed(executionPlanStore, workspace, activeSession.get()),
+                            new WorkspaceRuntime.SessionController() {
+                                public String create() { throw new UnsupportedOperationException("CLI owns Session creation"); }
+                                public void attach(String id) throws Exception {
+                                    try (var lease = sessionContexts.acquire(id)) { }
+                                }
+                            }, (execution, token, context) -> {
                             context.activateSharedBindings();
                             Agent executionAgent = context.agent();
                             SessionStore.SessionHandle session = context.session();
@@ -547,6 +568,7 @@ public class Main {
                                         : failure.getMessage();
                                 proposed = TopLevelExecutionResult.failed(message);
                             }
+                            executionAgent.getToolRegistry().getSnapshotService().drain();
                             RuntimeExecution routed = executionStore.find(execution.id())
                                     .orElseThrow(() -> new IllegalStateException(
                                             "Execution 状态丢失: " + execution.id()));
@@ -556,49 +578,54 @@ public class Main {
                                 RoutingSource fallbackSource = routed.explicitMode() == null
                                         ? RoutingSource.AUTO_FALLBACK : RoutingSource.EXPLICIT;
                                 executionStore.commitRoutingDecision(
-                                        routed.id(), fallbackMode, fallbackSource);
+                                        execution.claim(), fallbackMode, fallbackSource);
                             }
                             RuntimeExecution completedExecution = executionFinalizer.finish(
-                                    execution.id(), proposed, session);
+                                    execution.claim(), proposed, session);
                             interactionBroker.cancelExecution(
                                     execution.id(), "Execution 已结束");
                             uiEvents.completed(completedExecution, proposed.result(), statusInfo(
                                     executionAgent, mcpServerManager, skillRegistry, "idle"));
                             return proposed;
-                            } finally {
-                                SessionStore.SessionHandle selected = activeSession.get();
-                                if (selected != null
-                                        && !selected.sessionId().equals(execution.sessionId())) {
-                                    try (SessionExecutionContextRegistry.Lease<SessionExecutionContext> lease =
-                                                 sessionContexts.acquire(selected.sessionId())) {
-                                        lease.context().activateSharedBindings();
-                                    } catch (Exception restoreFailure) {
-                                        uiEvents.message("⚠️ 当前会话运行态恢复失败: "
-                                                + restoreFailure.getMessage());
-                                    }
-                                }
+                    }, () -> {
+                        var automaticIndex = automaticIndexRef.get();
+                        if (automaticIndex != null) automaticIndex.close();
+                        hitlToolRegistry.closeWorkspaceResources(); mcpServerManager.close();
+                    });
+                    runtime.setAfterExecution(() -> {
+                        SessionStore.SessionHandle selected = activeSession.get();
+                        if (selected != null) {
+                            try (var lease = sessionContexts.acquire(selected.sessionId())) {
+                                lease.context().activateSharedBindings();
+                            } catch (Exception failure) {
+                                uiEvents.message("⚠️ 当前会话运行态恢复失败: " + failure.getMessage());
                             }
-                        } finally {
-                            sharedRuntimeLock.unlock();
                         }
-                    }, () -> legacyPlanClaimAllowed(
-                            executionPlanStore, workspace, activeSession.get()));
-            RuntimeExecutionQueue executionQueue = new RuntimeExecutionQueue(
-                    executionStore, executionScheduler, workspace);
-            try {
-                reconcileTerminalExecutionEnvelopes(executionStore, activeSession.get());
-                executionScheduler.start();
-            } catch (Exception e) {
+                    });
+                    runtime.setBeforeClose(() -> {
+                        SessionStore.SessionHandle selected = activeSession.get();
+                        if (selected != null && !hasNonTerminalQuietly(executionStore, selected.sessionId())) {
+                            markSessionClosedQuietly(selected, "runtime_shutdown");
+                        }
+                    });
+                    return runtime;
+                });
+                if (activeSession.get() != null) executionHost.attachSession(
+                        registeredWorkspace.key(), activeSession.get().sessionId());
+                executionHost.start();
+            } catch (Exception failure) {
+                try { executionHost.close(); } catch (Exception closeFailure) { failure.addSuppressed(closeFailure); }
                 closeExecutionStoreQuietly(executionStore);
-                interactionBroker.close();
-                throw new IllegalStateException("统一执行调度器启动失败: " + e.getMessage(), e);
+                throw new IllegalStateException("统一执行宿主启动失败: " + failure.getMessage(), failure);
             }
+            WorkspaceAwareExecutionScheduler executionScheduler = executionHost.scheduler();
+            RuntimeExecutionQueue executionQueue = new RuntimeExecutionQueue(executionStore, executionHost, registeredWorkspace);
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                executionScheduler.close();
+                closeExecutionHostQuietly(executionHost);
                 interactionBroker.close();
-                closeSessionContextsQuietly(sessionContexts);
+                if (executionHost.safelyStopped()) closeSessionContextsQuietly(sessionContexts);
                 try {
-                    executionStore.close();
+                    if (executionHost.safelyStopped()) executionStore.close();
                 } catch (Exception ignored) {
                 }
             }, "codeagent-execution-shutdown"));
@@ -705,7 +732,7 @@ public class Main {
                         continue;
                     }
                     case EXIT -> {
-                        executionScheduler.close();
+                        closeExecutionHostQuietly(executionHost);
                         interactionBroker.close();
                         boolean keepSessionOpen = activeSession.get() != null
                                 && hasNonTerminalQuietly(
@@ -713,10 +740,10 @@ public class Main {
                         if (!keepSessionOpen) {
                             markSessionClosedQuietly(activeSession.get(), "exit");
                         }
-                        closeSessionContextsQuietly(sessionContexts);
-                        closeExecutionStoreQuietly(executionStore);
+                        if (executionHost.safelyStopped()) closeSessionContextsQuietly(sessionContexts);
+                        if (executionHost.safelyStopped()) closeExecutionStoreQuietly(executionStore);
                         ui.println("\n👋 再见!");
-                        renderer.close();
+                        if (executionHost.safelyStopped()) renderer.close();
                         return;
                     }
                     case CANCEL -> {
@@ -1346,24 +1373,25 @@ public class Main {
                 uiEvents.queued(queued);
                 nextTaskOverride = null;
             }
-            executionScheduler.close();
+            closeExecutionHostQuietly(executionHost);
             interactionBroker.close();
             boolean keepSessionOpen = activeSession.get() != null
                     && hasNonTerminalQuietly(executionQueue, activeSession.get().sessionId());
             if (!keepSessionOpen) {
                 markSessionClosedQuietly(activeSession.get(), "eof");
             }
-            closeSessionContextsQuietly(sessionContexts);
-            closeExecutionStoreQuietly(executionStore);
+            if (executionHost.safelyStopped()) closeSessionContextsQuietly(sessionContexts);
+            if (executionHost.safelyStopped()) closeExecutionStoreQuietly(executionStore);
             ui.println("\n👋 再见!");
-            renderer.close();
+            if (executionHost.safelyStopped()) renderer.close();
 
         } catch (IOException e) {
             System.err.println("❌ 终端初始化失败: " + e.getMessage());
             System.exit(1);
         } finally {
             var automaticIndex = automaticIndexRef.get();
-            if (automaticIndex != null) automaticIndex.close();
+            RuntimeExecutionHost host = executionHostRef.get();
+            if (automaticIndex != null && (host == null || host.safelyStopped())) automaticIndex.close();
         }
     }
 
@@ -1642,33 +1670,8 @@ public class Main {
         }
     }
 
-    private static void reconcileTerminalExecutionEnvelopes(
-            RuntimeExecutionStore store, SessionStore.SessionHandle session) throws Exception {
-        if (session == null) {
-            return;
-        }
-        for (SessionProjection.ExecutionEnvelope envelope
-                : session.projection().executionEnvelopes().values()) {
-            if (!envelope.ended()) {
-                continue;
-            }
-            RuntimeExecution execution = store.find(envelope.executionId()).orElse(null);
-            if (execution == null || execution.terminal()) {
-                continue;
-            }
-            if (execution.selectedMode() == null) {
-                execution = store.commitRoutingDecision(
-                        execution.id(),
-                        ExecutionMode.valueOf(envelope.selectedMode().toUpperCase(Locale.ROOT)),
-                        execution.explicitMode() == null
-                                ? RoutingSource.AUTO_FALLBACK : RoutingSource.EXPLICIT);
-            }
-            store.complete(
-                    execution.id(),
-                    ExecutionOutcome.fromDatabase(envelope.outcome()),
-                    execution.result(),
-                    execution.error());
-        }
+    private static void closeExecutionHostQuietly(RuntimeExecutionHost host) {
+        try { host.close(); } catch (Exception ignored) { /* Keep ownership when resources cannot drain safely. */ }
     }
 
     private static PlanExecuteAgent createPlanAgent(

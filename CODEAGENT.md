@@ -13,12 +13,14 @@ CodeAgent 是面向商业使用的 Java Agent CLI 产品，对标 Claude Code；
 ## Architecture
 
 - 两条执行路径共享 `ToolRegistry` / `MemoryManager` / `SnapshotService`，不要为某个模式创建孤立能力。
+- inline/plain CLI 经 `RuntimeExecutionHost` 只注册当前 workspace，顶层串行。可信 Java 宿主可显式注册多个独立目录，默认顶层并发 2、合法 1～4；同 Session FIFO、同 workspace 仍串行。Dispatcher 预留容量/slot/共享资源，Worker 取得 mutationGate 与 Session lease 后才领取 SQLite Execution。Lanterna 与 Runtime HTTP API 未接入 Host；接口和恢复边界见 [多工作区执行调度方案](docs/dev/42-multi-workspace-execution-scheduling.md)。
 - 精确代码定位优先 `glob_files` / `grep_code` / `read_file`；`search_code` 只组合 SQLite FTS5 + BM25、进程内 Qwen3 FP32 1024维 + cosine 两类召回，默认Top10/16000正文字符。语义query保留行为需求，lexical_query是软线索，混合问句也可提取代码名称；不得把grep塞回RAG。候选文件hash诊断不证明全库时效，关键判断/修改前read_file核实当前源码；空索引或失效回到实时定位，不自动全库回填。Graph不参与RAG融合，符号/关系索引继续服务结构地图与`/graph`。Qwen权重需显式预装，故障保留FTS；长期Memory仍BGE，远程Embedding必须有当前项目显式授权。
 - system prompt 由 `PromptAssembler` 分层组装，内置 prompt 在 `src/main/resources/prompts/`，支持 `~/.codeagent/prompts/` 和 `.codeagent/prompts/` 覆盖。
 
 ## Things That Will Bite You
 
 - 交互式 CLI 默认进程内自动维护代码索引（启动对账、监听去抖、周期校准，词法先更新/向量补齐）；`autoIndex.enabled=false` 关闭后台维护，仅查询已有索引。检索自身不全库回填。Runtime API/headless 不隐式创建维护线程，由宿主显式调用底层刷新接口；后台服务不占 Session lease，不自动授权远程 Embedding。
+- 默认 headless workspace 工厂不启动 MCP Manager 或后台索引，并拒绝后来出现的未声明 MCP/Browser 可变绑定。共享 Git common-dir 使用整轮粗租约；其他非局部副作用需要显式资源租约，外部命令没有容器隔离。Host 是可信进程内控制面，不从普通输入自动注册目录；交互回答核对 workspaceKey、executionId、interactionId。owner 文件锁先于局部恢复，owner/attempt 阻止迟到写入；子执行器和快照未 drain 时不得释放工作区所有权。
 
 - 改行为要同步 `AGENTS.md` / `README.md` / `ROADMAP.md`；路线图只在状态变化时更新。
 - 改命令入口要联动 `Main.java`、`CliCommandParser.java`、测试、`README.md`、`AGENTS.md`。

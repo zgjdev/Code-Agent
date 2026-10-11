@@ -69,7 +69,8 @@ flowchart LR
 graph TB
     CLI[CLI / Runtime API] --> ROUTE[命令与入口解析]
     ROUTE --> QUEUE[inline/plain: RuntimeExecutionQueue]
-    QUEUE --> WORKER[workspace 单 Worker + Session Context lease]
+    QUEUE --> HOST[RuntimeExecutionHost]
+    HOST --> WORKER[workspace 单顶层 Execution + Session Context lease]
     WORKER --> MODE{执行模式}
     ROUTE -->|Runtime API / Lanterna 原路径| MODE
     MODE --> REACT[Agent ReAct]
@@ -116,7 +117,7 @@ sequenceDiagram
     U->>M: 输入命令或任务
     M->>M: 解析命令与 pending interaction
     M->>Q: 持久化 submittedInput 并返回输入循环
-    Q->>Q: claim、取得 Session lease、展开 MCP/@path、durable routing ack
+    Q->>Q: 预留容量/资源、取得 mutationGate/Session lease、claim、展开输入与 durable routing ack
     Q->>A: 执行当前 mode（其他入口保持原路径）
     A->>C: append user/system 边界
     A->>L: 请求（完整 request snapshot）
@@ -149,9 +150,11 @@ sequenceDiagram
 
 ## 6. 必须遵守的运行时约束
 
-- 默认 inline/plain 终端的普通顶层输入、`/react <任务>`、`/plan <任务>` 与 `/task add <任务>` 先持久化为 `runtime_executions`，由当前 workspace 的单顶层 Worker 串行执行；运行中仍可继续提交后续消息。Execution 首次 RUNNING 时才展开 @path/MCP resource，Router 只读取原始 `submittedInput` 与当时 Parent Session 的 Top-level Conversation，严格返回 REACT/PLAN，非取消性失败回退 ReAct。`/react` 与 `/plan` 是 one-turn override；Lanterna TUI、Runtime API 尚不接入该统一队列。
+- 默认 inline/plain 终端的普通顶层输入、`/react <任务>`、`/plan <任务>` 与 `/task add <任务>` 先持久化为 `runtime_executions`。CLI 经 RuntimeExecutionHost 只注册当前 workspace，顶层仍串行；Java 可信宿主可显式注册多个独立 workspace，默认最多 2 个并行，可配置 1～4，同 Session FIFO、同 workspace 仅一个顶层 Execution。Dispatcher 先预留容量、workspace slot 和已声明共享资源租约；Worker 取得 workspace mutationGate 与 Session lease 后才 claim 为 RUNNING。运行中仍可继续提交后续消息。Execution 首次 RUNNING 时才展开 @path/MCP resource，Router 只读取原始 `submittedInput` 与当时 Parent Session 的 Top-level Conversation，严格返回 REACT/PLAN，非取消性失败回退 ReAct。`/react` 与 `/plan` 是 one-turn override；Lanterna TUI、Runtime HTTP API 尚不接入 Host。
 - 运行中直接输入即追加到同一队列；等待 Plan/HITL 时，普通输入由 InteractionInputRouter 优先作为交互回答，非法审批输入不得自动批准或入队，`/task add` 可显式追加任务。CLI 输入循环是唯一终端输入所有者，Worker 经 InteractionBroker 等待回答。
-- SessionExecutionContextRegistry 独占每个 Session 的 writable SessionHandle、Agent、ParentConversationContext、MemoryManager 与 SkillContextBuffer；启动上下文收养、其他 Session 懒加载。共享 ToolRegistry/MCP/Browser/HITL 保留进程级单 writable lease，执行前重绑 Session 协作者。Worker 与 CLI Session/Runtime mutation 共用互斥锁，CLI 修改使用 tryLock 失败关闭。当前 UI 指针不负责关闭 handle；仅空闲、非当前且无 pending interaction 的 Context 可驱逐。EOF/shutdown 释放运行态并保留非终态 Execution 恢复，不提前写 SESSION_END；后台任务不在进程退出后独立运行。
+- Java Host 是进程内可信控制面：workspace 必须显式注册，Session 固定绑定目录；不从模型文本、MCP resource 或普通提交自动创建目录。`InteractionPresentationQueue` 为单终端串行展示跨 workspace 交互，回答核对 workspaceKey、executionId、interactionId；无交互适配时不能自动批准。默认 headless 工厂不自动创建 MCP Manager 或后台索引，CLI 工厂复用已有依赖；外部命令不具备容器级副作用隔离。
+- schema v2 用 workspace_key、owner_id、attempt 约束领取与迟到写入；owner 目录 catalog 和 OS 文件锁先于本 workspace 恢复，其他 workspace 的状态不可顺带恢复。迁移前 `VACUUM INTO` 备份 WAL 已提交内容，较新 schema 拒绝打开。Windows Java provider 缺少 fileKey 时目录身份退化为 file store 名称与创建时间，不能据此声称能抵御恶意目录替换。设计与当前验证门禁见 [docs/dev/42-multi-workspace-execution-scheduling.md](docs/dev/42-multi-workspace-execution-scheduling.md)。
+- SessionExecutionContextRegistry 独占每个 Session 的 writable SessionHandle、Agent、ParentConversationContext、MemoryManager 与 SkillContextBuffer；启动上下文收养、其他 Session 懒加载。ToolRegistry/MCP/Browser/HITL 的可变绑定限于所属 workspace，执行前重绑该 workspace 的 Session 协作者；已知共享 Git common-dir 采用整轮粗租约，其他非局部副作用须声明资源租约，未知资源拒绝多 workspace 并行。Worker 与 CLI Session/Runtime mutation 共用该 workspace 互斥锁，CLI 修改使用 tryLock 失败关闭。当前 UI 指针不负责关闭 handle；仅空闲、非当前且无 pending interaction 的 Context 可驱逐。EOF/shutdown 保留非终态 Execution 恢复，不提前写 SESSION_END；子执行器和快照 writer 未物理停止时保持 quarantine、slot、共享租约及 owner，后台任务不在进程退出后独立运行。
 - Planner、Mode Router 与 Reviewer 的 JSON 输出统一通过 LLM 层 `StructuredJsonExecutor` 校验：总尝试最多 2 次，首次语法/结构/业务约束失败只允许一次格式修复；Hunyuan/TokenHub 使用原生 JSON Schema，DeepSeek/Step 使用 JSON Object，未验证 Provider 不发送 `response_format`。兼容端点明确拒绝结构化参数时只回退普通 Chat 请求，本地校验仍必须通过。格式修复不得扩大工具、URL、路径或 HITL 权限；Reviewer 连续失败按不可用/拒绝处理，禁止用自然语言关键词猜测批准。
 - ReAct 与 PlanExecuteAgent（`/plan` 显式入口或 Router 选择，`FULL_PRESET`）都通过 executeTools()；同轮非 Browser Tool Call 先根据 tool name + arguments 在本地确定性推导资源 claim，冲突调用按原顺序分批、批内最多 4 个并发，结果仍按原始顺序归并。`execute_command` / `revert_turn` 按 workspace 写保守独占，无法安全解析的路径 claim 必须扩大范围而不能让 LLM 判断；Browser 批次继续整批串行。
 - 每批完成后重新推导剩余工具调用的资源；路径冲突须识别硬链接。可能人工改参的审批调用保守独占批次，统一 Web 须按实际 MCP 后端判断审批需求，最终参数执行完成后才能启动相邻调用；无需审批或已自动放行的普通调用仍按资源并行。组批后审批状态变化不得在并行区新开可改参审批，必须失败关闭并审计。
@@ -214,7 +217,8 @@ TUI：mvn test -Pphase16-smoke
 
 - 正常情况下实现功能时，应从最新的 `main` 创建新的功能分支并在该分支开发；默认不使用 Git worktree。只有用户明确要求，或确有隔离开发的必要并已说明原因时，才可创建 worktree；属于当前任务的非危险操作无需另行征求同意。
 - 未经用户明确允许，不得代替用户执行 `git commit`、`git push`、创建 Pull Request 或合并分支。完成改动后应保留为未提交状态，并向用户报告变更与验证结果。
-- 编写项目开发文档时，必须遵守本文件规定的流程、模板、证据和图示要求；开发方案及实现说明统一放在 `docs/dev/` 目录，不得自行放置到其他目录。
+- 编写项目开发文档时，必须遵守本文件规定的流程、模板、证据和图示要求；开发方案及实现说明统一放在 `docs/dev/` 目录，不得自行放置到其他目录。新建 `docs/dev/` 文档前先检查该目录已有编号，以当前最大编号加一作为新编号，使用两位数字前缀（如 `42-...` 后新建 `43-...`）；不得复用缺失编号或另起编号序列。若本任务已有可承载文档，应更新原文档，不为编号顺延而重复新建。
+- 开发方案必须详尽到实现者无需重新猜测关键设计即可直接依文档实施和验收：记录源码勘探基线及相关文件/类型/方法证据，明确目标、非目标、模块边界、接口与数据结构、状态迁移、关键时序、权限与资源边界、并发和锁顺序、失败路径、恢复行为、兼容/迁移/回滚策略；将工作拆成有依赖顺序的实现任务，逐项列出预期文件落点、先写的测试、验证命令及可观察的通过条件。验收项应可判定，不能只写“实现功能”“测试通过”等泛化描述。源码或外部条件尚不能确定时，明确记录待核实项、验证方式和继续实施的门槛，不得把假设写成既定事实。
 - 每个实现任务最多维护一份对应的 `docs/dev` 文档，方案与实施内容不得拆成两个文件。其他 skill、系统化工作流或工具模板如建议额外创建计划文档，以本条为准：将所需内容合并进现有任务文档，不得新增重复文档。用户明确要求多个文档时除外。
 
 ### 任务持续授权与权限请求

@@ -42,6 +42,11 @@ public final class InteractionBroker implements AutoCloseable {
         return true;
     }
 
+    public synchronized boolean respond(String executionId, String interactionId, String action, String text) {
+        if (pending == null || !pending.request.executionId().equals(executionId)) return false;
+        return respond(interactionId, action, text);
+    }
+
     public synchronized boolean cancelExecution(String executionId, String reason) {
         if (pending == null || executionId == null
                 || !pending.request.executionId().equals(executionId)) {

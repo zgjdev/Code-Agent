@@ -1171,6 +1171,8 @@ public class PlanExecuteAgent {
             return t;
         });
         try {
+            var batchToken = com.codeagent.runtime.CancellationContext.current();
+            var batchIdentity = com.codeagent.runtime.interaction.ExecutionInteractionContext.current();
             Map<String, ByteArrayOutputStream> buffers = new LinkedHashMap<>();
             List<Future<TaskExecutionResult>> futures = new ArrayList<>();
             for (Task task : executableTasks) {
@@ -1188,7 +1190,9 @@ public class PlanExecuteAgent {
                 buffers.put(task.getId(), baos);
                 PrintStream taskOut = new PrintStream(baos, true, StandardCharsets.UTF_8);
                 futures.add(executor.submit(() -> {
-                    try {
+                    try (var cancellation = batchToken == null ? null : com.codeagent.runtime.CancellationContext.install(batchToken);
+                         var interaction = batchIdentity == null ? null : com.codeagent.runtime.interaction.ExecutionInteractionContext.install(
+                                 batchIdentity.executionId(), batchIdentity.sessionId())) {
                         return TaskExecutionResult.success(task, executeTask(
                                 plan.getGoal(), plan, task, streamState, taskOut, taskTrustedUrls, diffTracker));
                     } catch (Exception e) {
@@ -1224,7 +1228,7 @@ public class PlanExecuteAgent {
 
             return results;
         } finally {
-            executor.shutdownNow();
+            com.codeagent.runtime.ExecutorDrain.stopAndAwait(executor);
         }
     }
 

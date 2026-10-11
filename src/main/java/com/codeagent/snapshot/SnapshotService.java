@@ -90,6 +90,24 @@ public class SnapshotService implements AutoCloseable {
         }
     }
 
+    /** Execution ownership cannot be released on an interrupt while a writer still has side effects. */
+    public void drain() throws Exception {
+        Future<?> task = lastAsyncTask;
+        if (task == null) return;
+        boolean interrupted = Thread.interrupted();
+        try {
+            while (true) {
+                try { task.get(); return; }
+                catch (InterruptedException e) { interrupted = true; }
+            }
+        } finally { if (interrupted) Thread.currentThread().interrupt(); }
+    }
+
+    public <T> T runTurnAndDrain(String mode, String input, ThrowingSupplier<T> supplier) throws Exception {
+        try { return runTurn(mode, input, supplier); }
+        finally { drain(); }
+    }
+
     @Override
     public void close() {
         executor.shutdownNow();

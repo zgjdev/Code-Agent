@@ -10,6 +10,16 @@ import static org.junit.jupiter.api.Assertions.*;
 class InteractionBrokerTest {
 
     @Test
+    void executionIdentityIsVerifiedAtomically() {
+        try (InteractionBroker broker = new InteractionBroker()) {
+            var result = broker.request(new InteractionRequest("i", "e", "s", InteractionKind.HITL, Set.of("approve"), ""));
+            assertFalse(broker.respond("wrong", "i", "approve", ""));
+            assertFalse(result.isDone());
+            assertTrue(broker.respond("e", "i", "approve", ""));
+        }
+    }
+
+    @Test
     void allowsOnlyOnePendingInteractionAndRoutesByIdentity() throws Exception {
         try (InteractionBroker broker = new InteractionBroker()) {
             InteractionRequest first = new InteractionRequest(

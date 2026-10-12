@@ -1,5 +1,7 @@
 package com.codeagent.lsp;
 
+import com.codeagent.config.ConfigurationValues;
+
 import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParseResult;
 import com.github.javaparser.Problem;
@@ -139,10 +141,7 @@ public class LspManager {
     }
 
     private boolean enabled() {
-        String raw = System.getProperty("codeagent.lsp.enabled");
-        if (raw == null || raw.isBlank()) {
-            raw = System.getenv("CODEAGENT_LSP_ENABLED");
-        }
+        String raw = ConfigurationValues.get("codeagent.lsp.enabled", "CODEAGENT_LSP_ENABLED", null);
         return raw == null || raw.isBlank() || Boolean.parseBoolean(raw.trim());
     }
 

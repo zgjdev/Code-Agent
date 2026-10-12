@@ -1,5 +1,7 @@
 package com.codeagent.cli;
 
+import com.codeagent.config.ConfigurationValues;
+
 import com.codeagent.agent.Agent;
 import com.codeagent.agent.AgentExecutionResult;
 import com.codeagent.agent.ExecutionMode;
@@ -101,9 +103,7 @@ import org.jline.widget.AutosuggestionWidgets;
 import org.jline.widget.AutopairWidgets;
 import org.jline.keymap.KeyMap;
 
-import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Files;
@@ -142,7 +142,6 @@ import java.util.regex.Pattern;
  */
 public class Main {
     private static final String VERSION = "16.1.0";
-    private static final String ENV_FILE = ".env";
     private static final String LOG_DIR_PROPERTY = "codeagent.log.dir";
     private static final String LOG_LEVEL_PROPERTY = "codeagent.log.level";
     private static final String LOG_MAX_HISTORY_PROPERTY = "codeagent.log.maxHistory";
@@ -242,10 +241,8 @@ public class Main {
         configureLogging();
 
         CodeAgentConfig config = CodeAgentConfig.load();
-        LlmClient llmClient = LlmClientFactory.createFromConfig(config);
+        LlmClient llmClient = createStartupClient(config);
         if (llmClient == null) {
-            System.err.println("❌ 错误: 未找到可用的 API Key");
-            System.err.println("请在 .env 文件中添加 GLM_API_KEY、DEEPSEEK_API_KEY、HUNYUAN_API_KEY、STEP_API_KEY、KIMI_API_KEY、FREELLMAPI_API_KEY、XFYUN_MAAS_API_KEY 或 AGNES_API_KEY");
             System.exit(1);
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
@@ -385,7 +382,7 @@ public class Main {
                 SessionStore.SessionHandle initialSession;
                 var latest = isAutomaticSessionResumeEnabled(
                         System.getProperty("codeagent.session.resume"),
-                        System.getenv("CODEAGENT_SESSION_RESUME"))
+                        ConfigurationValues.get(null, "CODEAGENT_SESSION_RESUME", null))
                         ? openedSessionStore.latestUnclosed(workspace)
                         : Optional.<SessionSummary>empty();
                 if (latest.isPresent()) {
@@ -1484,11 +1481,19 @@ public class Main {
         }
     }
 
+    static LlmClient createStartupClient(CodeAgentConfig config) {
+        try {
+            return LlmClientFactory.createFromConfig(config);
+        } catch (IllegalArgumentException | IllegalStateException failure) {
+            System.err.println("❌ 配置错误: " + failure.getMessage());
+            return null;
+        }
+    }
+
     private static void startRuntimeApiAndBlock(String[] args) {
         CodeAgentConfig config = CodeAgentConfig.load();
-        LlmClient client = LlmClientFactory.createFromConfig(config);
+        LlmClient client = createStartupClient(config);
         if (client == null) {
-            System.err.println("❌ 错误: 未找到可用的 API Key");
             System.exit(1);
         }
         int port = parseServePort(args, 8080);
@@ -3175,7 +3180,7 @@ public class Main {
     static Duration mcpStartupWait() {
         String configured = System.getProperty("codeagent.mcp.startup.wait.seconds");
         if (configured == null || configured.isBlank()) {
-            configured = System.getenv("CODEAGENT_MCP_STARTUP_WAIT_SECONDS");
+            configured = ConfigurationValues.get(null, "CODEAGENT_MCP_STARTUP_WAIT_SECONDS", null);
         }
         if (configured == null || configured.isBlank()) {
             return Duration.ofSeconds(8);
@@ -3278,7 +3283,7 @@ public class Main {
     }
 
     static Path resolveHistoryFile(Path homeDir) {
-        String configured = firstNonBlank(System.getProperty(HISTORY_FILE_PROPERTY), System.getenv("CODEAGENT_HISTORY_FILE"));
+        String configured = firstNonBlank(System.getProperty(HISTORY_FILE_PROPERTY), ConfigurationValues.get(null, "CODEAGENT_HISTORY_FILE", null));
         if (configured != null) {
             return normalizeHistoryFile(Path.of(configured));
         }
@@ -3315,7 +3320,7 @@ public class Main {
     }
 
     private static int configuredPositiveInt(String property, String env, int fallback) {
-        String raw = firstNonBlank(System.getProperty(property), System.getenv(env));
+        String raw = firstNonBlank(System.getProperty(property), ConfigurationValues.get(null, env, null));
         if (raw == null) {
             return fallback;
         }
@@ -3395,51 +3400,7 @@ public class Main {
     }
 
     private static String loadConfigValue(String key, String defaultValue) {
-        String sysValue = System.getProperty(key);
-        if (sysValue != null && !sysValue.isBlank()) {
-            return sysValue.trim();
-        }
-
-        String envValue = System.getenv(key);
-        if (envValue != null && !envValue.isBlank()) {
-            return envValue.trim();
-        }
-
-        File currentEnv = new File(ENV_FILE);
-        if (currentEnv.exists()) {
-            String value = readValueFromFile(currentEnv, key);
-            if (value != null && !value.isBlank()) {
-                return value.trim();
-            }
-        }
-
-        File homeEnv = new File(System.getProperty("user.home"), ENV_FILE);
-        if (homeEnv.exists()) {
-            String value = readValueFromFile(homeEnv, key);
-            if (value != null && !value.isBlank()) {
-                return value.trim();
-            }
-        }
-
-        return defaultValue;
-    }
-
-    private static String readValueFromFile(File file, String key) {
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty() || line.startsWith("#")) {
-                    continue;
-                }
-                if (line.startsWith(key + "=")) {
-                    return line.substring((key + "=").length()).trim();
-                }
-            }
-        } catch (IOException e) {
-            System.err.println("读取 .env 文件失败: " + e.getMessage());
-        }
-        return null;
+        return ConfigurationValues.get(key, key, defaultValue);
     }
 
     static ModelSelection resolveModelSelection(String raw) {

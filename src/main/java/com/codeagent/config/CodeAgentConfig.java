@@ -1,12 +1,11 @@
 package com.codeagent.config;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,6 +20,8 @@ public class CodeAgentConfig {
     private static final ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
 
     private String defaultProvider = "glm";
+    @JsonIgnore
+    private Map<String, String> environmentValues;
     private Map<String, ProviderConfig> providers = new LinkedHashMap<>();
     private EmbeddingConfig embedding = new EmbeddingConfig();
     private AutoIndexConfig autoIndex = new AutoIndexConfig();
@@ -94,6 +95,8 @@ public class CodeAgentConfig {
         private String model;
         private String baseUrl;
         private String apiKey;
+        @JsonIgnore
+        private String environmentApiKey;
         private int dimension;
 
         public EmbeddingConfig() {}
@@ -109,7 +112,11 @@ public class CodeAgentConfig {
         public void setModel(String model) { this.model = model; }
         public String getBaseUrl() { return trimToNull(baseUrl); }
         public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
-        public String getApiKey() { return trimToNull(apiKey); }
+        @JsonIgnore
+        public String getApiKey() { return isBlank(apiKey) ? trimToNull(environmentApiKey) : trimToNull(apiKey); }
+        @JsonProperty("apiKey")
+        public String getPersistedApiKey() { return trimToNull(apiKey); }
+        @JsonProperty("apiKey")
         public void setApiKey(String apiKey) { this.apiKey = apiKey; }
         public int getDimension() { return dimension; }
         public void setDimension(int dimension) { this.dimension = dimension; }
@@ -120,7 +127,7 @@ public class CodeAgentConfig {
             if (isBlank(provider)) provider = environment.get("EMBEDDING_PROVIDER");
             if (isBlank(model)) model = environment.get("EMBEDDING_MODEL");
             if (isBlank(baseUrl)) baseUrl = environment.get("EMBEDDING_BASE_URL");
-            if (isBlank(apiKey)) apiKey = environment.get("EMBEDDING_API_KEY");
+            environmentApiKey = environment.get("EMBEDDING_API_KEY");
         }
 
         @Override
@@ -291,7 +298,10 @@ public class CodeAgentConfig {
     }
 
     public static CodeAgentConfig load() {
-        return load(CONFIG_FILE, System.getenv());
+        Map<String, String> values = new LinkedHashMap<>(ConfigurationValues.currentEnvironment());
+        String selected = ConfigurationValues.get("codeagent.provider", "CODEAGENT_PROVIDER", null);
+        if (selected != null) values.put("CODEAGENT_PROVIDER", selected);
+        return load(CONFIG_FILE, values);
     }
 
     public static CodeAgentConfig load(Path configFile, Map<String, String> environment) {
@@ -303,7 +313,12 @@ public class CodeAgentConfig {
                 System.err.println("⚠️ 配置文件读取失败，使用默认配置: " + e.getMessage());
             }
         }
-        config.getEmbedding().applyEnvironment(environment == null ? Map.of() : environment);
+        config.environmentValues = environment == null ? Map.of() : Map.copyOf(environment);
+        String selected = config.environmentValues.get("CODEAGENT_PROVIDER");
+        if (selected != null && !selected.isBlank()) {
+            config.setDefaultProvider(selected.trim().toLowerCase(java.util.Locale.ROOT));
+        }
+        config.getEmbedding().applyEnvironment(config.environmentValues);
         return config;
     }
 
@@ -321,186 +336,42 @@ public class CodeAgentConfig {
         }
     }
 
-    private static String loadModelFromEnv(String provider) {
-        String envKey = switch (provider.toLowerCase()) {
-            case "glm" -> "GLM_MODEL";
-            case "deepseek" -> "DEEPSEEK_MODEL";
-            case "hunyuan" -> "HUNYUAN_MODEL";
-            case "kimi" -> "KIMI_MODEL";
-            case "freellmapi" -> "FREELLMAPI_MODEL";
-            case "xfyun" -> "XFYUN_MAAS_MODEL";
-            default -> provider.toUpperCase() + "_MODEL";
-        };
-
-        String envValue = System.getenv(envKey);
-        if (envValue != null && !envValue.isBlank()) {
-            return envValue.trim();
-        }
-
-        String dotEnvValue = readFromDotEnv(envKey);
-        if (dotEnvValue != null && !dotEnvValue.isBlank()) {
-            return dotEnvValue.trim();
-        }
-
-        if ("kimi".equalsIgnoreCase(provider)) {
-            String moonshotValue = System.getenv("MOONSHOT_MODEL");
-            if (moonshotValue != null && !moonshotValue.isBlank()) {
-                return moonshotValue.trim();
-            }
-            String moonshotDotEnvValue = readFromDotEnv("MOONSHOT_MODEL");
-            if (moonshotDotEnvValue != null && !moonshotDotEnvValue.isBlank()) {
-                return moonshotDotEnvValue.trim();
-            }
-        }
-
-        if ("xfyun".equalsIgnoreCase(provider)) {
-            String xfyunValue = System.getenv("XFYUN_MODEL");
-            if (xfyunValue != null && !xfyunValue.isBlank()) {
-                return xfyunValue.trim();
-            }
-            String xfyunDotEnvValue = readFromDotEnv("XFYUN_MODEL");
-            if (xfyunDotEnvValue != null && !xfyunDotEnvValue.isBlank()) {
-                return xfyunDotEnvValue.trim();
-            }
-        }
-
-        return null;
+    private String configuredValue(String key) {
+        String value = environmentValues == null ? ConfigurationValues.get(null, key, null) : environmentValues.get(key);
+        return value == null || value.isBlank() ? null : value.trim();
     }
 
-    private static String loadApiKeyFromEnv(String provider) {
-        String envKey = switch (provider.toLowerCase()) {
-            case "glm" -> "GLM_API_KEY";
-            case "deepseek" -> "DEEPSEEK_API_KEY";
-            case "hunyuan" -> "HUNYUAN_API_KEY";
-            case "step" -> "STEP_API_KEY";
-            case "kimi" -> "KIMI_API_KEY";
-            case "freellmapi" -> "FREELLMAPI_API_KEY";
-            case "xfyun" -> "XFYUN_MAAS_API_KEY";
-            default -> provider.toUpperCase() + "_API_KEY";
-        };
-
-        String envValue = System.getenv(envKey);
-        if (envValue != null && !envValue.isBlank()) {
-            return envValue.trim();
-        }
-
-        String dotEnvValue = readFromDotEnv(envKey);
-        if (dotEnvValue != null && !dotEnvValue.isBlank()) {
-            return dotEnvValue.trim();
-        }
-
-        if ("kimi".equalsIgnoreCase(provider)) {
-            String moonshotValue = System.getenv("MOONSHOT_API_KEY");
-            if (moonshotValue != null && !moonshotValue.isBlank()) {
-                return moonshotValue.trim();
-            }
-            String moonshotDotEnvValue = readFromDotEnv("MOONSHOT_API_KEY");
-            if (moonshotDotEnvValue != null && !moonshotDotEnvValue.isBlank()) {
-                return moonshotDotEnvValue.trim();
-            }
-        }
-
-        if ("xfyun".equalsIgnoreCase(provider)) {
-            String xfyunValue = System.getenv("XFYUN_API_KEY");
-            if (xfyunValue != null && !xfyunValue.isBlank()) {
-                return xfyunValue.trim();
-            }
-            String xfyunDotEnvValue = readFromDotEnv("XFYUN_API_KEY");
-            if (xfyunDotEnvValue != null && !xfyunDotEnvValue.isBlank()) {
-                return xfyunDotEnvValue.trim();
-            }
-        }
-
-        return null;
+    private String loadModelFromEnv(String provider) {
+        String key = "xfyun".equalsIgnoreCase(provider) ? "XFYUN_MAAS_MODEL"
+                : provider.toUpperCase(java.util.Locale.ROOT) + "_MODEL";
+        return withLegacyAlias(provider, key, "MODEL");
     }
 
-    private static String loadBaseUrlFromEnv(String provider) {
-        String envKey = switch (provider.toLowerCase()) {
-            case "step" -> "STEP_BASE_URL";
-            case "hunyuan" -> "HUNYUAN_BASE_URL";
-            case "kimi" -> "KIMI_BASE_URL";
-            case "freellmapi" -> "FREELLMAPI_BASE_URL";
-            case "xfyun" -> "XFYUN_MAAS_BASE_URL";
-            default -> provider.toUpperCase() + "_BASE_URL";
-        };
-
-        String envValue = System.getenv(envKey);
-        if (envValue != null && !envValue.isBlank()) {
-            return envValue.trim();
-        }
-
-        String dotEnvValue = readFromDotEnv(envKey);
-        if (dotEnvValue != null && !dotEnvValue.isBlank()) {
-            return dotEnvValue.trim();
-        }
-
-        if ("kimi".equalsIgnoreCase(provider)) {
-            String moonshotValue = System.getenv("MOONSHOT_BASE_URL");
-            if (moonshotValue != null && !moonshotValue.isBlank()) {
-                return moonshotValue.trim();
-            }
-            String moonshotDotEnvValue = readFromDotEnv("MOONSHOT_BASE_URL");
-            if (moonshotDotEnvValue != null && !moonshotDotEnvValue.isBlank()) {
-                return moonshotDotEnvValue.trim();
-            }
-        }
-
-        if ("xfyun".equalsIgnoreCase(provider)) {
-            String xfyunValue = System.getenv("XFYUN_BASE_URL");
-            if (xfyunValue != null && !xfyunValue.isBlank()) {
-                return xfyunValue.trim();
-            }
-            String xfyunDotEnvValue = readFromDotEnv("XFYUN_BASE_URL");
-            if (xfyunDotEnvValue != null && !xfyunDotEnvValue.isBlank()) {
-                return xfyunDotEnvValue.trim();
-            }
-        }
-
-        return null;
+    private String loadApiKeyFromEnv(String provider) {
+        String key = "xfyun".equalsIgnoreCase(provider) ? "XFYUN_MAAS_API_KEY"
+                : provider.toUpperCase(java.util.Locale.ROOT) + "_API_KEY";
+        return withLegacyAlias(provider, key, "API_KEY");
     }
 
-    private static String loadLoraIdFromEnv(String provider) {
-        if (!"xfyun".equalsIgnoreCase(provider)) {
-            return null;
-        }
-
-        String envValue = System.getenv("XFYUN_MAAS_LORA_ID");
-        if (envValue != null && !envValue.isBlank()) {
-            return envValue.trim();
-        }
-
-        String dotEnvValue = readFromDotEnv("XFYUN_MAAS_LORA_ID");
-        if (dotEnvValue != null && !dotEnvValue.isBlank()) {
-            return dotEnvValue.trim();
-        }
-
-        String xfyunValue = System.getenv("XFYUN_LORA_ID");
-        if (xfyunValue != null && !xfyunValue.isBlank()) {
-            return xfyunValue.trim();
-        }
-
-        String xfyunDotEnvValue = readFromDotEnv("XFYUN_LORA_ID");
-        if (xfyunDotEnvValue != null && !xfyunDotEnvValue.isBlank()) {
-            return xfyunDotEnvValue.trim();
-        }
-        return null;
+    private String loadBaseUrlFromEnv(String provider) {
+        String key = "xfyun".equalsIgnoreCase(provider) ? "XFYUN_MAAS_BASE_URL"
+                : provider.toUpperCase(java.util.Locale.ROOT) + "_BASE_URL";
+        return withLegacyAlias(provider, key, "BASE_URL");
     }
 
-    private static String readFromDotEnv(String key) {
-        File[] envFiles = { new File(".env"), new File(System.getProperty("user.home"), ".env") };
-        for (File envFile : envFiles) {
-            if (!envFile.exists()) continue;
-            try (BufferedReader reader = new BufferedReader(new FileReader(envFile))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    line = line.trim();
-                    if (line.isEmpty() || line.startsWith("#")) continue;
-                    if (line.startsWith(key + "=")) {
-                        return line.substring((key + "=").length()).trim();
-                    }
-                }
-            } catch (IOException ignored) {}
+    private String loadLoraIdFromEnv(String provider) {
+        return "xfyun".equalsIgnoreCase(provider)
+                ? withLegacyAlias(provider, "XFYUN_MAAS_LORA_ID", "LORA_ID") : null;
+    }
+
+    private String withLegacyAlias(String provider, String key, String suffix) {
+        Map<String, String> values = environmentValues == null ? ConfigurationValues.currentEnvironment() : environmentValues;
+        if (values.containsKey(key)) {
+            String value = values.get(key);
+            return value == null || value.isBlank() ? null : value.trim();
         }
+        if ("kimi".equalsIgnoreCase(provider)) return configuredValue("MOONSHOT_" + suffix);
+        if ("xfyun".equalsIgnoreCase(provider)) return configuredValue("XFYUN_" + suffix);
         return null;
     }
 }

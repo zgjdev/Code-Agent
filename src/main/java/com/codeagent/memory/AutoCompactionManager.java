@@ -1,11 +1,9 @@
 package com.codeagent.memory;
 
+import com.codeagent.config.ConfigurationValues;
+
 import com.codeagent.llm.LlmClient;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.io.IOException;
 import java.util.List;
 import java.util.Locale;
 
@@ -93,13 +91,7 @@ public class AutoCompactionManager {
     }
 
     static boolean sessionMemoryEnabledByConfiguration() {
-        String property = System.getProperty(SESSION_MEMORY_PROPERTY);
-        if (property != null) return truthy(property);
-        String env = System.getenv(SESSION_MEMORY_ENV);
-        if (env != null) return truthy(env);
-        String projectDotEnv = readDotEnv(new File(".env"), SESSION_MEMORY_ENV);
-        if (projectDotEnv != null) return truthy(projectDotEnv);
-        return truthy(readDotEnv(new File(System.getProperty("user.home"), ".env"), SESSION_MEMORY_ENV));
+        return truthy(ConfigurationValues.get(SESSION_MEMORY_PROPERTY, SESSION_MEMORY_ENV, null));
     }
 
     private static boolean truthy(String value) {
@@ -109,20 +101,4 @@ public class AutoCompactionManager {
                 || "yes".equals(normalized) || "on".equals(normalized);
     }
 
-    private static String readDotEnv(File file, String key) {
-        if (file == null || !file.isFile()) return null;
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String trimmed = line.trim();
-                if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
-                if (trimmed.startsWith(key + "=")) {
-                    return trimmed.substring(key.length() + 1).trim();
-                }
-            }
-        } catch (IOException ignored) {
-            // 配置读取失败时保持默认关闭，完整摘要路径仍然可用。
-        }
-        return null;
-    }
 }

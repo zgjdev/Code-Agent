@@ -72,6 +72,12 @@ Planner产出DAG，ExecutionPlan校验身份、依赖与环；PlanStateStore先�
 
 每个 workspace 拥有局部 Session Registry、ToolRegistry、Broker 和可变运行依赖；单终端由InteractionPresentationQueue顺序展示，Host回答核对workspaceKey、executionId、interactionId。owner目录catalog和本机文件锁先于所属workspace恢复，Git common-dir用整轮粗租约；未知外部副作用资源须明确声明租约。默认headless工厂不自动创建MCP Manager或后台索引，CLI工厂复用已有服务。Tool/Plan内部executor退出时等待物理停止，SnapshotService执行`runTurnAndDrain`；Finalizer跨库失败或关闭超时保持隔离与owner，不让后继进入。schema v2迁移前使用`VACUUM INTO`一致性备份。Windows的`fileKey`为空时，目录核验退化为file store名称加创建时间，其身份强度有限。详见[多工作区执行调度方案](../dev/42-multi-workspace-execution-scheduling.md)。
 
+### 3.5 统一配置与启动模型选择
+
+`ConfigurationValues` 是无线程、无缓存的基础读取层，按 Java 属性、进程环境变量、项目 dotenv、用户 dotenv、默认值的顺序取值。文件按 UTF-8 解析简单 KEY=value，首个赋值生效，保留值中的等号和井号；不执行 shell 或变量替换。项目空值遮蔽用户 dotenv，再使用默认值，空密钥不能意外继承用户密钥。
+
+`CodeAgentConfig.load()` 使用环境/文件合并快照；`load(Path,Map)` 保持隔离注入入口，Provider 与 Embedding 的 JSON 显式字段仍优先；环境密钥保存在忽略序列化的派生字段，不随配置保存写入 JSON。Provider canonical 键留空时阻断旧环境别名回退；工厂仅保留显式 JSON 别名密钥。启动选择由 `CODEAGENT_PROVIDER` 或 `codeagent.provider` 覆盖 JSON defaultProvider，未设置时用 JSON 或 glm。`LlmClientFactory.createFromConfig()` 只构造所选 Provider，名称非法或密钥缺失时抛出不包含配置原值的错误，Main 在 CLI/serve 启动时捕获并失败退出；不尝试其他家的密钥。`/model` 的显式切换契约保留，下一次启动再次按配置选择。旧只填其他家密钥的配置需补选择项，详细迁移与验证见 [43号方案](../dev/43-env-example-cleanup.md)。
+
 ## 4. 实现任务与测试矩阵
 
 | 边界 | 应先验证的失败场景 |

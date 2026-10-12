@@ -1,5 +1,7 @@
 package com.codeagent.snapshot;
 
+import com.codeagent.config.ConfigurationValues;
+
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -67,11 +69,7 @@ public record SnapshotConfig(
     }
 
     private static String readNullable(String property, String env) {
-        String value = System.getProperty(property);
-        if (value != null) {
-            return value;
-        }
-        return System.getenv(env);
+        return ConfigurationValues.get(property, env, null);
     }
 
     private static List<String> mergeExcludes(String configured) {

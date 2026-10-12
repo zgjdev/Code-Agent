@@ -1,5 +1,7 @@
 package com.codeagent.render;
 
+import com.codeagent.config.ConfigurationValues;
+
 import com.codeagent.render.inline.InlineRenderer;
 import com.codeagent.render.inline.TerminalCapabilities;
 import org.jline.terminal.Terminal;
@@ -30,14 +32,8 @@ public final class RendererFactory {
     }
 
     public static Mode resolveMode() {
-        String prop = System.getProperty("codeagent.renderer");
-        if (prop != null && !prop.isBlank()) {
-            return parse(prop);
-        }
-        String env = System.getenv("CODEAGENT_RENDERER");
-        if (env != null && !env.isBlank()) {
-            return parse(env);
-        }
+        String configured = ConfigurationValues.get("codeagent.renderer", "CODEAGENT_RENDERER", null);
+        if (configured != null) return parse(configured);
         // 兼容旧 CODEAGENT_TUI=true → lanterna
         String legacyTui = System.getenv("CODEAGENT_TUI");
         if (legacyTui != null && Boolean.parseBoolean(legacyTui.trim())) {

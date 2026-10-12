@@ -1,5 +1,7 @@
 package com.codeagent.render.inline;
 
+import com.codeagent.config.ConfigurationValues;
+
 import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
 
@@ -38,10 +40,7 @@ public final class TerminalCapabilities {
         if (!supportsAnsi(terminal)) {
             return false;
         }
-        if (Boolean.parseBoolean(System.getenv("CODEAGENT_NO_STATUSBAR"))) {
-            return false;
-        }
-        if (Boolean.parseBoolean(System.getProperty("codeagent.no.statusbar"))) {
+        if (Boolean.parseBoolean(ConfigurationValues.get("codeagent.no.statusbar", "CODEAGENT_NO_STATUSBAR", "false"))) {
             return false;
         }
         Size size = safeSize(terminal);

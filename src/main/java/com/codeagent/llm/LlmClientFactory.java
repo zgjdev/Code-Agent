@@ -10,10 +10,12 @@ public class LlmClientFactory {
         if (provider == null) return null;
 
         String normalized = normalizeProvider(provider);
-        String configuredProvider = provider.trim().toLowerCase();
+        String configuredProvider = provider.trim().toLowerCase(java.util.Locale.ROOT);
         String apiKey = config.getApiKey(normalized);
         if ((apiKey == null || apiKey.isBlank()) && !configuredProvider.equals(normalized)) {
-            apiKey = config.getApiKey(configuredProvider);
+            // Environment aliases are resolved by CodeAgentConfig; do not bypass an explicit blank canonical key.
+            CodeAgentConfig.ProviderConfig aliasConfig = config.getProviders().get(configuredProvider);
+            apiKey = aliasConfig == null ? null : aliasConfig.getApiKey();
         }
         if (apiKey == null || apiKey.isBlank()) {
             return null;
@@ -40,23 +42,20 @@ public class LlmClientFactory {
     }
 
     public static LlmClient createFromConfig(CodeAgentConfig config) {
-        LlmClient client = create(config.getDefaultProvider(), config);
-        if (client != null) {
-            return client;
+        String selected = config.getDefaultProvider();
+        String normalized = selected == null ? "" : normalizeProvider(selected);
+        if (!java.util.Set.of("glm", "deepseek", "hunyuan", "step", "kimi", "freellmapi", "xfyun", "agnes").contains(normalized)) {
+            throw new IllegalArgumentException("CODEAGENT_PROVIDER 必须是 glm/deepseek/hunyuan/step/kimi/freellmapi/xfyun/agnes");
         }
-
-        for (String provider : new String[]{"glm", "deepseek", "hunyuan", "step", "kimi", "freellmapi", "xfyun", "agnes"}) {
-            client = create(provider, config);
-            if (client != null) {
-                return client;
-            }
+        LlmClient client = create(selected, config);
+        if (client == null) {
+            throw new IllegalStateException("所选 Provider " + normalized + " 缺少 API Key，请配置对应密钥");
         }
-
-        return null;
+        return client;
     }
 
     private static String normalizeProvider(String provider) {
-        String normalized = provider.trim().toLowerCase();
+        String normalized = provider.trim().toLowerCase(java.util.Locale.ROOT);
         return switch (normalized) {
             case "stepfun", "step-fun" -> "step";
             case "hy4", "hy4-preview", "tokenhub", "tencent-hunyuan", "tencent_hunyuan" -> "hunyuan";

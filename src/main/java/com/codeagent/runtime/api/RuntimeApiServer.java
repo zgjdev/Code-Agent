@@ -1,5 +1,7 @@
 package com.codeagent.runtime.api;
 
+import com.codeagent.config.ConfigurationValues;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.codeagent.runtime.task.TaskRunner;
@@ -39,10 +41,7 @@ public class RuntimeApiServer implements AutoCloseable {
     }
 
     public static String configuredApiKey() {
-        String configured = System.getProperty("codeagent.runtime.api.key");
-        if (configured == null || configured.isBlank()) {
-            configured = System.getenv("CODEAGENT_RUNTIME_API_KEY");
-        }
+        String configured = ConfigurationValues.get("codeagent.runtime.api.key", "CODEAGENT_RUNTIME_API_KEY", null);
         return configured;
     }
 

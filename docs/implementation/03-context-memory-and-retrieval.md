@@ -67,6 +67,10 @@ ImageReferenceParser解析`@image:`路径与file URI，ClipboardImage处理剪�
 
 Message用ContentPart携带文本和图片；纯文本仍可序列化为string。Provider通过supportsImageInput声明能力，不支持时保留文本而省略payload。工具消息保留文本fallback，图片通过后续user消息回灌。新任务裁剪历史图片payload，保留来源，避免旧截图污染当前判断。
 
+### 3.6 dotenv 配置入口
+
+LSP 开关与诊断上限、会话恢复、实验性 `CODEAGENT_SESSION_MEMORY_COMPACTION_ENABLED` 现在通过 `ConfigurationValues` 读取 dotenv，并保留 Java 属性/进程变量的覆盖顺序。增量摘要 false 不关闭稳定的完整自动摘要。Embedding 的 dotenv 值在缺少对应 JSON 显式字段时生效，空模型目录继续使用默认安装目录；远程模式仍需项目级授权，读取配置不构成授权。Skill 和 autoIndex 的设置入口不变。
+
 ## 4. 实现任务与测试矩阵
 
 | 边界 | 验证重点 |

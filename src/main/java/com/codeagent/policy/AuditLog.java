@@ -1,5 +1,7 @@
 package com.codeagent.policy;
 
+import com.codeagent.config.ConfigurationValues;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -111,14 +113,8 @@ public class AuditLog {
     }
 
     private static Path defaultAuditDir() {
-        String prop = System.getProperty("codeagent.audit.dir");
-        if (prop != null && !prop.isBlank()) {
-            return Path.of(prop);
-        }
-        String env = System.getenv("CODEAGENT_AUDIT_DIR");
-        if (env != null && !env.isBlank()) {
-            return Path.of(env);
-        }
+        String configured = ConfigurationValues.get("codeagent.audit.dir", "CODEAGENT_AUDIT_DIR", null);
+        if (configured != null) return Path.of(configured);
         return Path.of(System.getProperty("user.home"), ".codeagent", "audit");
     }
 

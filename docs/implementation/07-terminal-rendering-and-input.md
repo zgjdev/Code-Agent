@@ -32,7 +32,7 @@ CLI输入循环是唯一终端输入者。Worker输出走Renderer.stream，审�
 
 抽出stream、状态、工具块、输入前后等接口。PlainRenderer尽量保持普通打印行为，为非ANSI环境和测试提供稳定输出。Agent、Planner、Plan执行器接同一输出流，主交互路径不新增裸System.out.println。
 
-RendererFactory读取系统属性codeagent.renderer，随后CODEAGENT_RENDERER，默认inline；兼容旧CODEAGENT_TUI=true到Lanterna。未知值回退inline；终端不支持ANSI时再退为plain。Lanterna由TuiBootstrap接管，不假设工厂一定构造全屏窗口。
+RendererFactory通过ConfigurationValues读取系统属性codeagent.renderer，随后进程变量、项目与用户dotenv中的CODEAGENT_RENDERER，默认inline；兼容旧CODEAGENT_TUI=true到Lanterna。未知值回退inline；终端不支持ANSI时再退为plain。Lanterna由TuiBootstrap接管，与工厂读取相同配置，不假设工厂一定构造全屏窗口。CODEAGENT_NO_STATUSBAR也支持dotenv，系统属性codeagent.no.statusbar优先。
 
 ### 3.2 用JLine保持编辑缓冲区
 

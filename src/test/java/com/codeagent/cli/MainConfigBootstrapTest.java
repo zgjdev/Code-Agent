@@ -62,4 +62,42 @@ class MainConfigBootstrapTest {
         assertEquals(original, Files.readString(config));
         assertTrue(result.message().contains("未配置 chrome-devtools"));
     }
+
+    @Test
+    void startupRejectsMissingSelectedKeyWithoutTryingAnotherProvider() throws Exception {
+        CodeAgentConfig config = new CodeAgentConfig() {
+            @Override public String getApiKey(String provider) {
+                return "glm".equals(provider) ? "fixture-other-provider" : null;
+            }
+        };
+        config.setDefaultProvider("deepseek");
+        var captured = new java.io.ByteArrayOutputStream();
+        var original = System.err;
+        try (var output = new java.io.PrintStream(captured, true, java.nio.charset.StandardCharsets.UTF_8)) {
+            System.setErr(output);
+            assertNull(Main.createStartupClient(config));
+        } finally {
+            System.setErr(original);
+        }
+        String message = captured.toString(java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(message.contains("deepseek"));
+        assertFalse(message.contains("fixture-other-provider"));
+    }
+
+    @Test
+    void startupRejectsInvalidProviderWithoutEchoingConfigurationText() throws Exception {
+        CodeAgentConfig config = new CodeAgentConfig();
+        config.setDefaultProvider("invalid-sensitive-fixture");
+        var captured = new java.io.ByteArrayOutputStream();
+        var original = System.err;
+        try (var output = new java.io.PrintStream(captured, true, java.nio.charset.StandardCharsets.UTF_8)) {
+            System.setErr(output);
+            assertNull(Main.createStartupClient(config));
+        } finally {
+            System.setErr(original);
+        }
+        String message = captured.toString(java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(message.contains("CODEAGENT_PROVIDER"));
+        assertFalse(message.contains("invalid-sensitive-fixture"));
+    }
 }

@@ -1,5 +1,7 @@
 package com.codeagent.tui;
 
+import com.codeagent.config.ConfigurationValues;
+
 import com.codeagent.agent.Agent;
 import com.codeagent.config.CodeAgentConfig;
 import com.codeagent.hitl.RendererHitlHandler;
@@ -97,14 +99,8 @@ public final class TuiBootstrap {
     }
 
     private static boolean isTuiRequested() {
-        String rendererProperty = System.getProperty(RENDERER_PROPERTY);
-        if (rendererProperty != null && !rendererProperty.isBlank()) {
-            return isLanternaRenderer(rendererProperty);
-        }
-        String rendererEnv = System.getenv(RENDERER_ENV);
-        if (rendererEnv != null && !rendererEnv.isBlank()) {
-            return isLanternaRenderer(rendererEnv);
-        }
+        String renderer = ConfigurationValues.get(RENDERER_PROPERTY, RENDERER_ENV, null);
+        if (renderer != null) return isLanternaRenderer(renderer);
         String property = System.getProperty(TUI_PROPERTY);
         if (property != null && !property.isBlank()) {
             return Boolean.parseBoolean(property);

@@ -1,5 +1,7 @@
 package com.codeagent.lsp;
 
+import com.codeagent.config.ConfigurationValues;
+
 import com.codeagent.util.AnsiStyle;
 
 import java.util.List;
@@ -44,10 +46,7 @@ public final class LspDiagnosticFormatter {
     }
 
     static int maxDiagnostics() {
-        String property = System.getProperty("codeagent.lsp.max.diagnostics");
-        if (property == null || property.isBlank()) {
-            property = System.getenv("CODEAGENT_LSP_MAX_DIAGNOSTICS");
-        }
+        String property = ConfigurationValues.get("codeagent.lsp.max.diagnostics", "CODEAGENT_LSP_MAX_DIAGNOSTICS", null);
         if (property == null || property.isBlank()) {
             return DEFAULT_MAX_DIAGNOSTICS;
         }

@@ -1,5 +1,7 @@
 package com.codeagent.runtime.task;
 
+import com.codeagent.config.ConfigurationValues;
+
 import java.io.Closeable;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -43,10 +45,7 @@ public class DurableTaskManager implements Closeable {
     }
 
     public static Path defaultDbPath() {
-        String configured = System.getProperty("codeagent.task.dir");
-        if (configured == null || configured.isBlank()) {
-            configured = System.getenv("CODEAGENT_TASK_DIR");
-        }
+        String configured = ConfigurationValues.get("codeagent.task.dir", "CODEAGENT_TASK_DIR", null);
         if (configured == null || configured.isBlank()) {
             configured = Path.of(System.getProperty("user.home"), ".codeagent", "tasks").toString();
         }

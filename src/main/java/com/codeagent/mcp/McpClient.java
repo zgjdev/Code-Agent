@@ -1,5 +1,7 @@
 package com.codeagent.mcp;
 
+import com.codeagent.config.ConfigurationValues;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -45,10 +47,7 @@ public class McpClient implements AutoCloseable {
     }
 
     static int initializeTimeoutSeconds() {
-        String configured = System.getProperty(INITIALIZE_TIMEOUT_PROPERTY);
-        if (configured == null || configured.isBlank()) {
-            configured = System.getenv(INITIALIZE_TIMEOUT_ENV);
-        }
+        String configured = ConfigurationValues.get(INITIALIZE_TIMEOUT_PROPERTY, INITIALIZE_TIMEOUT_ENV, null);
         if (configured == null || configured.isBlank()) {
             return DEFAULT_INITIALIZE_TIMEOUT_SECONDS;
         }

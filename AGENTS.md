@@ -177,6 +177,8 @@ sequenceDiagram
 
 - 交互式 CLI（inline/plain/TUI）显式拥有 WorkspaceCodeIndexManager：启动 Hash 对账、递归监听去抖、300秒周期校准；词法先提交、向量异步补齐，搜索本身不触发全库回填。autoIndex.enabled=false、Runtime API、headless 不启动后台维护，索引更新由宿主显式调用底层接口；普通 ToolRegistry 构造不得创建维护线程。程序调用刷新共用协调器；不提供手动索引命令。单 JDBC Connection 的访问共享可重入门禁，推理锁外执行；写入受生命周期门禁、文件/chunk Hash 与任务/provider代次约束，旧任务不得覆盖新版本。部分扫描失败保留诊断和旧索引，只有词法成功确认的路径可补向量；不完整扫描禁止全局缺失删除。当前向量任务过期、源读取失败或条件提交拒绝先安排路径词法刷新，不能反复发现旧任务；已被新代次取代的任务不反向污染状态。背景远程任务按项目授权发送及提交前重验，不弹HITL；失败保留FTS且有限重试。退出停止维护，活动provider lease结束后释放，不在Session驱逐时关闭进程级索引。maintenance_state只表示已知待办，不保证全库实时新鲜。
 
+- 启动模型通过 `CODEAGENT_PROVIDER`（或 `-Dcodeagent.provider`）明确选择一家，优先于 JSON `defaultProvider`；未设置时使用 JSON 默认项或 glm。所选 Provider 名称无效或对应密钥缺失时失败，不按其他密钥自动换家；运行中 `/model` 可显式切换。有效功能配置统一通过 config 层 `ConfigurationValues` 读取：Java 属性 > 进程环境变量 > 项目 `.env` > 用户 `.env` > 默认值；项目空赋值遮蔽用户 dotenv，同名首个赋值生效，不执行变量展开、不支持行内注释。Provider/Embedding 的 JSON 显式字段仍优先；Skill 与 autoIndex 保持现有目录/命令和 JSON 入口，LLM 超时重试保持 Java 属性。禁止回显密钥；同步本地 `.env` 必须保留已有有效值，不激活旧注释中的样例路径或密钥。
+
 ## 7. 命令与文档联动门禁
 
 新增、删除或修改 /xxx 时必须同时检查：Main.java、CliCommandParser.java、相关 parser/completer、测试、README、AGENTS。未知斜杠命令必须在 CLI 层报错，不能回退给 Agent。

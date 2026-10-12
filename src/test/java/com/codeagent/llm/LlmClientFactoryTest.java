@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class LlmClientFactoryTest {
 
@@ -162,6 +163,56 @@ class LlmClientFactoryTest {
         config.getProviders().put("unknown", new CodeAgentConfig.ProviderConfig("test-key", null, "unknown-model"));
 
         assertNull(LlmClientFactory.create("unknown", config));
+    }
+
+
+    @Test
+    void selectedProviderNeverFallsBackToAnotherAvailableKey() {
+        CodeAgentConfig config = new CodeAgentConfig() {
+            @Override public String getApiKey(String provider) {
+                return "glm".equals(provider) ? "fixture-glm-key" : null;
+            }
+        };
+        config.setDefaultProvider("deepseek");
+        assertThrows(IllegalStateException.class, () -> LlmClientFactory.createFromConfig(config));
+    }
+
+    @Test
+    void unknownSelectedProviderIsRejectedWithoutEchoingItsValue() {
+        CodeAgentConfig config = new CodeAgentConfig() {
+            @Override public String getApiKey(String provider) { return "fixture-key"; }
+        };
+        config.setDefaultProvider("invalid-sensitive-value");
+        var failure = assertThrows(IllegalArgumentException.class,
+                () -> LlmClientFactory.createFromConfig(config));
+        assertEquals(false, failure.getMessage().contains("invalid-sensitive-value"));
+    }
+
+    @Test
+    void choosesConfiguredProviderEvenWhenOtherKeysAreAvailable() {
+        CodeAgentConfig config = new CodeAgentConfig();
+        config.setDefaultProvider("step");
+        config.getProviders().put("glm", new CodeAgentConfig.ProviderConfig("fixture-glm", null, null));
+        config.getProviders().put("step", new CodeAgentConfig.ProviderConfig("fixture-step", null, "step-3.5-flash"));
+        assertInstanceOf(StepClient.class, LlmClientFactory.createFromConfig(config));
+    }
+
+    @Test
+    void selectedAliasCannotBypassBlankCanonicalKey(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) {
+        for (String alias : java.util.List.of("moonshot", "xfyun_maas")) {
+            var config = CodeAgentConfig.load(directory.resolve("missing.json"), java.util.Map.of(
+                    "CODEAGENT_PROVIDER", alias, "KIMI_API_KEY", "", "MOONSHOT_API_KEY", "alias-fixture",
+                    "XFYUN_MAAS_API_KEY", "", "XFYUN_API_KEY", "alias-fixture"));
+            assertThrows(IllegalStateException.class, () -> LlmClientFactory.createFromConfig(config));
+        }
+    }
+
+    @Test
+    void explicitAliasJsonKeyRemainsAvailable(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) {
+        var config = CodeAgentConfig.load(directory.resolve("missing.json"), java.util.Map.of(
+                "CODEAGENT_PROVIDER", "moonshot", "KIMI_API_KEY", ""));
+        config.getProviders().put("moonshot", new CodeAgentConfig.ProviderConfig("explicit-fixture", null, null));
+        assertInstanceOf(KimiClient.class, LlmClientFactory.createFromConfig(config));
     }
 
     private static String expectedStepChatUrl(String baseUrl) {

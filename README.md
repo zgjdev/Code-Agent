@@ -58,14 +58,19 @@ Windows PowerShell：
 Copy-Item .env.example .env
 ```
 
-编辑 `.env`，至少配置一个 Provider。例如：
+编辑 `.env`，用 `CODEAGENT_PROVIDER` 选择一家 Provider，并填写对应密钥。例如：
 
 ```dotenv
+CODEAGENT_PROVIDER=glm
 GLM_API_KEY=your_api_key_here
-# GLM_MODEL=glm-5.1
+GLM_MODEL=glm-5.1
 ```
 
-也可以配置 DeepSeek、腾讯混元、StepFun、Kimi、FreeLLMAPI、讯飞星辰 MaaS 或 Agnes。完整选项见 [.env.example](.env.example)。
+也可以配置 DeepSeek、腾讯混元、StepFun、Kimi、FreeLLMAPI、讯飞星辰 MaaS 或 Agnes。配置示例与功能设置入口见 [.env.example](.env.example)，详细说明见下方功能说明及 [实现文档](docs/implementation/01-runtime-and-agent-foundation.md)。
+
+只使用所选 Provider；其他家的密钥可以同时保存或留空。名称无效或所选密钥缺失时启动报错，不再自动换家。`CODEAGENT_PROVIDER`（或 `-Dcodeagent.provider`）覆盖 `config.json` 的默认 Provider；未设置时使用 JSON 默认项或 `glm`。运行中的 `/model` 仍可显式切换，下一次启动重新读取选择项。
+
+示例中的配置均以 `KEY=value` 设置，布尔开关用 `true/false`，空路径/地址使用默认值。功能配置读取顺序为 Java `-D` 参数 > 进程环境变量 > 项目 `.env` > 用户 `~/.env` > 默认值；Provider 的密钥/模型/地址和 Embedding 字段保留 `config.json` 显式值优先的既有规则。项目 `.env` 空值遮蔽用户 `.env` 的同名值，不执行变量展开，也不支持赋值尾部注释。使用旧 `MOONSHOT_*`/`XFYUN_*` 环境名称时应删除对应 canonical 空赋值；其他 Provider 使用示例中的标准变量名。Skill 通过目录和 `/skill` 命令管理，自动索引通过 `config.json` 管理；LLM 超时与重试仍使用 Java 启动参数。
 
 ### 3. 构建并启动
 

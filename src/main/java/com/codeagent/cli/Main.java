@@ -667,10 +667,7 @@ public class Main {
 
                 String input = promptInput.text().trim();
                 CliCommandParser.ParsedCommand command = CliCommandParser.parse(input);
-                boolean forceTaskAdd = command.type() == CliCommandParser.CommandType.TASK
-                        && command.payload() != null
-                        && command.payload().trim().regionMatches(true, 0, "add ", 0, 4);
-                if (command.type() == CliCommandParser.CommandType.NONE && !forceTaskAdd) {
+                if (command.type() == CliCommandParser.CommandType.NONE) {
                     InteractionInputRouter.Result interactionResult =
                             InteractionInputRouter.route(interactionBroker, input);
                     if (interactionResult == InteractionInputRouter.Result.CONSUMED) {
@@ -682,6 +679,11 @@ public class Main {
                     }
                 }
                 if (input.isEmpty()) {
+                    continue;
+                }
+                if (interactionBroker.pending().isPresent()
+                        && !ExecutionControlPolicy.allowedWhileInteractionPending(command.type())) {
+                    uiEvents.message("❌ 请先完成当前审批或计划评审，再提交新任务");
                     continue;
                 }
                 SessionStore.SessionHandle currentSession = activeSession.get();
@@ -2174,7 +2176,6 @@ public class Main {
                 new SlashCommandHint("/browser tabs", "/browser tabs", "查看 shared 模式真实 Chrome tab"),
                 new SlashCommandHint("/browser disconnect", "/browser disconnect", "切回 isolated 浏览器模式"),
                 new SlashCommandHint("/task", "/task", "查看后台任务列表"),
-                new SlashCommandHint("/task add ", "/task add <任务内容>", "提交后台任务"),
                 new SlashCommandHint("/task cancel ", "/task cancel <task_id>", "取消后台任务"),
                 new SlashCommandHint("/task log ", "/task log <task_id>", "查看后台任务结果"),
                 new SlashCommandHint("/mcp", "/mcp", "查看 MCP server 状态"),

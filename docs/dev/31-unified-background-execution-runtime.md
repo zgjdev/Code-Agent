@@ -1,5 +1,7 @@
 # 统一 Session Execution Queue 与 ReAct / Plan 调度
 
+> 当前增量：按用户要求移除 `/task add`；后文原方案中保留 add 的描述仅为历史设计，最新规则以第 8 节为准。
+
 ## 1. 背景、目标与非目标
 
 ### 1.1 背景
@@ -1401,3 +1403,46 @@ ReAct / Plan
 - [x] 构建通过。
 - [x] git diff --check 通过。
 - [x] 本文是本任务唯一 docs/dev 设计与实施文档。
+
+## 8. 移除 task add（当前分支增量）
+
+### 8.1 目标、现状与边界
+
+用户明确要求在当前分支删除冗余 `/task add`，审批完成后再提交新任务。Main 输入循环原有 forceTaskAdd、slash hint；CliCommandParser 接受所有 task payload；TaskCommandFormatter 两个 handle 重载均执行 add，生产 CLI 使用 RuntimeExecutionQueue 重载。普通任务已经经 Main 的 executionQueue.submit 持久化并串行调度，因此只删除 CLI 提交兼容入口，不修改底层 enqueue/submit、数据库 schema、FIFO、Runtime API 或 DurableTaskManager API。
+
+### 8.2 设计与评审
+
+删除两个 formatter 的 add 执行分支及帮助行；parser 将 add（含空参数、大小写和多空格）判为 UNKNOWN_COMMAND，不能作为普通提示或 Plan 审批补充。移除 forceTaskAdd 与补全提示。pending interaction 时普通输入维持回答语义，HITL 非法回答保持 pending；显式 /react、/plan 新任务入口也需等待当前交互完成，查询/取消控制命令保持原策略。无需数据迁移，已有排队任务继续执行；回滚可恢复旧命令但不改变任务数据。
+
+```mermaid
+flowchart TD
+    Input[CLI 输入] --> Parse{输入类型}
+    Parse -->|task add| Reject[未知命令：拒绝，不入队]
+    Parse -->|普通文本| Pending{待审批或计划评审?}
+    Pending -->|是| Answer[处理当前交互回答]
+    Pending -->|否| Queue[统一队列：同 workspace 串行]
+    Parse -->|react / plan 新任务| Gate{待交互?}
+    Gate -->|是| Wait[提示先完成当前交互]
+    Gate -->|否| Queue
+    Parse -->|查询 / 取消| Control[现有控制策略]
+```
+
+设计自审：不扩大授权，不把未知 slash 输入转换成普通任务，不自动批准；新 guard 只约束交互 pending 期间新顶层任务，普通运行中仍可排队。不改变并发/锁顺序或恢复行为。
+
+### 8.3 实施顺序与测试矩阵
+
+1. 先更新 parser、formatter、补全测试：add 必须拒绝且数据库无新增 row；保留 list/log/cancel 用例改为通过 queue.submit 建立夹具。验证红灯后删除执行分支。
+2. Main 删除入口/提示，补 pending 新任务策略；验证 ExecutionControlPolicyTest、InteractionInputRouterTest 与 MainInputNormalizationTest。
+3. 同步 README、AGENTS、CODEAGENT/implementation 和历史方案顶部当前状态；保留历史演进记录并标明最新规则，不新建其他计划文档。
+4. 针对性 mvn test -DskipTests=false -Dtest=CliCommandParserTest,RuntimeExecutionTaskCommandFormatterTest,ExecutionControlPolicyTest,InteractionInputRouterTest,MainInputNormalizationTest；mvn test -Pquick；mvn test -DskipTests=false；mvn clean package；git diff --check。
+
+### 8.4 验收与实施证据
+
+交付状态：实现验证阶段保留未提交；随后用户明确要求“提交当前修改”，按授权提交本节代码、测试及联动文档，不推送远端。以下验证记录中的未提交状态为验证时状态。
+
+- [x] task add 在 CLI 和两套 formatter 均拒绝，无新增任务、无补全/帮助宣传。
+- [x] 普通运行中输入仍可入队；pending 时先完成交互，查询/取消可用。
+- [x] README、AGENTS 和当前实现说明一致；历史方案明确标注已被取代。
+- [x] 针对性、quick、全量、构建、diff 真实结果已记录；验证后用户明确授权本地提交。
+
+先行红灯：85 项中 4 项按预期失败（parser 接受 add、提示仍含 add、两套 formatter 仍入队），0 error。删除入口后针对性 92 项全部通过。mvn test -Pquick：1478 项，0 failure/0 error，19 skipped；mvn test -DskipTests=false：1553 项，0 failure/0 error，25 skipped。独立复核通过，未发现 Critical/Important，核对 parser/两套 formatter/补全/帮助、pending guard、数据库无新增任务断言及实际测试报告。mvn clean package：BUILD SUCCESS（按项目默认跳过测试，之前显式全量已通过）；git diff --check 通过，仅原有 Windows 换行转换提示。当前分支 fix/unified-codeagent-data-directory，本次改动未提交，无数据库 schema/队列 API 迁移；旧命令将被拒绝，不提供兼容别名。

@@ -340,11 +340,10 @@ URL 授权只来自：
 
 ### Runtime API 与统一执行队列
 
-inline/plain CLI 的普通输入、`/react <任务>`、`/plan <任务>` 和 `/task add <任务>` 共用本地 SQLite `runtime_executions` 队列。`/task` 现在是统一 Execution 的查询与控制兼容入口：
+inline/plain CLI 的普通输入、`/react <任务>` 和 `/plan <任务>` 共用本地 SQLite `runtime_executions` 队列。`/task` 现在是统一 Execution 的查询与控制兼容入口：
 
 ```text
 /task
-/task add <任务内容>
 /task cancel <execution-id>
 /task log <execution-id>
 ```
@@ -353,7 +352,7 @@ inline/plain CLI 的普通输入、`/react <任务>`、`/plan <任务>` 和 `/ta
 
 Java 宿主入口位于 `com.codeagent.runtime.execution`：构造 `RuntimeExecutionHost(RuntimeExecutionStore, RuntimeExecutionOptions, ExecutionEventSink)`，调用 `registerWorkspace(Path, WorkspaceRuntimeFactory)`、`createSession(WorkspaceKey)` 或 `attachSession(WorkspaceKey, String)`、`start()`，再通过 `submit(String sessionId, String input, ExecutionMode override)` 提交。交互回答使用 `respond(WorkspaceKey, String executionId, String interactionId, String action, String text)`；结束时 `close()`。`RuntimeExecutionOptions.defaults()` 为 2。`DefaultWorkspaceRuntimeFactory(RuntimeExecutionStore, SessionStore, Function<WorkspaceIdentity,LlmClient>)` 接入真实 Agent/ToolRegistry/账本，但 headless 不自动启动 MCP Manager 或后台索引。宿主 API 是可信控制面，目录必须预先注册；共享 Git common-dir 整轮串行，其他非局部副作用必须有明确资源租约。外部命令不受容器级隔离。设计、迁移与恢复边界见 [多工作区执行调度方案](docs/dev/42-multi-workspace-execution-scheduling.md)。
 
-Agent 运行时可以直接输入下一条任务并回车，无需 `/task add`。新任务排队等待，开始执行时读取前序任务完成后的最新 Session 上下文；它不会中途修改正在运行的任务。等待 HITL 审批或 Plan 人工评审时，普通输入优先作为交互回答处理，无效审批输入不会变成任务；此时使用 `/task add <任务>` 可以明确追加任务。
+Agent 运行时可以直接输入下一条任务并回车。新任务排队等待，开始执行时读取前序任务完成后的最新 Session 上下文；它不会中途修改正在运行的任务。等待 HITL 审批或 Plan 人工评审时，普通输入作为当前交互的回答处理，无效审批输入不会变成任务；须先完成当前审批或评审，再提交新任务。等待交互期间，`/react`、`/plan` 新任务入口也会被拒绝；查询与取消命令仍按原规则可用。
 
 实现与恢复限制见 [统一后台执行运行时](docs/dev/31-unified-background-execution-runtime.md)。
 
@@ -485,7 +484,7 @@ graph TB
 | Memory | `/memory`、`/memory list`、`/memory search <词>`、`/save [--global] <事实>` |
 | MCP/浏览器 | `/mcp`、`/mcp logs <name>`、`/browser connect`、`/browser tabs` |
 | Skill | `/skill list`、`/skill show <name>`、`/skill on|off <name>` |
-| 执行队列 | `/task`、`/task add <任务>`、`/task cancel <execution-id>`、`/task log <execution-id>` |
+| 执行队列 | `/task`、`/task cancel <execution-id>`、`/task log <execution-id>` |
 | 其他 | `/init`、`/cancel`、`/history clear`、`/better-harness`、`/exit` |
 
 输入 `/` 后可通过终端补全查看完整命令和说明。未知斜杠命令会在 CLI 层报错，不会作为普通任务发送给模型。

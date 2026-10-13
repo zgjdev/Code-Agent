@@ -55,7 +55,7 @@ PositionBalancedPairwiseJudge比较新旧答案两次，第二次交换A/B；只
 
 `/better-harness [quick|normal] [--inline]`通过BetterHarnessRunner收集证据，交由三个只读分析角色并行检查，再由主模型汇总候选发现，最后由Java生成报告。分析不直接修改业务代码，也不代替工具权限校验。
 
-默认将Markdown、HTML和结构化发现写入项目的`.codeagent/better-harness/<run-id>/`；`--inline`只返回报告，不持久化文件。实现依次区分证据收集、分析、汇总、渲染与完成阶段，测试覆盖选项解析和报告生成。报告中的建议仍需结合源码与确定性测试验证。
+默认将Markdown、HTML和结构化发现写入统一数据根的`reports/better-harness/<workspace-hash>/<run-id>/`；`--inline`只返回报告，不持久化文件。实现依次区分证据收集、分析、汇总、渲染与完成阶段，测试覆盖选项解析和报告生成。报告中的建议仍需结合源码与确定性测试验证。
 
 源码：[BetterHarnessRunner](../../src/main/java/com/codeagent/harness/BetterHarnessRunner.java)、[BetterHarnessOptions](../../src/main/java/com/codeagent/harness/BetterHarnessOptions.java)；自动验收入口为BetterHarnessRunnerTest、BetterHarnessOptionsTest。
 

@@ -170,7 +170,7 @@ CodeAgent 把实时确定性工具与索引式 RAG 分开：
 
 检索还会利用剩余字符预算补充同文件的相关实现：先保留原主片段与顺序，再从扩大的语义候选池中为每个已选文件追加最多两个完整片段，结果标为 `context` 并注明行范围。`search_code` 将预算内正文完整交给 Agent；`/search` 保留简短预览。此优化复用原模型与索引，不需要安装额外重排模型。两个入口均默认 Top10/16000 正文字符，与固定评测配置一致；`search_code` 仍可显式指定 `top_k`（1–30），正文预算保持16000字符。评测数字衡量正文证据覆盖，不等同于最终回答准确率。
 
-首次使用语义检索前，在 PowerShell 执行 `./scripts/install-qwen3-model.ps1`，显式下载并校验固定版本的三个模型文件（约 2.41 GB，未打入 JAR）。默认存放于 `~/.codeagent/models/qwen3-embedding-0.6b/c25a394dd583836952667c12f008335071b3f43d`，可通过 `embedding.localModelDirectory` 或 `EMBEDDING_LOCAL_MODEL_DIR` 指定目录。已有文件可用 `-SourceDirectory <目录>` 离线安装。运行时不联网下载，模型缺失或校验失败仅关闭语义召回，关键词检索仍可用；安装后通过 `/embedding local` 重配，后台自动补齐向量。旧索引保留 FTS，只回填新向量空间。需要回滚时配置 `embedding.mode=local`、`embedding.provider=bge`；长期记忆仍使用 BGE。实验与实施证据见 [模型迁移文档](docs/dev/26-qwen3-embedding-migration.md)。
+首次使用语义检索前，在 PowerShell 执行 `./scripts/install-qwen3-model.ps1`，显式下载并校验固定版本的三个模型文件（约 2.41 GB，未打入 JAR）。默认存放于统一数据根下的 `models/qwen3-embedding-0.6b/c25a394dd583836952667c12f008335071b3f43d`（未配置时为 `~/.codeagent/models/...`），可通过 `embedding.localModelDirectory` 或 `EMBEDDING_LOCAL_MODEL_DIR` 指定目录。已有文件可用 `-SourceDirectory <目录>` 离线安装。运行时不联网下载，模型缺失或校验失败仅关闭语义召回，关键词检索仍可用；安装后通过 `/embedding local` 重配，后台自动补齐向量。旧索引保留 FTS，只回填新向量空间。需要回滚时配置 `embedding.mode=local`、`embedding.provider=bge`；长期记忆仍使用 BGE。实验与实施证据见 [模型迁移文档](docs/dev/26-qwen3-embedding-migration.md)。
 
 混合问题按目标和已有线索协作：例如“看一下 store.save()”先实时定位并读取；“保存失败的事务和异常处理”可用 RAG 寻找相关机制。`search_code.query`保留行为描述，`lexical_query`可提供来自问题或已读取源码的词法软线索，不限制语义候选范围；中文夹杂驼峰名称、点号调用等也会自动提取线索。词法线索最多占一半候选池，其余保留原问题关键词补充。RAG 不自动调用 grep，检索请求本身不触发全库回填。
 
@@ -412,7 +412,13 @@ TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard / CommandGuar
 
 ## 数据目录
 
-默认运行数据保存在用户目录下：
+默认系统数据统一保存在一个根目录中：Windows 为 `%USERPROFILE%\.codeagent`，macOS/Linux 为 `~/.codeagent`。位置与启动所在盘、当前项目无关。
+
+只保留整体覆盖设置 `CODEAGENT_HOME`（Java 属性 `-Dcodeagent.home` 优先），其余系统目录都从根目录派生。配置留空使用默认根；支持 `~/...`，Windows 自定义路径必须含盘符或完整 UNC 共享名，例如 `D:/CodeAgentData`。修改后重启。用户级配置、MCP、Prompt、Skill 和模型默认安装也跟随这个根；项目级配置仍从项目读取。
+
+旧 `CODEAGENT_LOG_DIR`、`CODEAGENT_AUDIT_DIR`、`CODEAGENT_MEMORY_DIR`、`CODEAGENT_SNAPSHOT_DIR`、`CODEAGENT_PLAN_DIR`、`CODEAGENT_TASK_DIR`、`CODEAGENT_RUNTIME_DIR`、`CODEAGENT_HISTORY_FILE` 及对应 Java 路径属性（包括 `codeagent.rag.dir`）已停用。旧目录不会自动删除或合并；如需迁移，请停止所有实例后整体复制数据到所选根目录，再设置 `CODEAGENT_HOME`，保留原目录作为备份。
+
+下表以默认根 `~/.codeagent` 为例：
 
 | 路径 | 内容 |
 |---|---|
@@ -425,7 +431,19 @@ TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard / CommandGuar
 | `~/.codeagent/logs/` | 运行日志 |
 | `~/.codeagent/audit/` | 危险工具审计 JSONL |
 | `~/.codeagent/skills/` | 用户级 Skill |
+| `~/.codeagent/skills-cache/` | 内置 Skill 解压缓存 |
+| `~/.codeagent/rag/` | 代码索引与远程 Embedding 授权记录 |
+| `~/.codeagent/runtime/locks/` | 工作区所有权锁与共享资源锁 |
+| `~/.codeagent/runtime/runtime.db` | Runtime HTTP API 数据 |
+| `~/.codeagent/cache/` | 剪贴板图片与 npm 缓存 |
+| `~/.codeagent/tmp/` | JVM/SQLite/MCP/命令的常规临时文件 |
+| `~/.codeagent/reports/better-harness/<workspace-hash>/` | Better Harness 报告 |
+| `~/.codeagent/models/` | 显式安装的默认本地模型 |
 | `~/.codeagent/exports/` | 会话导出 |
+
+`/better-harness` 报告也保存到统一根；`--inline` 不持久化。根目录位于项目内部时，自动索引和 Side-Git 排除它，防止递归收录系统数据；数据根不能是当前工作区或其父目录。
+
+CodeAgent 为子进程设置 `TMP`、`TEMP`、`TMPDIR` 和 npm 缓存，并把 JVM/SQLite 临时目录指向根下 `tmp/`。这是常规文件位置约定，外部程序仍可写它自己的固定位置，用户任务文件和显式指定的输出不会被强行重定向。测试默认状态使用 `target/test-data`，测试夹具使用隔离临时目录。
 
 raw session、日志和导出可能包含敏感内容，请勿提交或公开复制。
 

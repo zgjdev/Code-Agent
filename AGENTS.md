@@ -180,6 +180,9 @@ sequenceDiagram
 
 - 启动模型通过 `CODEAGENT_PROVIDER`（或 `-Dcodeagent.provider`）明确选择一家，优先于 JSON `defaultProvider`；未设置时使用 JSON 默认项或 glm。所选 Provider 名称无效或对应密钥缺失时失败，不按其他密钥自动换家；运行中 `/model` 可显式切换。有效功能配置统一通过 config 层 `ConfigurationValues` 读取：Java 属性 > 进程环境变量 > 项目 `.env` > 用户 `.env` > 默认值；项目空赋值遮蔽用户 dotenv，同名首个赋值生效，不执行变量展开、不支持行内注释。Provider/Embedding 的 JSON 显式字段仍优先；Skill 与 autoIndex 保持现有目录/命令和 JSON 入口，LLM 超时重试保持 Java 属性。禁止回显密钥；同步本地 `.env` 必须保留已有有效值，不激活旧注释中的样例路径或密钥。
 
+- 系统数据唯一根目录由 config.CodeAgentPaths 管理，默认 user.home/.codeagent，唯一整体覆盖为 codeagent.home / CODEAGENT_HOME（沿用 ConfigurationValues 优先级，需重启）。生产路径不得自行拼 user.home 或读取旧模块 *_DIR/HISTORY_FILE 与 codeagent.rag.dir；Windows 缺盘符根路径/相对路径在创建前拒绝。配置、会话、Memory、RAG、Plan、Runtime、锁、日志、审计、快照、缓存、报告和默认模型安装均派生统一根。可信 Java 宿主显式 Path 注入保留；项目只读配置与用户任务产物仍属于 workspace。
+- Main 在日志和 native library 初始化前建立统一根/tmp，设置 JVM/SQLite 临时位置；MCP/命令进程标准临时变量和 npm 缓存跟随根，不改 HOME/USERPROFILE，不宣称外部副作用隔离。BetterHarness 默认报告在根/reports/better-harness/<workspace-hash>/<run-id>，inline 不落盘。根位于项目内时索引/Side-Git 排除系统数据；禁止把工作区或其父目录作为数据根。旧分散存储配置停用，不自动搬运或删除历史数据。测试不得写硬编码 /tmp、/Users 或真实用户系统目录；默认 test-data 与 @TempDir 隔离且恢复属性。
+
 ## 7. 命令与文档联动门禁
 
 新增、删除或修改 /xxx 时必须同时检查：Main.java、CliCommandParser.java、相关 parser/completer、测试、README、AGENTS。未知斜杠命令必须在 CLI 层报错，不能回退给 Agent。

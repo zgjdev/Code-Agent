@@ -12,6 +12,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DeterministicEvidenceGateTest {
     @Test
+    void anotherSuccessfulCommandCannotHideFailedTest() {
+        TaskEvidence failed = new TaskEvidence(EvidenceType.TEST, EvidenceStatus.FAILED,
+                "mvn test -Dtest=A", List.of(), "execute_command", 1L);
+        assertEquals(VerificationOutcome.REJECTED, DeterministicEvidenceGate.evaluate(
+                task(Set.of(EvidenceType.TEST)), List.of(failed,
+                        TaskEvidence.passed(EvidenceType.TEST, "mvn test -Dtest=B", "execute_command"))).outcome());
+    }
+    @Test
     void missingRequiredEvidenceIsRejectedEvenWhenResultClaimsSuccess() {
         Task task = task(Set.of(EvidenceType.TEST));
         TaskVerificationReport report = DeterministicEvidenceGate.evaluate(task, List.of());

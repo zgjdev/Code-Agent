@@ -22,11 +22,15 @@ public final class DeterministicEvidenceGate {
         for (EvidenceType type : required) {
             boolean passed = observed.stream().anyMatch(item -> item.type() == type
                     && item.status() == EvidenceStatus.PASSED);
+            boolean failed = observed.stream().anyMatch(item -> item.type() == type
+                    && item.status() == EvidenceStatus.FAILED);
+            if ((type == EvidenceType.TEST || type == EvidenceType.BUILD) && failed) {
+                blocking.add(type + " evidence failed");
+                continue;
+            }
             if (passed) {
                 continue;
             }
-            boolean failed = observed.stream().anyMatch(item -> item.type() == type
-                    && item.status() == EvidenceStatus.FAILED);
             blocking.add(type + (failed ? " evidence failed" : " evidence missing"));
         }
         return report(blocking.isEmpty() ? VerificationOutcome.VERIFIED : VerificationOutcome.REJECTED,

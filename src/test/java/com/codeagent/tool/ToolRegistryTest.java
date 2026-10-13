@@ -42,6 +42,19 @@ class ToolRegistryTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
+    void nativeCommandNonZeroExitIsTypedFailure(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        ToolOutput output = registry.executeToolOutput("execute_command", "{\"command\":\"exit 7\"}");
+        assertFalse(output.successful(), output.text());
+        assertEquals(ToolOutput.FailureKind.EXECUTION_ERROR, output.failureKind());
+        assertTrue(output.text().contains("exit code: 7"), output.text());
+        assertFalse(registry.executeTools(List.of(new ToolRegistry.ToolInvocation(
+                "fail", "execute_command", "{\"command\":\"exit 7\"}"))).get(0).successful());
+        assertTrue(registry.executeToolOutput("execute_command", "{\"command\":\"exit 0\"}").successful());
+    }
+
+    @Test
     void cancellationFailureIsTyped() {
         ToolRegistry registry = new ToolRegistry();
         CancellationToken token = CancellationContext.startRun();
@@ -346,10 +359,21 @@ class ToolRegistryTest {
                 ? "Start-Sleep -Seconds 2"
                 : "sleep 2";
 
-        String result = registry.executeTool(
+        ToolOutput output = registry.executeToolOutput(
                 "execute_command", "{\"command\":\"" + command + "\"}");
 
-        assertTrue(result.contains("命令执行超时"));
+        assertTrue(output.text().contains("命令执行超时"));
+        assertFalse(output.successful());
+        assertEquals(ToolOutput.FailureKind.EXECUTION_ERROR, output.failureKind());
+    }
+
+    @Test
+    void commandStartupFailureIsNotSuccessful(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.resolve("missing-directory").toString());
+        ToolOutput output = registry.executeToolOutput("execute_command", "{\"command\":\"echo ok\"}");
+        assertFalse(output.successful());
+        assertEquals(ToolOutput.FailureKind.EXECUTION_ERROR, output.failureKind());
     }
 
     @Test

@@ -213,6 +213,73 @@ class PlanExecuteRecoveryTest {
     }
 
     @Test
+    void recoveredReviewUsesOriginalSourceSnapshot() throws Exception {
+        assertRecoveredReview(true);
+    }
+
+    @Test
+    void legacyHashOnlyRecoveryCannotApproveChangedText() throws Exception {
+        assertRecoveredReview(false);
+    }
+
+    private void assertRecoveredReview(boolean persistText) throws Exception {
+        Path source = tempDir.resolve("src/App.java");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, "original-source\n");
+        RecordingClient client = new RecordingClient();
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        var config = new com.codeagent.snapshot.SnapshotConfig(true, tempDir.resolve("snapshots"),
+                50, List.of(".git", "target"));
+        try (var snapshots = new com.codeagent.snapshot.SnapshotService(
+                new com.codeagent.snapshot.SideGitManager(tempDir, config));
+             SessionStore sessions = SessionStore.open(tempDir.resolve("review-history"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "glm", "test", null, "react", "agent"))) {
+            registry.setSnapshotService(snapshots);
+            PlanStateStore store = new PlanStateStore(tempDir.resolve("review-plans.db"));
+            ExecutionPlan plan = new ExecutionPlan("review-resume", "recover edit");
+            Task task = new Task("edit", "edit source", Task.TaskType.FILE_WRITE, List.of(),
+                    new TaskResourceClaims(List.of("src/App.java"), List.of("src/App.java"), false),
+                    List.of("source updated"), Set.of(EvidenceType.DIFF));
+            plan.addTask(task);
+            plan.computeExecutionOrder();
+            store.savePlan(tempDir, session.sessionId(), plan);
+            TaskWorkspaceDiffTracker tracker = persistText
+                    ? TaskWorkspaceDiffTracker.start(tempDir, task.getResourceClaims(), snapshots.manager())
+                    : TaskWorkspaceDiffTracker.start(tempDir, task.getResourceClaims());
+            store.saveTaskDiffBaseline(plan.getId(), task.getId(), JSON.writeValueAsString(tracker.baseline()));
+            plan.markStarted();
+            store.checkpointPlan(plan);
+            task.markStarted();
+            store.checkpointTask(plan.getId(), task);
+            Files.writeString(source, "after-crash\n");
+            // A fresh manager simulates losing all process-local baseline bytes.
+            try (var restoredSnapshots = new com.codeagent.snapshot.SnapshotService(
+                    new com.codeagent.snapshot.SideGitManager(tempDir, config))) {
+                registry.setSnapshotService(restoredSnapshots);
+                PlanExecuteAgent agent = new PlanExecuteAgent(client, registry, new FailingIfCalledPlanner(client), null,
+                        (goal, p) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                        new PrintStream(new ByteArrayOutputStream()), PipelineOptions.FULL_PRESET);
+                agent.setPlanStateStore(store);
+                agent.setParentConversationContext(parentContext(session));
+                String result = agent.resumeActivePlan();
+                if (persistText) {
+                    assertTrue(result.contains("计划执行完成"), result);
+                    assertEquals(2, client.snapshots.size());
+                    String review = client.snapshots.get(1).stream().map(LlmClient.Message::content)
+                            .filter(java.util.Objects::nonNull).collect(java.util.stream.Collectors.joining("\n"));
+                    assertTrue(review.contains("-original-source\n+after-crash"), review);
+                } else {
+                    assertTrue(result.contains("未验证"), result);
+                    assertTrue(result.contains("diff text unavailable"), result);
+                    assertEquals(1, client.snapshots.size());
+                }
+            }
+        }
+    }
+
+    @Test
     void interruptedDiffTaskWithoutBaselineStopsBeforeWorkerCall() throws Exception {
         Path source = tempDir.resolve("src/App.java");
         Files.createDirectories(source.getParent());
@@ -652,6 +719,10 @@ class PlanExecuteRecoveryTest {
         public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener)
                 throws IOException {
             snapshots.add(List.copyOf(messages));
+            if (messages.stream().anyMatch(message -> message.content() != null
+                    && message.content().contains("Task initial baseline to final workspace patch"))) {
+                return new ChatResponse("assistant", "{\"approved\":true,\"summary\":\"ok\",\"issues\":[],\"suggestions\":[]}", null, 10, 2);
+            }
             return new ChatResponse("assistant", "剩余任务完成", null, 10, 2);
         }
     }

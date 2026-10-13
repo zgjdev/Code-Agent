@@ -6,6 +6,13 @@ import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectLoader;
 import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.CommitBuilder;
+import org.eclipse.jgit.lib.FileMode;
+import org.eclipse.jgit.lib.ObjectInserter;
+import org.eclipse.jgit.lib.RefUpdate;
+import org.eclipse.jgit.dircache.DirCache;
+import org.eclipse.jgit.dircache.DirCacheEntry;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
@@ -49,6 +56,84 @@ public class SideGitManager {
 
     public synchronized TurnSnapshot preTurnSnapshot(String turnId, String summary) throws IOException, GitAPIException {
         return createSnapshot(SnapshotPhase.PRE_TURN, turnId, summary);
+    }
+
+    /** Stores an immutable scoped tree without touching the worktree, index or HEAD. */
+    public synchronized String saveTaskBaseline(Map<String, byte[]> files) throws IOException {
+        if (!config.enabled()) return "";
+        try (Git git = openGit(); ObjectInserter inserter = git.getRepository().newObjectInserter()) {
+            DirCache cache = DirCache.newInCore();
+            var builder = cache.builder();
+            // Git index order is UTF-8 byte order, not Java's UTF-16 string order.
+            List<String> paths = new ArrayList<>(files.keySet());
+            paths.sort((left, right) -> java.util.Arrays.compareUnsigned(
+                    left.getBytes(StandardCharsets.UTF_8), right.getBytes(StandardCharsets.UTF_8)));
+            for (String path : paths) {
+                validateTaskPath(path);
+                byte[] bytes = files.get(path);
+                DirCacheEntry entry = new DirCacheEntry(path);
+                entry.setFileMode(FileMode.REGULAR_FILE);
+                entry.setObjectId(inserter.insert(Constants.OBJ_BLOB, bytes));
+                builder.add(entry);
+            }
+            builder.finish();
+            CommitBuilder commit = new CommitBuilder();
+            commit.setTreeId(cache.writeTree(inserter));
+            commit.setAuthor(SNAPSHOT_IDENT);
+            commit.setCommitter(SNAPSHOT_IDENT);
+            commit.setMessage("Task review baseline");
+            ObjectId id = inserter.insert(commit);
+            inserter.flush();
+            RefUpdate update = git.getRepository().updateRef("refs/codeagent/task-baselines/" + id.name());
+            update.setNewObjectId(id);
+            RefUpdate.Result result = update.update();
+            if (result != RefUpdate.Result.NEW && result != RefUpdate.Result.NO_CHANGE
+                    && result != RefUpdate.Result.FAST_FORWARD) {
+                throw new IOException("task snapshot reference could not be persisted: " + result);
+            }
+            return id.name();
+        } catch (GitAPIException e) {
+            throw new IOException("task snapshot could not be saved", e);
+        }
+    }
+
+    public synchronized Optional<byte[]> readTaskBaselineFile(String commitId, String path, int maxBytes)
+            throws IOException {
+        validateTaskPath(path);
+        if (!config.enabled() || !Files.exists(gitDir.resolve("config"))) return Optional.empty();
+        if (commitId == null || !commitId.matches("[0-9a-f]{40}") || maxBytes < 0) {
+            throw new IOException("invalid task snapshot reference or read limit");
+        }
+        try (Git git = openGit(); RevWalk walk = new RevWalk(git.getRepository())) {
+            Repository repository = git.getRepository();
+            var ref = repository.exactRef("refs/codeagent/task-baselines/" + commitId);
+            if (ref == null || !ref.getObjectId().name().equals(commitId)) return Optional.empty();
+            RevCommit commit = walk.parseCommit(ObjectId.fromString(commitId));
+            try (TreeWalk tree = TreeWalk.forPath(repository, path, commit.getTree())) {
+                if (tree == null || tree.getFileMode(0) != FileMode.REGULAR_FILE) return Optional.empty();
+                ObjectLoader loader = repository.open(tree.getObjectId(0), Constants.OBJ_BLOB);
+                if (loader.getSize() > maxBytes) return Optional.empty();
+                return Optional.of(loader.getBytes(maxBytes));
+            }
+        } catch (GitAPIException e) {
+            throw new IOException("task snapshot could not be read", e);
+        }
+    }
+
+    private void validateTaskPath(String path) throws IOException {
+        if (path == null || path.isBlank() || path.contains("\\") || path.startsWith("/")
+                || java.util.Arrays.stream(path.split("/", -1))
+                .anyMatch(part -> part.isBlank() || part.equals(".") || part.equals(".."))) {
+            throw new IOException("invalid task snapshot path");
+        }
+        try {
+            Path relative = Path.of(path);
+            if (relative.isAbsolute() || !projectRoot.resolve(relative).normalize().startsWith(projectRoot)) {
+                throw new IOException("invalid task snapshot path");
+            }
+        } catch (IllegalArgumentException e) {
+            throw new IOException("invalid task snapshot path", e);
+        }
     }
 
     public synchronized TurnSnapshot postTurnSnapshot(String turnId, String summary) throws IOException, GitAPIException {

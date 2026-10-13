@@ -24,8 +24,9 @@ CodeAgent 是面向商业使用的 Java Agent CLI 产品，对标 Claude Code；
 - 交互式 CLI 默认进程内自动维护代码索引（启动对账、监听去抖、周期校准，词法先更新/向量补齐）；`autoIndex.enabled=false` 关闭后台维护，仅查询已有索引。检索自身不全库回填。Runtime API/headless 不隐式创建维护线程，由宿主显式调用底层刷新接口；后台服务不占 Session lease，不自动授权远程 Embedding。
 - 默认 headless workspace 工厂不启动 MCP Manager 或后台索引，并拒绝后来出现的未声明 MCP/Browser 可变绑定。共享 Git common-dir 使用整轮粗租约；其他非局部副作用需要显式资源租约，外部命令没有容器隔离。Host 是可信进程内控制面，不从普通输入自动注册目录；交互回答核对 workspaceKey、executionId、interactionId。owner 文件锁先于局部恢复，owner/attempt 阻止迟到写入；子执行器和快照未 drain 时不得释放工作区所有权。
 
-- 改行为要同步 `AGENTS.md` / `README.md` / `ROADMAP.md`；路线图只在状态变化时更新。
-- 改命令入口要联动 `Main.java`、`CliCommandParser.java`、测试、`README.md`、`AGENTS.md`。
+- 开发流程、Git 授权与文档维护边界以 [AGENTS.md](AGENTS.md) 为准；这里只保留操作速查，不复制完整协作规则。
+- 改行为更新相关使用说明和模块文档；仅全局规则或边界变化时更新 AGENTS，路线图只在演进状态变化时更新。实现细节与修复记录不得追加到 AGENTS。
+- 改命令入口要联动 `Main.java`、`CliCommandParser.java`、相关 parser/completer、测试和 `README.md`。
 - 改工具集要联动 `ToolRegistry.java`、Agent/Plan/SubAgent 提示词和文档。
 - 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取临时事实。
 - `ctx` 表示下一轮仍会带入请求的上下文估算；`in/out/cache` 表示最近任务 LLM 调用统计，不要混用。

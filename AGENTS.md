@@ -61,7 +61,7 @@ flowchart LR
 
 方案至少包含一张适合问题的 Mermaid 图：模块关系用 graph，事件交互用 sequenceDiagram，状态变化用 stateDiagram-v2，步骤决策用 flowchart。图必须和文字、代码保持一致；不画装饰性图。
 
-本文档同时是该任务唯一的设计与实施文档。执行任何 skill、Plan Mode 或其他工作流时，都只能更新这份文档中的对应章节，不得再创建独立的 implementation plan、execution plan、task plan 或同义文档。若已有 `docs/dev` 文档能够承载本次任务，应直接更新已有文档，不得为了编号、阶段或工具流程重复建文档。只有用户明确要求拆分文档时，才允许例外。
+该 docs/dev 方案文档同时是该任务唯一的设计与实施文档。执行任何 skill、Plan Mode 或其他工作流时，都只能更新这份文档中的对应章节，不得再创建独立的 implementation plan、execution plan、task plan 或同义文档。若已有 `docs/dev` 文档能够承载本次任务，应直接更新已有文档，不得为了编号、阶段或工具流程重复建文档。只有用户明确要求拆分文档时，才允许例外。
 
 ## 3. 系统架构与依赖铁律
 
@@ -144,50 +144,43 @@ sequenceDiagram
 2. model/ 或对应领域包：定义不可变数据结构、状态和序列化格式。
 3. policy/、hitl/、history/：评估安全、审计、恢复和持久化影响。
 4. 领域实现：复用 ToolRegistry、MemoryManager、SnapshotService 等既有接口。
-5. Main.java / CliCommandParser.java：若改命令，必须同步测试、README、AGENTS。
+5. Main.java / CliCommandParser.java：若改命令，必须同步测试和 README；仅涉及全局规则时同步 AGENTS。
 6. llm/*Client.java / LlmClientFactory.java：若改 provider，必须同步 .env.example、契约测试和文档。
 7. docs/dev 与架构文档：实现后更新行为、限制和图示。
 
 ## 6. 必须遵守的运行时约束
 
-- 默认 inline/plain 终端的普通顶层输入、`/react <任务>` 与 `/plan <任务>` 先持久化为 `runtime_executions`。CLI 经 RuntimeExecutionHost 只注册当前 workspace，顶层仍串行；Java 可信宿主可显式注册多个独立 workspace，默认最多 2 个并行，可配置 1～4，同 Session FIFO、同 workspace 仅一个顶层 Execution。Dispatcher 先预留容量、workspace slot 和已声明共享资源租约；Worker 取得 workspace mutationGate 与 Session lease 后才 claim 为 RUNNING。运行中仍可继续提交后续消息。Execution 首次 RUNNING 时才展开 @path/MCP resource，Router 只读取原始 `submittedInput` 与当时 Parent Session 的 Top-level Conversation，严格返回 REACT/PLAN，非取消性失败回退 ReAct。`/react` 与 `/plan` 是 one-turn override；Lanterna TUI、Runtime HTTP API 尚不接入 Host。
-- 运行中直接输入即追加到同一队列；等待 Plan/HITL 时，普通输入由 InteractionInputRouter 优先作为交互回答，非法审批输入不得自动批准或入队；必须先完成当前交互再提交新任务，pending 时 `/react`、`/plan` 新任务入口拒绝。`/task` 仅查询/取消/日志，不提供 add 子命令。CLI 输入循环是唯一终端输入所有者，Worker 经 InteractionBroker 等待回答。
-- Java Host 是进程内可信控制面：workspace 必须显式注册，Session 固定绑定目录；不从模型文本、MCP resource 或普通提交自动创建目录。`InteractionPresentationQueue` 为单终端串行展示跨 workspace 交互，回答核对 workspaceKey、executionId、interactionId；无交互适配时不能自动批准。默认 headless 工厂不自动创建 MCP Manager 或后台索引，CLI 工厂复用已有依赖；外部命令不具备容器级副作用隔离。
-- schema v2 用 workspace_key、owner_id、attempt 约束领取与迟到写入；owner 目录 catalog 和 OS 文件锁先于本 workspace 恢复，其他 workspace 的状态不可顺带恢复。迁移前 `VACUUM INTO` 备份 WAL 已提交内容，较新 schema 拒绝打开。Windows Java provider 缺少 fileKey 时目录身份退化为 file store 名称与创建时间，不能据此声称能抵御恶意目录替换。设计与当前验证门禁见 [docs/dev/42-multi-workspace-execution-scheduling.md](docs/dev/42-multi-workspace-execution-scheduling.md)。
-- SessionExecutionContextRegistry 独占每个 Session 的 writable SessionHandle、Agent、ParentConversationContext、MemoryManager 与 SkillContextBuffer；启动上下文收养、其他 Session 懒加载。ToolRegistry/MCP/Browser/HITL 的可变绑定限于所属 workspace，执行前重绑该 workspace 的 Session 协作者；已知共享 Git common-dir 采用整轮粗租约，其他非局部副作用须声明资源租约，未知资源拒绝多 workspace 并行。Worker 与 CLI Session/Runtime mutation 共用该 workspace 互斥锁，CLI 修改使用 tryLock 失败关闭。当前 UI 指针不负责关闭 handle；仅空闲、非当前且无 pending interaction 的 Context 可驱逐。EOF/shutdown 保留非终态 Execution 恢复，不提前写 SESSION_END；子执行器和快照 writer 未物理停止时保持 quarantine、slot、共享租约及 owner，后台任务不在进程退出后独立运行。
-- Planner、Mode Router 与 Reviewer 的 JSON 输出统一通过 LLM 层 `StructuredJsonExecutor` 校验：总尝试最多 2 次，首次语法/结构/业务约束失败只允许一次格式修复；Hunyuan/TokenHub 使用原生 JSON Schema，DeepSeek/Step 使用 JSON Object，未验证 Provider 不发送 `response_format`。兼容端点明确拒绝结构化参数时只回退普通 Chat 请求，本地校验仍必须通过。格式修复不得扩大工具、URL、路径或 HITL 权限；Reviewer 连续失败按不可用/拒绝处理，禁止用自然语言关键词猜测批准。
-- ReAct 与 PlanExecuteAgent（`/plan` 显式入口或 Router 选择，`FULL_PRESET`）都通过 executeTools()；同轮非 Browser Tool Call 先根据 tool name + arguments 在本地确定性推导资源 claim，冲突调用按原顺序分批、批内最多 4 个并发，结果仍按原始顺序归并。`execute_command` / `revert_turn` 按 workspace 写保守独占，无法安全解析的路径 claim 必须扩大范围而不能让 LLM 判断；Browser 批次继续整批串行。
-- 每批完成后重新推导剩余工具调用的资源；路径冲突须识别硬链接。可能人工改参的审批调用保守独占批次，统一 Web 须按实际 MCP 后端判断审批需求，最终参数执行完成后才能启动相邻调用；无需审批或已自动放行的普通调用仍按资源并行。组批后审批状态变化不得在并行区新开可改参审批，必须失败关闭并审计。
-- PlanExecuteAgent 的 DAG 就绪任务先经 `ConflictAwareBatchSelector` 按任务资源声明组批；资源冲突或 `workspaceWrite` 不得进入同一批次。任务完成前必须通过确定性证据门禁和可用的 Reviewer；失败重试耗尽进入 `UNVERIFIED`，不解锁后继。DIFF 使用 Task 初始 workspace baseline；durable Plan 只把相对路径、SHA-256 和可选 Side-Git task snapshot 引用写入 `plans.db`，SQLite 不持久化源码正文。启用步骤审核的写任务即使未要求 DIFF 也捕获基线；Reviewer 无工具，接收验收标准、执行证据及最多 48 KiB 的实际 unified patch。单文件文本最多 2 MiB、基线缓存总计 16 MiB；截断、二进制或旧正文缺失保持 UNVERIFIED，不解锁后继。旧 hash-only baseline 兼容恢复但不能据此批准缺失的 patch。Task snapshot 用独立 ref，不修改 Side-Git HEAD/index，暂随显式快照清理回收。
-- execute_command 的 typed 成功状态取自真实进程退出码，ToolExecutionResult.executedCommand 传播 HITL 改参后的实际命令；非零退出、超时、启动失败和取消不能形成 PASSED。TEST/BUILD 对相同完整实际命令保留最新结果，不同命令的未解决失败阻断门禁；明显跳过、仅收集测试、打印版本/帮助、dry-run 或掩盖失败的模式不能算 PASSED。分类只接受明确的字面单命令入口、目标与子命令，复合 shell 脚本不推断测试通过；退出码 0 不证明测试数量或断言充分性，Reviewer 仍须核对验收标准。workspaceWrite 的 tracker 保存/恢复遵守所属 SideGitManager 的实际 excludes，transient Plan 同样使用自定义排除规则。
-- CLI/TUI 的 `/plan` 会把 DAG 与 Task 状态 checkpoint 到 `~/.codeagent/plans/plans.db`；inline/plain 队列路径还通过 `execution_id` 绑定顶层 Runtime Execution。prompt 只表示任务内容，不作为恢复身份。同一 Session 同时最多一个 `CREATED/RUNNING` Plan；`/plan resume` 对 legacy active Plan 执行确定性收养并入队，`/plan abandon` 显式放弃。新 Plan 必须先严格写入 SQLite 才能进入执行和 Parent Conversation；恢复时已完成节点不重跑，上次 `RUNNING/REVIEWING` 节点转为 `INTERRUPTED` 后从 Task 边界重新执行。
-- ReAct 与 PlanExecuteAgent 共享同一个 ParentConversationContext，但只共享 Session 级顶层语义连续性；Planner 只读取 Top-level Conversation View，不读取 tool result、synthetic user、Skill/Memory 注入或 Task child transcript。Task Worker 仍使用独立 task-local messages；历史对话只用于语义理解，绝不能成为当前 Turn 的权限来源。
-- 工具授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard；策略拒绝不能通过换工具、provider 或分支绕过。
-- URL 只能来自顶层用户原文或成功 web_search 的结构化 discoveredUrls；AnySearchResultParser 可对固定 AnySearch MCP search 的完整结果格式进行严格解析，仅授信结果块的独立 URL 行，格式异常不授信。StepSearchResultParser 只可消费固定 Step MCP web_search 的 structuredContent.results[].url，不得解析普通 JSON 文本授信。普通搜索摘要、reasoning、其他工具输出和回复文本不能产生新授权。计划分支默认隔离 URL 凭据，只有声明的 DAG 后继可继承；步骤自动评审（stepReview）不改变这一步的授权继承。
-- 模型只暴露统一 `web_search` / `web_fetch`；默认 AnySearch MCP search/extract，按调用局部降级到 Step MCP web_search/web_fetch，与当前模型无关，无 SearchProvider 或 direct HTTP 门面。仅连接/超时、HTTP 5xx、未就绪等 BACKEND_UNAVAILABLE 且路由允许时降级一次；认证/额度/业务错误、策略/HITL拒绝和取消禁止换通道。主用与降级候选均纳入审批独占判断。ANYSEARCH_API_KEY 可选，Step降级使用 STEP_API_KEY 接入普通 API MCP（https://api.stepfun.com/v1/mcp/web_search/mcp）；显式同名 MCP 配置含 disabled 优先。旧 provider/direct/其他Web工具配置失败关闭，onUnavailable=fail可关闭降级。抓取审批改参后重新校验URL，正文不授信；远端重定向和DNS由MCP服务负责。
-- @path/MCP resource 展开在进入 Agent 前完成；项目外绝对路径和符号链接逃逸保持原文。
-- 写文件后按配置运行 LSP 诊断；诊断作为下一轮 user message 注入。CODEAGENT_LSP_ENABLED=false 可关闭。
-- 交互式 CLI 会同时启动已启用的 stdio/HTTP MCP Server；启动默认最多等待 8 秒，超时 server 保持 STARTING 并后台继续，用 /mcp 查看状态。Runtime API/后台 headless 路径不创建 McpServerManager。
-- /clear 只清空当前发送视图、session memory 预计算状态和 Skill buffer，长期记忆及 raw ledger 保留；/compact 手动执行完整摘要压缩。
-- RAG 只保留两类召回：SQLite FTS5 + BM25 词法检索、Qwen3-Embedding-0.6B FP32（1024 维）+ cosine 语义检索。模型通过固定 revision/hash 的显式安装脚本预装，运行时不自动下载；缺失/校验/推理错误仅降级语义层，local provider=bge 可回滚。双路查询统一保留语义原序、每四位补充词法，不按问句或标识符形状切换优先级；共同命中合并来源、每文件最多三条主片段，预算优先完整片段。语义候选池为max(topK*10,30)，共同pipeline先按旧max(topK*3,15)候选完成主片段融合预算，再仅利用剩余字符为已选文件追加最多两个完整语义chunk，标记context及起止行；所有查询均可在剩余预算内追加。search_code返回预算内完整正文，/search保持简短预览；两个入口统一默认Top10/16000正文字符，search_code显式top_k仍限定1–30，正文预算保持16000。Graph 不参与融合，符号/关系索引继续服务结构地图与 `/graph`。词法查询过滤通用问句词，先取全部词项匹配候选，不足时补充任一词项匹配候选并按 chunk 去重。实时精确定位继续由 `grep_code` / `glob_files` / `read_file` 承担，不进入 RAG。远程 Embedding 仅在当前项目/provider/model/endpoint/policy-version 匹配的显式授权后启用，拒绝或故障必须降级而不能中止 FTS 检索。
-- grep/RAG协作按用户动作与已有定位线索选择：混合问句可提取代码名称，search_code的query保留行为描述，lexical_query只作FTS软补充且最多占一半词法池，不硬过滤语义候选。空索引返回index_empty且不加载语义模型；候选文件经PathGuard与hash标记时效，片段与对应文件Hash在同一数据库monitor窗口取得、磁盘在锁外校验，不能拿同进程后台更新后的Hash验证旧正文；不保证全库新鲜，关键判断/修改前read_file核实当前源码。CLI及工具空结果保留诊断，不自动昂贵全库回填；base/Plan默认Top10/16000一致，避免重复正文，累计上下文复用既有token控制。
-- 长期记忆的唯一事实源为 `~/.codeagent/memory/memory.db`；每条 `MemoryEntry` 独立行持久化，写路径使用 SQLite WAL、`busy_timeout` 与事务，`store/confirm/supersede/delete/clear` 不得回退为整文件快照覆盖。旧 `long_term_memory.json` 只在无迁移标记时一次性事务导入，成功后 SQLite 成为唯一事实源并尝试保留 `.migrated.bak`。普通检索只读取当前 scope 可见的 active 记忆，使用词法 + 进程内 BGE 混合相关度，并按 `lastConfirmedAt` 应用下限 0.6、30 天半衰期的乘法衰减；legacy 缺失确认时间时回退 creation timestamp。embedding 仍只做进程内派生缓存且不得发送到远端。显式 `save_memory` / `/save` 写入统一解析 CREATE / DUPLICATE / SUPERSEDE；DUPLICATE 只刷新已有记忆的确认时间、不重复创建，普通 retrieval 不得自动确认；写入候选不应用时间衰减。embedding 只召回候选，SUPERSEDE 必须由无工具关系分类器返回当前 `submittedUserInput` 的原文 evidence，失败时不得让旧记忆失效。
-- DeepSeek/Kimi thinking 的 reasoning_content 必须回传下一轮；DeepSeek 当前不发送图片 block。usage 未经真实契约验证的 provider 必须保持 trusted=false 并使用本地完整估算。
-- Side-Git snapshot 独立于系统 git；revert 前先创建 pre-restore snapshot，并纳入 HITL/AuditLog。
-- raw session JSONL 可能含敏感内容：用户目录权限按平台收紧，禁止提交、复制或在报告中泄露正文、工具参数、结果、图片 payload、Memory 正文和 secret。
+本节只保留影响全局开发的边界；队列时序、数据库 schema、Provider 支持、检索参数和后台维护细节见对应模块文档。
 
-- 交互式 CLI（inline/plain/TUI）显式拥有 WorkspaceCodeIndexManager：启动 Hash 对账、递归监听去抖、300秒周期校准；词法先提交、向量异步补齐，搜索本身不触发全库回填。autoIndex.enabled=false、Runtime API、headless 不启动后台维护，索引更新由宿主显式调用底层接口；普通 ToolRegistry 构造不得创建维护线程。程序调用刷新共用协调器；不提供手动索引命令。单 JDBC Connection 的访问共享可重入门禁，推理锁外执行；写入受生命周期门禁、文件/chunk Hash 与任务/provider代次约束，旧任务不得覆盖新版本。部分扫描失败保留诊断和旧索引，只有词法成功确认的路径可补向量；不完整扫描禁止全局缺失删除。当前向量任务过期、源读取失败或条件提交拒绝先安排路径词法刷新，不能反复发现旧任务；已被新代次取代的任务不反向污染状态。背景远程任务按项目授权发送及提交前重验，不弹HITL；失败保留FTS且有限重试。退出停止维护，活动provider lease结束后释放，不在Session驱逐时关闭进程级索引。maintenance_state只表示已知待办，不保证全库实时新鲜。
+- inline/plain 顶层任务先持久化再执行，同 workspace 串行；普通运行中直接输入进入队列。pending 审批/计划评审时先完成当前交互，非法回答不得批准或入队；不保留 /task add。CLI 是唯一终端输入所有者。
+- 可信宿主显式注册 workspace，Session 状态独占；共享资源显式租约，未知非局部副作用拒绝并行。执行器未停止不得释放所有权，退出保留非终态执行用于恢复；headless 不隐式启动 MCP 或索引维护，外部命令不具备容器级隔离。
+- ReAct 与 Plan 共享顶层语义和基础设施，Task 使用独立上下文。历史、模型输出和子任务内容不能产生当前轮权限。
+- Planner、Router、Reviewer 统一使用结构化校验；修复不得扩大权限，评审失败或证据不足不能猜测批准、通过任务或解锁后继。实际命令和真实退出状态是执行证据，跳过测试、dry-run 或掩盖失败不算通过。
+- 工具经 executeTools()，结果保持输入顺序；资源冲突由本地确定性规则判断，审批可改参调用保守独占，不能在并行区新增可改参审批。授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard，策略拒绝不得换工具或 Provider 绕过。
+- URL 授权只来自顶层用户原文或成功搜索的可信结构化结果；摘要、reasoning、普通工具输出不能授权。项目外路径和符号链接逃逸不能通过资源展开获得授权。
+- 原始 session JSONL append-only，发送视图与原始账本分离；长期记忆只在用户明确要求或 /save 时写入，不自动提取或确认。禁止泄露 raw session、工具参数/结果、图片 payload、Memory 正文和 secret。
+- 精确定位用 glob/grep/read，关键判断和修改前读取当前源码；RAG 不替代实时定位，不自动全库回填，远程 Embedding 必须取得当前项目的显式授权。
+- 配置经 config 层统一读取，保持既定优先级；Provider 必须明确选择，不按其他密钥自动切换，未经验证的 usage 不标记可信，禁止回显密钥。
+- 系统数据统一经 CodeAgentPaths 派生，默认 ~/.codeagent，仅 codeagent.home / CODEAGENT_HOME 整体覆盖；生产路径不得自行拼 user.home 或恢复旧模块独立目录配置。用户任务产物属于 workspace；测试使用隔离目录并恢复属性，不写真实用户系统目录。
+- Side-Git 独立于系统 Git；恢复前创建快照并经 HITL/AuditLog。系统数据须排除在索引和项目快照之外，不宣称第三方进程所有副作用都位于统一根。
 
-- 启动模型通过 `CODEAGENT_PROVIDER`（或 `-Dcodeagent.provider`）明确选择一家，优先于 JSON `defaultProvider`；未设置时使用 JSON 默认项或 glm。所选 Provider 名称无效或对应密钥缺失时失败，不按其他密钥自动换家；运行中 `/model` 可显式切换。有效功能配置统一通过 config 层 `ConfigurationValues` 读取：Java 属性 > 进程环境变量 > 项目 `.env` > 用户 `.env` > 默认值；项目空赋值遮蔽用户 dotenv，同名首个赋值生效，不执行变量展开、不支持行内注释。Provider/Embedding 的 JSON 显式字段仍优先；Skill 与 autoIndex 保持现有目录/命令和 JSON 入口，LLM 超时重试保持 Java 属性。禁止回显密钥；同步本地 `.env` 必须保留已有有效值，不激活旧注释中的样例路径或密钥。
+相关实现按需阅读：
 
-- 系统数据唯一根目录由 config.CodeAgentPaths 管理，默认 user.home/.codeagent，唯一整体覆盖为 codeagent.home / CODEAGENT_HOME（沿用 ConfigurationValues 优先级，需重启）。生产路径不得自行拼 user.home 或读取旧模块 *_DIR/HISTORY_FILE 与 codeagent.rag.dir；Windows 缺盘符根路径/相对路径在创建前拒绝。配置、会话、Memory、RAG、Plan、Runtime、锁、日志、审计、快照、缓存、报告和默认模型安装均派生统一根。可信 Java 宿主显式 Path 注入保留；项目只读配置与用户任务产物仍属于 workspace。
-- Main 在日志和 native library 初始化前建立统一根/tmp，设置 JVM/SQLite 临时位置；MCP/命令进程标准临时变量和 npm 缓存跟随根，不改 HOME/USERPROFILE，不宣称外部副作用隔离。BetterHarness 默认报告在根/reports/better-harness/<workspace-hash>/<run-id>，inline 不落盘。根位于项目内时索引/Side-Git 排除系统数据；禁止把工作区或其父目录作为数据根。旧分散存储配置停用，不自动搬运或删除历史数据。测试不得写硬编码 /tmp、/Users 或真实用户系统目录；默认 test-data 与 @TempDir 隔离且恢复属性。
+- [运行时、队列、Session 与配置](docs/implementation/01-runtime-and-agent-foundation.md)
+- [工具、策略与恢复](docs/implementation/02-tools-policy-and-recovery.md)
+- [上下文、Memory 与 RAG](docs/implementation/03-context-memory-and-retrieval.md)
+- [MCP 与 Web](docs/implementation/04-mcp-and-web-integration.md)
+- [浏览器安全](docs/implementation/05-browser-session-and-guard.md)
+- [Skill 与 Prompt](docs/implementation/06-skills-and-prompt-assembly.md)
+- [终端渲染与输入](docs/implementation/07-terminal-rendering-and-input.md)
+- [Runtime API](docs/implementation/08-runtime-api.md)
+- [验证与评测](docs/implementation/09-verification-and-evaluation.md)
 
 ## 7. 命令与文档联动门禁
 
-新增、删除或修改 /xxx 时必须同时检查：Main.java、CliCommandParser.java、相关 parser/completer、测试、README、AGENTS。未知斜杠命令必须在 CLI 层报错，不能回退给 Agent。
+新增、删除或修改 /xxx 时必须同时检查：Main.java、CliCommandParser.java、相关 parser/completer、测试、README；仅涉及全局规则时更新 AGENTS。未知斜杠命令必须在 CLI 层报错，不能回退给 Agent。
 
-改工具集时必须同步 ToolRegistry、Agent/Plan/SubAgent 提示词、HITL/Policy、审计和测试。修改 PipelineOptions 预设语义时，必须同步 /plan 的入口接线、MainPlanAgentFactoryTest 与本文档第 6 节。改 MCP、Web、Browser、Memory、Prompt、Renderer 时，分别同步对应包、配置示例、文档和回归测试。
+改工具集时必须同步 ToolRegistry、Agent/Plan/SubAgent 提示词、HITL/Policy、审计和测试。修改 PipelineOptions 预设语义时，必须同步 /plan 的入口接线、MainPlanAgentFactoryTest 及相关运行时实现文档；涉及全局约束时同步本文档第 6 节。改 MCP、Web、Browser、Memory、Prompt、Renderer 时，分别同步对应包、配置示例、文档和回归测试。
 
 ## 8. 验证矩阵
 
@@ -222,6 +215,11 @@ TUI：mvn test -Pphase16-smoke
 ### 分支、提交与文档约束
 
 - 正常情况下实现功能时，应从最新的 `main` 创建新的功能分支并在该分支开发；默认不使用 Git worktree。只有用户明确要求，或确有隔离开发的必要并已说明原因时，才可创建 worktree；属于当前任务的非危险操作无需另行征求同意。
+- 从远端主分支创建功能/修复/文档分支时，必须使用 `git switch --no-track -c <分支名> origin/main` 或等效的不继承上游方式；`origin/main` 只作为起点，不得成为该分支的 upstream。首次推送前允许无 upstream；建立后必须是同名远端分支。
+- 创建或切换开发分支后，以及每次提交/推送前，必须核对 `git branch --show-current`、`git status --short --branch` 和 upstream（`git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'`）。当前分支为 `main`、upstream 指向 `origin/main` 或其他非同名分支时，不得继续功能提交/推送；先纠正本地分支或取消错误 upstream，再重新检查。取消 upstream 不代表已经撤销远端改动。
+- 用户授权“提交”只允许本地 commit；授权“推送功能分支”只允许更新同名远端分支，均不隐含直接更新远端 `main`。功能变更应先推送功能分支，再经 Pull Request 合并；未经用户明确指定远端 `main` 及具体操作，不得向其直接推送、回滚或改写历史。
+- 推送必须使用明确的远端和目标 ref：`git push --set-upstream origin HEAD:refs/heads/<当前功能分支名>`（后续推送也明确使用同一目标 ref）。禁止依赖默认 upstream、push.default、IDE 默认目标或使用裸 `git push` / `git push origin`。推送前执行同目标的 `git push --dry-run origin HEAD:refs/heads/<当前功能分支名>`，核对实际目标；分支、upstream、授权范围或目标 ref 不一致时停止推送，不得猜测。
+- 推送后核对远端同名分支的提交 SHA；普通功能推送还须确认远端 `main` 未被本次操作更新。发现误推时先报告事实和修复方案，不得自行执行远端撤销或强制推送；修复必须取得覆盖具体目标和操作的明确授权。
 - 未经用户明确允许，不得代替用户执行 `git commit`、`git push`、创建 Pull Request 或合并分支。完成改动后应保留为未提交状态，并向用户报告变更与验证结果。
 - 编写项目开发文档时，必须遵守本文件规定的流程、模板、证据和图示要求；开发方案及实现说明统一放在 `docs/dev/` 目录，不得自行放置到其他目录。新建 `docs/dev/` 文档前先检查该目录已有编号，以当前最大编号加一作为新编号，使用两位数字前缀（如 `42-...` 后新建 `43-...`）；不得复用缺失编号或另起编号序列。若本任务已有可承载文档，应更新原文档，不为编号顺延而重复新建。
 - 开发方案必须详尽到实现者无需重新猜测关键设计即可直接依文档实施和验收：记录源码勘探基线及相关文件/类型/方法证据，明确目标、非目标、模块边界、接口与数据结构、状态迁移、关键时序、权限与资源边界、并发和锁顺序、失败路径、恢复行为、兼容/迁移/回滚策略；将工作拆成有依赖顺序的实现任务，逐项列出预期文件落点、先写的测试、验证命令及可观察的通过条件。验收项应可判定，不能只写“实现功能”“测试通过”等泛化描述。源码或外部条件尚不能确定时，明确记录待核实项、验证方式和继续实施的门槛，不得把假设写成既定事实。
@@ -241,3 +239,11 @@ TUI：mvn test -Pphase16-smoke
 - 涉及数字、人物、版本、外部行为或关键结论时，尽量核对源码、测试、官方文档或其他可追溯来源，并说明证据边界。
 - 与用户意见不一致时，说明不同意的依据、潜在风险和至少一种替代解释或可行方案；不要只给结论，不做无依据的反驳。
 - 主动提醒可能被忽略的变量、隐性成本、兼容性影响、失败路径、样本偏差和确认偏误；信息不足时明确说明不确定性及需要补证的内容。
+
+## 11. 本文件的维护边界
+
+- 开发流程、方案模板、设计评审要求、交付检查和协作授权是本文件的核心规范，不能以精简篇幅为由删除或降低要求。清理冗余应优先清理模块实现细节和同义重复；修改用户明确制定的规范须有相应授权。
+- 仅长期开发规则、全局架构/安全边界或阅读入口变化时更新 AGENTS；普通功能、命令或配置行为变化不自动要求更新本文件。
+- 不向本文件追加 Provider 支持矩阵、检索公式、预算/周期、SQL/schema、具体锁时序、修复经过、评测结果或临时方案。模块实现更新 docs/implementation，任务设计与实施记录更新对应 docs/dev，使用说明更新 README，演进状态更新 ROADMAP。
+- 新增规则前检查是否已有对应条款；优先修改原条款，不不断追加同义要求。跨入口只同步必要的规则变化，不为每次功能改造复制实现正文。
+- 若“实现细节”同时包含安全或架构约束，保留约束本身并链接详细说明，不随细节一并删除。

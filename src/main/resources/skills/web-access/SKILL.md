@@ -82,11 +82,7 @@ curl -s 'https://r.jina.ai/https://example.com/article'
 
 `references/site-patterns/<domain>.md` 按域名累积已知陷阱与有效模式。
 
-**用法**：确定目标站点后先列目录看有没有命中：
-
-```bash
-ls ~/.codeagent/skills-cache/web-access/references/site-patterns/
-```
+**用法**：确定目标站点后，从 `load_skill` 返回的实际 Skill 目录列出 `references/site-patterns/` 看有没有命中。默认内置目录为 `~/.codeagent/skills-cache/web-access/`；设置 `CODEAGENT_HOME` 后跟随统一数据根，不能硬编码用户主目录。
 
 命中的话先 `read_file` 读对应文件，把"已知陷阱"和"有效模式"作为先验。已有：
 
@@ -97,7 +93,7 @@ ls ~/.codeagent/skills-cache/web-access/references/site-patterns/
 - `github.com.md`（GitHub）
 - `juejin.cn.md`（掘金）
 
-**写回机制**：操作中如果发现新站点的陷阱或有效模式，主动写到 `~/.codeagent/skills/web-access/references/site-patterns/<domain>.md`（用户级目录，不要写 jar 内置缓存），格式参考已有文件。
+**写回机制**：操作中如果发现新站点的陷阱或有效模式，主动写到统一数据根下 `skills/web-access/references/site-patterns/<domain>.md`（默认 `~/.codeagent/`，由 `CODEAGENT_HOME` 整体覆盖；用户级目录，不要写 jar 内置缓存），格式参考已有文件。
 
 ## CDP 工具速查
 
@@ -120,4 +116,4 @@ navigate_page → wait_for（等关键元素出现）→ take_snapshot → 抽�
 - 不要默认 `take_screenshot`：截图比 DOM 文本更贵，先用 snapshot；只有视觉问题再截图
 - 不要为了"全面"在敏感页面批量操作：每个改写型操作都强制审批，会卡住流程
 - 不要替用户输用户名密码：CodeAgent 不做自动登录
-- 不要把 references/ 写回 jar 缓存目录：写到 `~/.codeagent/skills/web-access/references/site-patterns/` 用户级目录
+- 不要把 references/ 写回 jar 缓存目录：写到统一数据根下 `skills/web-access/references/site-patterns/` 用户级目录

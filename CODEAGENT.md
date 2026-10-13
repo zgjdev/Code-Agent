@@ -19,6 +19,8 @@ CodeAgent 是面向商业使用的 Java Agent CLI 产品，对标 Claude Code；
 
 ## Things That Will Bite You
 
+- 普通运行中直接输入任务会排队串行执行，不补入当前任务。等待审批/计划评审时先处理当前交互，再提交新任务；`/react`、`/plan` 也不能在 pending 时追加。`/task` 只查询、取消和查看日志，add 子命令已移除。
+
 - 交互式 CLI 默认进程内自动维护代码索引（启动对账、监听去抖、周期校准，词法先更新/向量补齐）；`autoIndex.enabled=false` 关闭后台维护，仅查询已有索引。检索自身不全库回填。Runtime API/headless 不隐式创建维护线程，由宿主显式调用底层刷新接口；后台服务不占 Session lease，不自动授权远程 Embedding。
 - 默认 headless workspace 工厂不启动 MCP Manager 或后台索引，并拒绝后来出现的未声明 MCP/Browser 可变绑定。共享 Git common-dir 使用整轮粗租约；其他非局部副作用需要显式资源租约，外部命令没有容器隔离。Host 是可信进程内控制面，不从普通输入自动注册目录；交互回答核对 workspaceKey、executionId、interactionId。owner 文件锁先于局部恢复，owner/attempt 阻止迟到写入；子执行器和快照未 drain 时不得释放工作区所有权。
 

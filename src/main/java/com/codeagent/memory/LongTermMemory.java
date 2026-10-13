@@ -1,5 +1,7 @@
 package com.codeagent.memory;
 
+import com.codeagent.config.CodeAgentPaths;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,8 +23,6 @@ import java.util.stream.Collectors;
  */
 public class LongTermMemory implements Memory {
     private static final Logger log = LoggerFactory.getLogger(LongTermMemory.class);
-    private static final String STORAGE_DIR_PROPERTY = "codeagent.memory.dir";
-    private static final String STORAGE_DIR_ENV = "CODEAGENT_MEMORY_DIR";
 
     private final SqliteLongTermMemoryRepository repository;
 
@@ -212,14 +212,7 @@ public class LongTermMemory implements Memory {
     }
 
     private static File resolveStorageDir() {
-        String configuredDir = System.getProperty(STORAGE_DIR_PROPERTY);
-        if (configuredDir == null || configuredDir.isBlank()) {
-            configuredDir = System.getenv(STORAGE_DIR_ENV);
-        }
-        if (configuredDir != null && !configuredDir.isBlank()) {
-            return new File(configuredDir);
-        }
-        return new File(new File(System.getProperty("user.home"), ".codeagent"), "memory");
+        return CodeAgentPaths.resolve("memory").toFile();
     }
 
     private IllegalStateException readFailure(SQLException e) {

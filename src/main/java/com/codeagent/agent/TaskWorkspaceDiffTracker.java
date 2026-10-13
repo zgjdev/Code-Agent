@@ -46,6 +46,7 @@ public final class TaskWorkspaceDiffTracker {
     private static final int MAX_REVIEW_PATCH_BYTES = 48 * 1024;
 
     private final Path projectRoot;
+    private final Path dataRoot = com.codeagent.config.CodeAgentPaths.root();
     private final TaskResourceClaims claims;
     private final List<ExcludeRule> excludeRules;
     private final Map<String, FileSnapshot> baseline;
@@ -376,6 +377,7 @@ public final class TaskWorkspaceDiffTracker {
     }
 
     private boolean isExcluded(String relative) throws IOException {
+        if (projectRoot.resolve(relative).normalize().startsWith(dataRoot)) return true;
         String normalized = relative.replace('\\', '/');
         for (ExcludeRule rule : excludeRules) {
             if (rule.matches(normalized)) {

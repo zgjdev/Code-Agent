@@ -1,5 +1,7 @@
 package com.codeagent.plan;
 
+import com.codeagent.config.CodeAgentPaths;
+
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -46,14 +48,7 @@ public final class PlanStateStore {
     }
 
     public static PlanStateStore openDefault() throws SQLException {
-        String configured = System.getProperty("codeagent.plan.dir");
-        if (configured == null || configured.isBlank()) {
-            configured = System.getenv("CODEAGENT_PLAN_DIR");
-        }
-        if (configured == null || configured.isBlank()) {
-            configured = Path.of(System.getProperty("user.home"), ".codeagent", "plans").toString();
-        }
-        return new PlanStateStore(Path.of(configured).resolve("plans.db"));
+        return new PlanStateStore(CodeAgentPaths.resolve("plans/plans.db"));
     }
 
     public Path dbPath() {

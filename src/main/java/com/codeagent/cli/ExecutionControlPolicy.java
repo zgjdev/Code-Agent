@@ -38,4 +38,8 @@ final class ExecutionControlPolicy {
             case SESSION_MUTATION, RUNTIME_MUTATION, DENIED -> false;
         };
     }
+
+    static boolean allowedWhileInteractionPending(CliCommandParser.CommandType type) {
+        return classify(type) != Category.TASK_INPUT;
+    }
 }

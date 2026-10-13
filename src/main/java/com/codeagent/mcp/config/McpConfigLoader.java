@@ -1,5 +1,7 @@
 package com.codeagent.mcp.config;
 
+import com.codeagent.config.CodeAgentPaths;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
@@ -26,7 +28,7 @@ public class McpConfigLoader {
 
     public McpConfigLoader(Path projectDir) {
         this(
-                Path.of(System.getProperty("user.home"), ".codeagent", "mcp.json"),
+                CodeAgentPaths.resolve("mcp.json"),
                 projectDir.resolve(".codeagent").resolve("mcp.json"),
                 projectDir
         );

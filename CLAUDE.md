@@ -147,7 +147,7 @@ sequenceDiagram
 
 ## 6. 必须遵守的运行时约束
 
-- inline/plain 普通输入、`/react <任务>`、`/plan <任务>`、`/task add <任务>` 共用 runtime_executions 队列；运行中可直接输入追加任务，等待 Plan/HITL 时普通输入先作为交互回答，`/task add` 显式入队。Worker 不读终端，同 workspace 顶层串行、同 Session FIFO，任务开始时读取最新 Session 上下文。
+- inline/plain 普通输入、`/react <任务>`、`/plan <任务>` 共用 runtime_executions 队列；运行中可直接输入追加任务，等待 Plan/HITL 时普通输入先作为交互回答，须先完成当前交互再提交新任务；pending 时显式 `/react`、`/plan` 新任务也拒绝。`/task` 仅查询/取消/日志，不再提供 add。Worker 不读终端，同 workspace 顶层串行、同 Session FIFO，任务开始时读取最新 Session 上下文。
 - SessionExecutionContextRegistry 管理 writable handle、独立 Agent/ParentConversationContext/MemoryManager/SkillContextBuffer；共享 ToolRegistry 绑定由进程级单 lease 和 CLI mutation 互斥锁保护。EOF/shutdown 保留非终态任务供恢复；API、Lanterna TUI 尚未接入统一队列。详细生命周期、Plan execution_id 与恢复限制见 AGENTS.md 第 6 节。
 - ReAct 与 PlanExecuteAgent（`/plan` 入口，`FULL_PRESET`）都通过 executeTools()，默认最多 4 个并发，结果按原始顺序归并。
 - 工具授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard；策略拒绝不能通过换工具、provider 或分支绕过。

@@ -88,6 +88,24 @@ class MainBrowserCommandTest {
         assertTrue(result.contains("/browser connect"));
     }
 
+    @Test
+    void chromeHintUsesUnifiedCacheWithQuotedPath(@TempDir Path tempDir) throws Exception {
+        String previous = System.getProperty("codeagent.home");
+        try {
+            Path root = tempDir.resolve("data with spaces");
+            System.setProperty("codeagent.home", root.toString());
+            var method = Main.class.getDeclaredMethod("chromeLaunchHelp", int.class);
+            method.setAccessible(true);
+            String help = (String) method.invoke(null, 9222);
+            assertTrue(help.contains(root.resolve("cache/chrome-profile").toString()));
+            assertFalse(help.contains("/tmp/"));
+            assertFalse(help.contains("%TEMP%"));
+        } finally {
+            if (previous == null) System.clearProperty("codeagent.home");
+            else System.setProperty("codeagent.home", previous);
+        }
+    }
+
     private static final class Harness {
         private final BrowserSession session = new BrowserSession();
         private final BrowserConnectivityCheck connectivity = new BrowserConnectivityCheck();

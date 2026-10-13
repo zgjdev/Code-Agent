@@ -267,7 +267,11 @@ final class CliCommandParser {
         }
 
         if (trimmed.regionMatches(true, 0, "/task ", 0, 6)) {
-            return new ParsedCommand(CommandType.TASK, trimmed.substring(6).trim());
+            String payload = trimmed.substring(6).trim();
+            if (payload.split("\\s+", 2)[0].equalsIgnoreCase("add")) {
+                return new ParsedCommand(CommandType.UNKNOWN_COMMAND, trimmed);
+            }
+            return new ParsedCommand(CommandType.TASK, payload);
         }
 
         if (trimmed.equalsIgnoreCase("/skill") || trimmed.equalsIgnoreCase("/skill list")) {

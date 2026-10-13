@@ -1,6 +1,7 @@
 package com.codeagent.rag;
 
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -29,10 +30,18 @@ class CodeIndexTest {
 
     @TempDir
     Path tempDir;
+    private String previousRoot;
+
+    @BeforeEach
+    void isolateRoot() {
+        previousRoot = System.getProperty("codeagent.home");
+        System.setProperty("codeagent.home", tempDir.toString());
+    }
 
     @AfterEach
     void clearRagDirectoryOverride() {
-        System.clearProperty("codeagent.rag.dir");
+        if (previousRoot == null) System.clearProperty("codeagent.home");
+        else System.setProperty("codeagent.home", previousRoot);
     }
 
     @Test
@@ -47,7 +56,7 @@ class CodeIndexTest {
 
     @Test
     void testIndexCurrentProject() {
-        System.setProperty("codeagent.rag.dir", tempDir.toString());
+        System.setProperty("codeagent.home", tempDir.toString());
         try (FakeEmbeddingClient client = new FakeEmbeddingClient();
              CodeIndex indexer = new CodeIndex(client)) {
             CodeIndex.IndexResult result = indexer.index("src/test/resources/rag");
@@ -58,7 +67,7 @@ class CodeIndexTest {
 
     @Test
     void reportsProgressThroughListener() {
-        System.setProperty("codeagent.rag.dir", tempDir.toString());
+        System.setProperty("codeagent.home", tempDir.toString());
         List<String> messages = new ArrayList<>();
         try (FakeEmbeddingClient client = new FakeEmbeddingClient();
              CodeIndex indexer = new CodeIndex(client, messages::add)) {

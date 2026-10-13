@@ -32,7 +32,7 @@ tags: [harness, review, workflow]
 没有证据的行为标记为 unobserved，不得编造成缺陷或分数。一次检查通过只能证明措施被
 执行过，只有后续可比较的 Task Episode 才能证明工作闭环得到改善。
 
-默认只允许确定性的报告文件写入 `.codeagent/better-harness/`。项目修改、外部写入、
+默认只允许确定性的报告文件写入统一数据根的 `reports/better-harness/<workspace-hash>/`。项目修改、外部写入、
 Memory 正文、用户目录资产、历史原始会话和其他 provider 都需要单独授权。
 
 方法来源：QoderAI/better-harness，MIT License。

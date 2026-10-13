@@ -10,11 +10,12 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class RuntimeExecutionTaskCommandFormatterTest {
 
     @Test
-    void addListLogAndCancelUseRuntimeExecutionStore(@TempDir Path tempDir) throws Exception {
+    void rejectsAddButListLogAndCancelUseRuntimeExecutionStore(@TempDir Path tempDir) throws Exception {
         Path workspace = java.nio.file.Files.createDirectory(tempDir.resolve("workspace"));
         java.util.concurrent.locks.ReentrantLock gate = new java.util.concurrent.locks.ReentrantLock();
         gate.lock();
@@ -23,11 +24,13 @@ class RuntimeExecutionTaskCommandFormatterTest {
                      store, workspace, (execution, token) -> TopLevelExecutionResult.succeeded("done"), () -> !gate.isLocked())) {
             scheduler.start();
             RuntimeExecutionQueue queue = new RuntimeExecutionQueue(store, scheduler, workspace);
-            String added = TaskCommandFormatter.handle(
+            String rejected = TaskCommandFormatter.handle(
                     queue, "session-1", "add inspect project");
-            String id = store.list(workspace, 1).get(0).id();
+            assertTrue(rejected.contains("未知 /task 子命令"));
+            assertFalse(rejected.contains("/task add"));
+            assertTrue(store.list(workspace, 20).isEmpty());
+            String id = queue.submit("session-1", "inspect project", null).id();
 
-            assertTrue(added.contains(id));
             assertTrue(TaskCommandFormatter.handle(
                     queue, "session-1", "list").contains("inspect project"));
             assertTrue(TaskCommandFormatter.handle(
@@ -35,5 +38,15 @@ class RuntimeExecutionTaskCommandFormatterTest {
             assertTrue(TaskCommandFormatter.handle(
                     queue, "session-1", "cancel " + id).contains("已请求取消"));
         } finally { gate.unlock(); }
+    }
+
+    @Test
+    void legacyFormatterCannotEnqueueAdd(@TempDir Path tempDir) throws Exception {
+        try (var manager = new DurableTaskManager(tempDir.resolve("tasks.db"), task -> "done", 1)) {
+            String rejected = TaskCommandFormatter.handle(manager, "add inspect project");
+            assertTrue(rejected.contains("未知 /task 子命令"));
+            assertFalse(rejected.contains("/task add"));
+            assertTrue(manager.list(20).isEmpty());
+        }
     }
 }

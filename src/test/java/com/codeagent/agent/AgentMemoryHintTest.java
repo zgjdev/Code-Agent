@@ -22,8 +22,8 @@ class AgentMemoryHintTest {
 
     @Test
     void explicitChromeRememberRequestStoresSitePreferenceInLongTermMemory() {
-        String oldMemoryDir = System.getProperty("codeagent.memory.dir");
-        System.setProperty("codeagent.memory.dir", tempDir.toString());
+        String oldMemoryDir = System.getProperty("codeagent.home");
+        System.setProperty("codeagent.home", tempDir.toString());
         try {
             StubGLMClient llmClient = new StubGLMClient(List.of(
                     new LlmClient.ChatResponse("assistant", "已打开链接。", null, 20, 10),
@@ -43,9 +43,9 @@ class AgentMemoryHintTest {
             assertEquals("global", agent.getMemoryManager().getLongTermMemory().getAll().get(0).getMetadata().get("scope"));
         } finally {
             if (oldMemoryDir == null) {
-                System.clearProperty("codeagent.memory.dir");
+                System.clearProperty("codeagent.home");
             } else {
-                System.setProperty("codeagent.memory.dir", oldMemoryDir);
+                System.setProperty("codeagent.home", oldMemoryDir);
             }
         }
     }

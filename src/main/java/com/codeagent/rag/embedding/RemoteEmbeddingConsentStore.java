@@ -1,7 +1,5 @@
 package com.codeagent.rag.embedding;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -35,7 +33,7 @@ public final class RemoteEmbeddingConsentStore {
     private final Object lock = new Object();
 
     public RemoteEmbeddingConsentStore() {
-        this(CodeAgentPaths.resolve("rag/remote-consents.json"));
+        this(Path.of(System.getProperty("user.home"), ".codeagent", "rag", "remote-consents.json"));
     }
 
     public RemoteEmbeddingConsentStore(Path file) {

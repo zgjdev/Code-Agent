@@ -1,7 +1,5 @@
 package com.codeagent.prompt;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -27,7 +25,7 @@ public class PromptRepository {
     }
 
     public static PromptRepository createDefault() {
-        Path home = CodeAgentPaths.resolve("prompts");
+        Path home = Path.of(System.getProperty("user.home"), ".codeagent", "prompts");
         Path project = Path.of(".codeagent", "prompts").toAbsolutePath().normalize();
         return new PromptRepository(home, project);
     }

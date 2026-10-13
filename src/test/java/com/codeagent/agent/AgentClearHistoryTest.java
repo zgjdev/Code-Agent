@@ -25,8 +25,8 @@ class AgentClearHistoryTest {
 
     @Test
     void clearHistoryRebuildsSystemPromptAndDropsPendingSkillContext() {
-        String oldMemoryDir = System.getProperty("codeagent.home");
-        System.setProperty("codeagent.home", tempDir.toString());
+        String oldMemoryDir = System.getProperty("codeagent.memory.dir");
+        System.setProperty("codeagent.memory.dir", tempDir.toString());
         try {
             RecordingClient llmClient = new RecordingClient(List.of(
                     new LlmClient.ChatResponse("assistant", "ok", null, 50_000, 1_000)
@@ -57,17 +57,17 @@ class AgentClearHistoryTest {
                     "status ctx should reflect the cleared conversation instead of the previous LLM usage");
         } finally {
             if (oldMemoryDir == null) {
-                System.clearProperty("codeagent.home");
+                System.clearProperty("codeagent.memory.dir");
             } else {
-                System.setProperty("codeagent.home", oldMemoryDir);
+                System.setProperty("codeagent.memory.dir", oldMemoryDir);
             }
         }
     }
 
     @Test
     void systemPromptStaysIdenticalAcrossTurnsWhileRetrievedMemoryVaries() {
-        String oldMemoryDir = System.getProperty("codeagent.home");
-        System.setProperty("codeagent.home", tempDir.toString());
+        String oldMemoryDir = System.getProperty("codeagent.memory.dir");
+        System.setProperty("codeagent.memory.dir", tempDir.toString());
         try {
             RecordingClient llmClient = new RecordingClient(List.of(
                     new LlmClient.ChatResponse("assistant", "ok", null, 50_000, 1_000),
@@ -93,9 +93,9 @@ class AgentClearHistoryTest {
                     "the previous request must remain a verbatim cache prefix of the next one");
         } finally {
             if (oldMemoryDir == null) {
-                System.clearProperty("codeagent.home");
+                System.clearProperty("codeagent.memory.dir");
             } else {
-                System.setProperty("codeagent.home", oldMemoryDir);
+                System.setProperty("codeagent.memory.dir", oldMemoryDir);
             }
         }
     }

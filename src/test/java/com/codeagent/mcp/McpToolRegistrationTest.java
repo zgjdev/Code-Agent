@@ -122,15 +122,15 @@ class McpToolRegistrationTest {
     }
 
     private static void withAuditDir(Path tempDir, ThrowingRunnable body) throws Exception {
-        String previous = System.getProperty("codeagent.home");
-        System.setProperty("codeagent.home", tempDir.resolve("audit").toString());
+        String previous = System.getProperty("codeagent.audit.dir");
+        System.setProperty("codeagent.audit.dir", tempDir.resolve("audit").toString());
         try {
             body.run();
         } finally {
             if (previous == null) {
-                System.clearProperty("codeagent.home");
+                System.clearProperty("codeagent.audit.dir");
             } else {
-                System.setProperty("codeagent.home", previous);
+                System.setProperty("codeagent.audit.dir", previous);
             }
         }
     }

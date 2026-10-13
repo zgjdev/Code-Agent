@@ -1,7 +1,5 @@
 package com.codeagent.snapshot;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import com.codeagent.config.ConfigurationValues;
 
 import java.nio.file.Path;
@@ -30,7 +28,8 @@ public record SnapshotConfig(
 
     public static SnapshotConfig fromEnvironment() {
         boolean enabled = readBoolean("codeagent.snapshot.enabled", "CODEAGENT_SNAPSHOT_ENABLED", true);
-        Path root = CodeAgentPaths.resolve("snapshots");
+        Path root = Path.of(readString("codeagent.snapshot.dir", "CODEAGENT_SNAPSHOT_DIR",
+                Path.of(System.getProperty("user.home"), ".codeagent", "snapshots").toString()));
         int max = readInt("codeagent.snapshot.max", "CODEAGENT_SNAPSHOT_MAX", 50);
         List<String> excludes = mergeExcludes(readString("codeagent.snapshot.excludes", "CODEAGENT_SNAPSHOT_EXCLUDES", ""));
         return new SnapshotConfig(enabled, root, Math.max(1, max), excludes);

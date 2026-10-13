@@ -1,7 +1,6 @@
 param(
     [string]$SourceDirectory,
-    [string]$CodeAgentHome,
-    [switch]$ResolveOnly
+    [string]$Destination = (Join-Path $env:USERPROFILE '.codeagent\models\qwen3-embedding-0.6b\c25a394dd583836952667c12f008335071b3f43d')
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -11,44 +10,7 @@ $artifacts = @(
     @{name='model.onnx_data'; remote='onnx/model.onnx_data'; sha='f0a61604465929a27e68aa6217c8c89ec6186572f0209fdb7711adda48a9b9a9'},
     @{name='tokenizer.json'; remote='tokenizer.json'; sha='def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a'}
 )
-# Same root precedence as the CLI (the parameter corresponds to the Java property override).
-$profileDirectory = [Environment]::GetFolderPath('UserProfile')
-function Read-CodeAgentHome([string]$file) {
-    if (Test-Path -LiteralPath $file -PathType Leaf) {
-        foreach ($line in [IO.File]::ReadAllLines($file)) {
-            if ($line -match '^\s*CODEAGENT_HOME\s*=(.*)$') {
-                return @{ Found = $true; Value = $Matches[1].Trim() }
-            }
-        }
-    }
-    return @{ Found = $false; Value = '' }
-}
-if ([string]::IsNullOrWhiteSpace($CodeAgentHome)) {
-    $CodeAgentHome = $env:CODEAGENT_HOME
-    if ([string]::IsNullOrWhiteSpace($CodeAgentHome)) {
-        $projectValue = Read-CodeAgentHome (Join-Path (Get-Location).Path '.env')
-        $userValue = Read-CodeAgentHome (Join-Path $profileDirectory '.env')
-        if ($projectValue.Found) { $CodeAgentHome = $projectValue.Value }
-        elseif ($userValue.Found) { $CodeAgentHome = $userValue.Value }
-    }
-}
-if ([string]::IsNullOrWhiteSpace($CodeAgentHome)) {
-    $CodeAgentHome = Join-Path $profileDirectory '.codeagent'
-} else {
-    $CodeAgentHome = $CodeAgentHome.Trim()
-    if ($CodeAgentHome -eq '~') { $CodeAgentHome = $profileDirectory }
-    elseif ($CodeAgentHome.StartsWith('~/') -or $CodeAgentHome.StartsWith('~\')) {
-        $CodeAgentHome = Join-Path $profileDirectory $CodeAgentHome.Substring(2)
-    }
-}
-$windowsPaths = [IO.Path]::DirectorySeparatorChar -eq '\'
-if (-not [IO.Path]::IsPathRooted($CodeAgentHome) -or
-    ($windowsPaths -and $CodeAgentHome -notmatch '^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))')) {
-    throw 'CODEAGENT_HOME must be a fully qualified absolute path or ~/ path.'
-}
-$dataRoot = [IO.Path]::GetFullPath($CodeAgentHome)
-$modelDestination = Join-Path (Join-Path (Join-Path $dataRoot 'models') 'qwen3-embedding-0.6b') $revision
-if ($ResolveOnly) { Write-Output $modelDestination; return }
+$modelDestination = [IO.Path]::GetFullPath($Destination)
 New-Item -ItemType Directory -Force -Path $modelDestination | Out-Null
 foreach ($artifact in $artifacts) {
     $target = Join-Path $modelDestination $artifact.name

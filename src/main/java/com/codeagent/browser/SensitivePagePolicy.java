@@ -1,7 +1,5 @@
 package com.codeagent.browser;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -31,7 +29,7 @@ public class SensitivePagePolicy {
     private final List<Rule> rules;
 
     public SensitivePagePolicy() {
-        this(CodeAgentPaths.resolve("sensitive_patterns.txt"));
+        this(Path.of(System.getProperty("user.home"), ".codeagent", "sensitive_patterns.txt"));
     }
 
     public SensitivePagePolicy(Path userRulesFile) {

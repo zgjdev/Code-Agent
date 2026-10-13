@@ -201,7 +201,6 @@ public final class BetterHarnessEvidenceCollector {
 
     private List<String> inventoryFiles(int limit) throws IOException {
         List<String> files = new ArrayList<>();
-        Path dataRoot = com.codeagent.config.CodeAgentPaths.root();
         Files.walkFileTree(workspace, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
@@ -209,8 +208,7 @@ public final class BetterHarnessEvidenceCollector {
                         && SKIPPED_DIRECTORIES.contains(dir.getFileName().toString())) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
-                if (dir.startsWith(dataRoot)
-                        || dir.startsWith(workspace.resolve(".codeagent").resolve("better-harness"))) {
+                if (dir.startsWith(workspace.resolve(".codeagent").resolve("better-harness"))) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 return files.size() >= limit

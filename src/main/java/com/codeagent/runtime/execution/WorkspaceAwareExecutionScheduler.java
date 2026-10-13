@@ -1,7 +1,5 @@
 package com.codeagent.runtime.execution;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import com.codeagent.runtime.CancellationContext;
 import com.codeagent.runtime.CancellationToken;
 import com.codeagent.runtime.interaction.ExecutionInteractionContext;
@@ -53,7 +51,7 @@ public final class WorkspaceAwareExecutionScheduler implements AutoCloseable {
         this.legacyRunner = legacyRunner;
         this.legacyGate = legacyGate;
     }
-    static Path defaultLocks() { return CodeAgentPaths.resolve("runtime/locks"); }
+    static Path defaultLocks() { return Path.of(System.getProperty("user.home"), ".codeagent", "runtime", "locks"); }
 
     synchronized void register(WorkspaceRuntime runtime, WorkspaceOwnerLease owner) {
         if (closed) throw new IllegalStateException("Execution scheduler is closed");

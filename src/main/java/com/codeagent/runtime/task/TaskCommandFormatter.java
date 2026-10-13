@@ -18,6 +18,10 @@ public final class TaskCommandFormatter {
         if (normalized.regionMatches(true, 0, "list ", 0, 5)) {
             return formatList(manager.list(parseLimit(normalized.substring(5).trim(), 20)));
         }
+        if (normalized.regionMatches(true, 0, "add ", 0, 4)) {
+            DurableTask task = manager.enqueue(normalized.substring(4).trim());
+            return "✅ 后台任务已提交: " + task.id() + "\n   /task log " + task.id();
+        }
         if (normalized.regionMatches(true, 0, "cancel ", 0, 7)) {
             String id = normalized.substring(7).trim();
             return manager.cancel(id)
@@ -34,6 +38,7 @@ public final class TaskCommandFormatter {
                 可用命令：
                   /task
                   /task list [N]
+                  /task add <任务内容>
                   /task cancel <task_id>
                   /task log <task_id>
                 """.formatted(payload).trim();
@@ -51,6 +56,13 @@ public final class TaskCommandFormatter {
             if (normalized.regionMatches(true, 0, "list ", 0, 5)) {
                 return formatExecutions(queue.list(
                         parseLimit(normalized.substring(5).trim(), 20)));
+            }
+            if (normalized.regionMatches(true, 0, "add ", 0, 4)) {
+                String task = normalized.substring(4).trim();
+                RuntimeExecution execution = queue.submit(sessionId, task, null);
+                return "✅ 任务已入队: " + execution.id()
+                        + "\n   session ordinal: " + execution.ordinal()
+                        + "\n   /task log " + execution.id();
             }
             if (normalized.regionMatches(true, 0, "cancel ", 0, 7)) {
                 String id = normalized.substring(7).trim();
@@ -74,6 +86,7 @@ public final class TaskCommandFormatter {
                 可用命令：
                   /task
                   /task list [N]
+                  /task add <任务内容>
                   /task cancel <execution_id>
                   /task log <execution_id>
                 """.formatted(payload).trim();

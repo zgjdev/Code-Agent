@@ -146,10 +146,6 @@
                 <configuration>
                     <argLine>-Dfile.encoding=UTF-8</argLine>
                     <skipTests>${skipTests}</skipTests>
-                    <systemPropertyVariables>
-                        <!-- Tests must never write default state into the real user profile. -->
-                        <codeagent.home>${project.build.directory}/test-data</codeagent.home>
-                    </systemPropertyVariables>
                 </configuration>
             </plugin>
             <plugin>

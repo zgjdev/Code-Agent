@@ -15,6 +15,8 @@ import java.util.Map;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class CodeAgentConfig {
 
+    private static final Path CONFIG_DIR = Path.of(System.getProperty("user.home"), ".codeagent");
+    private static final Path CONFIG_FILE = CONFIG_DIR.resolve("config.json");
     private static final ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
 
     private String defaultProvider = "glm";
@@ -299,7 +301,7 @@ public class CodeAgentConfig {
         Map<String, String> values = new LinkedHashMap<>(ConfigurationValues.currentEnvironment());
         String selected = ConfigurationValues.get("codeagent.provider", "CODEAGENT_PROVIDER", null);
         if (selected != null) values.put("CODEAGENT_PROVIDER", selected);
-        return load(CodeAgentPaths.resolve("config.json"), values);
+        return load(CONFIG_FILE, values);
     }
 
     public static CodeAgentConfig load(Path configFile, Map<String, String> environment) {
@@ -321,7 +323,7 @@ public class CodeAgentConfig {
     }
 
     public void save() {
-        save(CodeAgentPaths.resolve("config.json"));
+        save(CONFIG_FILE);
     }
 
     public void save(Path configFile) {

@@ -526,7 +526,7 @@
 - `DurableTaskManager`：SQLite 持久化的任务队列，复用已有的 `VectorStore` SQLite 基础设施
 - 任务生命周期：`enqueued` → `running` → `completed` / `failed` / `canceled`
 - Worker Pool：可配并发数（默认 2），每个 Worker 启动独立 Agent 线程执行任务
-- 直接输入任务：提交到统一执行队列，按 workspace 串行运行；等待审批/评审时先完成交互
+- `/task add <prompt>`：提交后台任务，返回 task_id
 - `/task list`：列出所有任务（含状态、耗时、进度）
 - `/task cancel <id>`：取消运行中任务
 - `/task log <id>`：查看任务执行摘要
@@ -550,8 +550,8 @@
 - OpenAI Assistants API 兼容层设计
 
 **当前 MVP 已落地**：
-- inline/plain CLI 已从独立 DurableTaskManager 改为统一 RuntimeExecutionQueue：普通输入、`/react`、`/plan` 共用 SQLite `runtime_executions`，默认 `~/.codeagent/tasks/tasks.db`
-- Agent 运行期间直接输入即可追加任务；Plan/HITL 等待态普通输入优先作为交互回答，先完成当前交互再提交新任务（add 子命令已移除）；`/task list|cancel|log` 查询和控制同一队列
+- inline/plain CLI 已从独立 DurableTaskManager 改为统一 RuntimeExecutionQueue：普通输入、`/react`、`/plan`、`/task add` 共用 SQLite `runtime_executions`，默认 `~/.codeagent/tasks/tasks.db`
+- Agent 运行期间直接输入即可追加任务；Plan/HITL 等待态普通输入优先作为交互回答，`/task add` 强制追加；`/task list|cancel|log` 查询和控制同一队列
 - 当前 workspace 固定单顶层 Worker、Session FIFO；CODEAGENT_TASK_WORKERS 不控制该队列。Plan 内部保持最多 4 个无冲突 DAG 节点并行
 - Session Context Registry 管理独立 Agent/上下文与唯一 writable handle，启动期恢复 stale RUNNING；ReAct 已选模式的中断任务保持阻塞，Plan 按 execution_id 从 Task 边界恢复
 - EOF/shutdown 保留非终态任务供下次恢复，关闭终端后不继续独立后台执行；Lanterna TUI、HTTP API 尚未接入该统一队列

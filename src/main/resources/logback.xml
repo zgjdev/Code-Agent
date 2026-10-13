@@ -1,6 +1,5 @@
 <configuration>
-    <property name="DATA_ROOT" value="${codeagent.home:-${CODEAGENT_HOME:-${user.home}/.codeagent}}"/>
-    <property name="LOG_DIR" value="${DATA_ROOT}/logs"/>
+    <property name="LOG_DIR" value="${codeagent.log.dir:-${user.home}/.codeagent/logs}"/>
     <property name="LOG_LEVEL" value="${codeagent.log.level:-INFO}"/>
     <property name="LOG_MAX_HISTORY" value="${codeagent.log.maxHistory:-7}"/>
     <property name="LOG_MAX_FILE_SIZE" value="${codeagent.log.maxFileSize:-10MB}"/>

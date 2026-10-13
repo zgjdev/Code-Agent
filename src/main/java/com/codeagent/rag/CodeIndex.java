@@ -1,7 +1,5 @@
 package com.codeagent.rag;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import com.codeagent.rag.embedding.EmbeddingException;
 import com.codeagent.rag.embedding.EmbeddingLocality;
 import com.codeagent.rag.embedding.EmbeddingProvider;
@@ -71,7 +69,8 @@ public class CodeIndex implements AutoCloseable {
         emit("🔍 开始索引: " + root);
         IndexFileScanner.ScanResult scan = new IndexFileScanner().scan(root);
         emit("📁 发现 " + scan.files().size() + " 个文件待索引");
-        Path directory = CodeAgentPaths.resolve("rag");
+        Path directory = Path.of(System.getProperty("codeagent.rag.dir",
+                Path.of(System.getProperty("user.home"), ".codeagent", "rag").toString()));
         try (SqliteRetrievalIndex index = new SqliteRetrievalIndex(
                 directory.resolve("codebase-v2.db"), directory.resolve("codebase.db"))) {
             IndexCoordinator coordinator = new IndexCoordinator(index, provider);

@@ -497,9 +497,7 @@ class CliCommandParserTest {
     void parsesTaskCommands() {
         assertEquals(CliCommandParser.CommandType.TASK, CliCommandParser.parse("/task").type());
         assertEquals("list", CliCommandParser.parse("/task").payload());
-        for (String input : new String[]{"/task add 重构模块", "/task add", "/task ADD x", "/task   add\tx"}) {
-            assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, CliCommandParser.parse(input).type());
-        }
+        assertEquals("add 重构模块", CliCommandParser.parse("/task add 重构模块").payload());
         assertEquals("cancel task_123", CliCommandParser.parse("/task cancel task_123").payload());
         assertEquals("log task_123", CliCommandParser.parse("/task log task_123").payload());
     }

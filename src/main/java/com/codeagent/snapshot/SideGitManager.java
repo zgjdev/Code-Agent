@@ -1,7 +1,5 @@
 package com.codeagent.snapshot;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.lib.ObjectId;
@@ -42,7 +40,6 @@ public class SideGitManager {
     private final Path projectRoot;
     private final SnapshotConfig config;
     private final Path gitDir;
-    private final Path dataRoot;
 
     public SideGitManager(Path projectRoot) {
         this(projectRoot, SnapshotConfig.fromEnvironment());
@@ -50,7 +47,6 @@ public class SideGitManager {
 
     public SideGitManager(Path projectRoot, SnapshotConfig config) {
         this.projectRoot = normalizeProjectRoot(projectRoot);
-        this.dataRoot = CodeAgentPaths.root();
         this.config = config == null ? SnapshotConfig.fromEnvironment() : config;
         this.gitDir = this.config.snapshotsRoot()
                 .resolve(hash(parentKey(this.projectRoot)))
@@ -287,15 +283,6 @@ public class SideGitManager {
         for (String exclude : config.excludes()) {
             sb.append(exclude).append('\n');
         }
-        if (dataRoot.startsWith(projectRoot) && !dataRoot.equals(projectRoot)) {
-            String relative = projectRoot.relativize(dataRoot).toString().replace('\\', '/');
-            sb.append('/');
-            for (char character : relative.toCharArray()) {
-                if ("\\*?[] ".indexOf(character) >= 0) sb.append('\\');
-                sb.append(character);
-            }
-            sb.append("/\n");
-        }
         Files.writeString(info.resolve("exclude"), sb.toString(), StandardCharsets.UTF_8);
     }
 
@@ -394,7 +381,6 @@ public class SideGitManager {
     }
 
     private boolean isExcluded(String relative) {
-        if (projectRoot.resolve(relative).normalize().startsWith(dataRoot)) return true;
         String normalized = relative.replace('\\', '/');
         for (String raw : config.excludes()) {
             String pattern = raw == null ? "" : raw.trim().replace('\\', '/');

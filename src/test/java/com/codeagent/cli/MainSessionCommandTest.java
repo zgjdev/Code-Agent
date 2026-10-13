@@ -35,9 +35,9 @@ class MainSessionCommandTest {
     }
     @Test
     void activePlanNoticeIsScopedToCurrentSession(@TempDir Path tempDir) throws Exception {
-        String previous = System.getProperty("codeagent.home");
+        String previous = System.getProperty("codeagent.plan.dir");
         Path planDir = tempDir.resolve("plans");
-        System.setProperty("codeagent.home", planDir.toString());
+        System.setProperty("codeagent.plan.dir", planDir.toString());
         try (SessionStore sessions = SessionStore.open(tempDir.resolve("history"));
              SessionStore.SessionHandle sessionA = sessions.create(new SessionStore.SessionCreateRequest(
                      tempDir, "glm", "test", null, "react", "agent"));
@@ -53,9 +53,9 @@ class MainSessionCommandTest {
             assertTrue(Main.activePlanNotice(tempDir, sessionB).isBlank());
         } finally {
             if (previous == null) {
-                System.clearProperty("codeagent.home");
+                System.clearProperty("codeagent.plan.dir");
             } else {
-                System.setProperty("codeagent.home", previous);
+                System.setProperty("codeagent.plan.dir", previous);
             }
         }
     }

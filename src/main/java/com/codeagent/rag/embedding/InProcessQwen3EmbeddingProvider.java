@@ -1,7 +1,5 @@
 package com.codeagent.rag.embedding;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import java.nio.file.Path;
 import java.util.*;
 
@@ -22,7 +20,7 @@ public final class InProcessQwen3EmbeddingProvider implements EmbeddingProvider 
         Objects.requireNonNull(directory); this.factory = Objects.requireNonNull(factory);
     }
     public static Path defaultModelDirectory() {
-        return CodeAgentPaths.resolve("models/qwen3-embedding-0.6b").resolve(REVISION);
+        return Path.of(System.getProperty("user.home"), ".codeagent", "models", "qwen3-embedding-0.6b", REVISION);
     }
     @Override public String id() { return space.providerId(); }
     @Override public String modelId() { return space.modelId(); }

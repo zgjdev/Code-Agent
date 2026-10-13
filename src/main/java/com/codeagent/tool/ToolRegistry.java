@@ -1,7 +1,5 @@
 package com.codeagent.tool;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -192,7 +190,8 @@ public class ToolRegistry {
         synchronized (this) {
             if (codeRetrievalService == null) {
                 try {
-                    Path directory = CodeAgentPaths.resolve("rag");
+                    Path directory = Path.of(System.getProperty("codeagent.rag.dir",
+                            Path.of(System.getProperty("user.home"), ".codeagent", "rag").toString()));
                     codeRetrievalService = new DefaultCodeRetrievalService(
                             new SqliteRetrievalIndex(directory.resolve("codebase-v2.db"),
                                     directory.resolve("codebase.db")),
@@ -1587,7 +1586,6 @@ public class ToolRegistry {
                     CommandShell.forCurrentPlatform().command(normalized));
             pb.directory(new File(projectPath));
             pb.redirectErrorStream(true);
-            CodeAgentPaths.configureProcessEnvironment(pb.environment());
             if (sanitizeCommandEnvironment) {
                 removeSensitiveCommandEnvironment(pb.environment());
             }

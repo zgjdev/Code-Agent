@@ -1,7 +1,5 @@
 package com.codeagent.tui.history;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -26,7 +24,7 @@ import java.util.stream.StreamSupport;
  */
 public class ConversationSnapshot {
 
-    private static Path historyDirectory() { return CodeAgentPaths.resolve("history"); }
+    private static final Path HISTORY_DIR = Path.of(System.getProperty("user.home"), ".codeagent", "history");
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final AtomicLong SESSION_SEQUENCE = new AtomicLong();
 
@@ -70,7 +68,7 @@ public class ConversationSnapshot {
      */
     public ConversationSnapshot(String sessionId) {
         this.sessionId = Objects.requireNonNull(sessionId, "sessionId 不能为空");
-        this.sessionFile = historyDirectory().resolve(sessionId + ".jsonl");
+        this.sessionFile = HISTORY_DIR.resolve(sessionId + ".jsonl");
         this.messages = new ArrayList<>();
     }
 
@@ -113,11 +111,11 @@ public class ConversationSnapshot {
      * 保存到文件（Day 5 完整实现）。
      */
     public void save() throws IOException {
-        Files.createDirectories(sessionFile.getParent());
+        Files.createDirectories(HISTORY_DIR);
         // 追加模式写入 JSONL
         try (BufferedWriter writer = Files.newBufferedWriter(sessionFile, StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
             for (MessageRecord msg : messages) {
-                writer.write(MAPPER.writeValueAsString(msg));
+                MAPPER.writeValue(writer, msg);
                 writer.newLine();
             }
         }
@@ -128,7 +126,7 @@ public class ConversationSnapshot {
      * 从文件加载会话（Day 5 完整实现）。
      */
     public static ConversationSnapshot load(String sessionId) throws IOException {
-        Path file = historyDirectory().resolve(sessionId + ".jsonl");
+        Path file = HISTORY_DIR.resolve(sessionId + ".jsonl");
         if (!Files.exists(file)) {
             return new ConversationSnapshot(sessionId);
         }
@@ -149,11 +147,11 @@ public class ConversationSnapshot {
      * 列出所有会话。
      */
     public static List<SessionMeta> listSessions() throws IOException {
-        if (!Files.isDirectory(historyDirectory())) {
+        if (!Files.isDirectory(HISTORY_DIR)) {
             return List.of();
         }
 
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(historyDirectory(), "*.jsonl")) {
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(HISTORY_DIR, "*.jsonl")) {
             return StreamSupport.stream(stream.spliterator(), false)
                     .map(path -> {
                         String sessionId = path.getFileName().toString().replace(".jsonl", "");
@@ -181,7 +179,7 @@ public class ConversationSnapshot {
      * 删除会话。
      */
     public static void deleteSession(String sessionId) throws IOException {
-        Path file = historyDirectory().resolve(sessionId + ".jsonl");
+        Path file = HISTORY_DIR.resolve(sessionId + ".jsonl");
         Files.deleteIfExists(file);
     }
 

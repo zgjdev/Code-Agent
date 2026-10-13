@@ -1,6 +1,6 @@
 # 多 Agent 协作的 Plan-and-Execute
 
-> 顶层执行更新：inline/plain 的普通输入、`/react`、`/plan` 共用统一 Execution 队列；`/task add` 已移除，待审批/计划评审时先完成交互再提交新任务。Runtime API 仍走独立 headless 路径。本文的旧行号和早期实现分析保留为历史证据，当前提交、Session 隔离和恢复接线见 [统一后台执行 Runtime](31-unified-background-execution-runtime.md) 第 8 节。
+> 顶层执行更新（2026-10-03）：inline/plain 的普通输入、`/react`、`/plan` 和 `/task add` 已共用统一 Execution 队列；Runtime API 仍走独立 headless 路径。本文的旧行号和早期实现分析保留为历史证据，当前提交、Session 隔离和恢复接线见 [统一后台执行 Runtime](31-unified-background-execution-runtime.md)。
 
 > **合并说明（2026-09-18）**
 >

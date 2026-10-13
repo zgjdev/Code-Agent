@@ -1,7 +1,5 @@
 package com.codeagent.rag;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import org.eclipse.jgit.ignore.IgnoreNode;
 import java.io.IOException;
 import java.io.InputStream;
@@ -21,7 +19,6 @@ public final class IndexPathPolicy {
     private static final Set<String> EXTENSIONS = Set.of("java", "py", "js", "jsx", "ts", "tsx", "go", "rs", "c", "cc", "cpp", "h", "hpp", "md", "xml", "properties", "yaml", "yml", "json", "sh", "gradle", "kt", "kts", "sql", "toml");
 
     private final Path root;
-    private final Path dataRoot;
 
     private final IgnoreNode ignore = new IgnoreNode();
 
@@ -29,7 +26,6 @@ public final class IndexPathPolicy {
         if (Files.isSymbolicLink(root) || !Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS))
             throw new IOException("Invalid project root");
         this.root = root.toRealPath();
-        this.dataRoot = CodeAgentPaths.root();
         if (!this.root.equals(root.toAbsolutePath().normalize())) throw new IOException("Linked project ancestors are not allowed");
         Path file = this.root.resolve(".gitignore");
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS) && !Files.notExists(file, LinkOption.NOFOLLOW_LINKS))
@@ -60,7 +56,7 @@ public final class IndexPathPolicy {
 
     private boolean admitted(Path path, boolean directory) {
         Path absolute = resolve(path);
-        if (Files.isSymbolicLink(root) || !absolute.startsWith(root) || absolute.startsWith(dataRoot))
+        if (Files.isSymbolicLink(root) || !absolute.startsWith(root))
             return false;
         Path relative = root.relativize(absolute);
         Path cursor = root;

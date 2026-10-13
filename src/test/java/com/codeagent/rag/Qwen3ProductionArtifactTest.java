@@ -13,15 +13,15 @@ import static org.junit.jupiter.api.Assertions.*;
 class Qwen3ProductionArtifactTest {
     @TempDir Path directory;
     @Test void defaultToolRegistryUsesQwenWithoutExplicitReconfiguration() throws Exception {
-        String previous = System.getProperty("codeagent.home");
-        System.setProperty("codeagent.home", directory.resolve("index").toString());
+        String previous = System.getProperty("codeagent.rag.dir");
+        System.setProperty("codeagent.rag.dir", directory.resolve("index").toString());
         var registry = new ToolRegistry(); registry.setProjectPath(directory.toString());
         try (var service = registry.getCodeRetrievalService()) {
             var response = service.search(new RetrievalRequest(directory, "如何恢复中断任务", 5, 1000, false, RetrievalIntent.CHUNKS));
             assertEquals("local-qwen3", response.diagnostics().embeddingProviderId());
             assertTrue(response.diagnostics().degradedReasonCodes().isEmpty());
         } finally {
-            if (previous == null) System.clearProperty("codeagent.home"); else System.setProperty("codeagent.home", previous);
+            if (previous == null) System.clearProperty("codeagent.rag.dir"); else System.setProperty("codeagent.rag.dir", previous);
         }
     }
     @Test void productionOutputMatchesPinnedFp32Experiment() throws Exception {

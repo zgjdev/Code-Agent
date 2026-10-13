@@ -1,7 +1,5 @@
 package com.codeagent.harness;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -355,7 +353,9 @@ public final class BetterHarnessRunner {
                                          BetterHarnessEvidenceCollector.EvidenceBundle bundle)
             throws IOException {
         String runId = RUN_ID_FORMAT.format(clock.instant().atZone(ZoneId.systemDefault()));
-        Path runDir = CodeAgentPaths.workspaceReports(workspace).resolve(runId);
+        Path runDir = workspace.resolve(".codeagent")
+                .resolve("better-harness")
+                .resolve(runId);
         Files.createDirectories(runDir);
 
         Path markdownPath = runDir.resolve("report.md");

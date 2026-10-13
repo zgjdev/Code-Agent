@@ -3,10 +3,8 @@ package com.codeagent.rag;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 
 import java.util.List;
-import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -16,24 +14,18 @@ class CodeRetrieverTest {
 
     private static final String TEST_PROJECT = "/tmp/codeagent-code-retriever";
     private VectorStore store;
-    @TempDir Path temporary;
-    private String previousRoot;
 
     @BeforeEach
     void setUp() throws Exception {
-        previousRoot = System.getProperty("codeagent.home");
-        System.setProperty("codeagent.home", temporary.toString());
+        System.setProperty("codeagent.rag.dir", "/tmp/codeagent-test-rag-retriever");
         store = new VectorStore(TEST_PROJECT);
         store.clearProject();
     }
 
     @AfterEach
     void tearDown() throws Exception {
-        try {
-            if (store != null) store.close();
-        } finally {
-            if (previousRoot == null) System.clearProperty("codeagent.home");
-            else System.setProperty("codeagent.home", previousRoot);
+        if (store != null) {
+            store.close();
         }
     }
 

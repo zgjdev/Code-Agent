@@ -1,7 +1,5 @@
 package com.codeagent.tui.pane;
 
-import com.codeagent.config.CodeAgentPaths;
-
 import com.googlecode.lanterna.gui2.*;
 import com.codeagent.config.CodeAgentConfig;
 
@@ -72,7 +70,7 @@ public class FileTreePane extends Panel {
         List<String> patterns = new ArrayList<>(DEFAULT_IGNORE);
 
         // 读取用户级 filetree-ignore.txt
-        Path userIgnore = CodeAgentPaths.resolve("filetree-ignore.txt");
+        Path userIgnore = Path.of(System.getProperty("user.home"), ".codeagent", "filetree-ignore.txt");
         if (Files.exists(userIgnore)) {
             try {
                 Files.readAllLines(userIgnore).stream()

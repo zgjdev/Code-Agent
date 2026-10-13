@@ -37,13 +37,13 @@ class LiveCodeSearchCoordinationTest {
         assertTrue(client.supportsTools());
         var fixture=CodeSearchAgentHarness.fixture();
         List<Map<String,Object>> rows=new ArrayList<>();
-        String oldMemory=System.getProperty("codeagent.home");
+        String oldMemory=System.getProperty("codeagent.memory.dir");
         String oldLimit=System.getProperty("codeagent.react.hard.max.iterations");
         String oldHome=System.getProperty("user.home");
         Path modelDirectory=InProcessQwen3EmbeddingProvider.defaultModelDirectory();
         Path isolatedHome=Files.createDirectories(temp.resolve("home"));
         System.setProperty("user.home",isolatedHome.toString());
-        System.setProperty("codeagent.home",temp.resolve("memory").toString());
+        System.setProperty("codeagent.memory.dir",temp.resolve("memory").toString());
         System.setProperty("codeagent.react.hard.max.iterations","10");
         try {
             for(var item:fixture.path("cases")) {
@@ -80,7 +80,7 @@ class LiveCodeSearchCoordinationTest {
             assertEquals(7,rows.size());
             assertTrue(rows.stream().allMatch(r->Boolean.TRUE.equals(r.get("evidenceRead")) && Boolean.TRUE.equals(r.get("answerCheck")) && Boolean.TRUE.equals(r.get("toolSuccess"))),"See metric-only live report; routing/answer failures must remain visible");
         } finally {
-            restore("codeagent.home",oldMemory); restore("codeagent.react.hard.max.iterations",oldLimit);
+            restore("codeagent.memory.dir",oldMemory); restore("codeagent.react.hard.max.iterations",oldLimit);
             restore("user.home",oldHome);
         }
     }

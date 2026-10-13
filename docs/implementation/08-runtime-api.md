@@ -44,7 +44,7 @@ RuntimeThreadStore创建thread并检查存在性，所有运行进度写为事�
 
 ### 3.3 用JDK HttpServer增加本机入口
 
-RuntimeApiServer只绑定127.0.0.1，构造时要求非空API Key。key经ConfigurationValues来自codeagent.runtime.api.key、进程变量或项目/用户dotenv中的CODEAGENT_RUNTIME_API_KEY，接受Authorization Bearer或X-CodeAgent-API-Key头。认证在路由处理前完成，不提供默认公开key。项目dotenv将key留空时不会继承用户dotenv的同名密钥，仍拒绝无认证启动。任务、Runtime和审计目录统一派生自 CodeAgentPaths 根；仅 CODEAGENT_HOME / codeagent.home 可整体覆盖，旧模块目录配置停用。
+RuntimeApiServer只绑定127.0.0.1，构造时要求非空API Key。key经ConfigurationValues来自codeagent.runtime.api.key、进程变量或项目/用户dotenv中的CODEAGENT_RUNTIME_API_KEY，接受Authorization Bearer或X-CodeAgent-API-Key头。认证在路由处理前完成，不提供默认公开key。项目dotenv将key留空时不会继承用户dotenv的同名密钥，仍拒绝无认证启动。任务、Runtime和审计目录的dotenv空值使用既有默认目录。
 
 端点保持最小集合：POST /v1/threads创建容器，POST /v1/threads/{id}/turns提交非空input，GET /v1/threads/{id}/events读取SSE。未知thread返回404，空输入返回400，未授权返回401。
 

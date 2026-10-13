@@ -15,26 +15,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class BetterHarnessEvidenceCollectorTest {
 
     @Test
-    void inventoryExcludesInternalSystemData(@TempDir Path workspace) throws Exception {
-        String previous = System.getProperty("codeagent.home");
-        try {
-            Path data = Files.createDirectories(workspace.resolve("private-state"));
-            System.setProperty("codeagent.home", data.toString());
-            Files.createDirectories(data.resolve("src/test"));
-            Files.writeString(data.resolve("src/test/PrivateTest.java"), "private fixture");
-            Files.createDirectories(workspace.resolve("src/test"));
-            Files.writeString(workspace.resolve("src/test/KeepTest.java"), "class KeepTest {}");
-            var result = new BetterHarnessEvidenceCollector(workspace, null, null)
-                    .collect(BetterHarnessOptions.Depth.NORMAL);
-            assertTrue(result.projectHarness().contains("\"testFiles\" : 1"));
-            assertFalse(result.projectHarness().contains("PrivateTest"));
-        } finally {
-            if (previous == null) System.clearProperty("codeagent.home");
-            else System.setProperty("codeagent.home", previous);
-        }
-    }
-
-    @Test
     void collectsBoundedEvidenceWithoutRawConversationContent(@TempDir Path tempDir)
             throws Exception {
         Files.writeString(tempDir.resolve("AGENTS.md"), "# Rules\nRun tests.");

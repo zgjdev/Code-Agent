@@ -1,5 +1,7 @@
 package com.codeagent.cli;
 
+import com.codeagent.config.CodeAgentPaths;
+
 import com.codeagent.config.ConfigurationValues;
 
 import com.codeagent.agent.Agent;
@@ -147,7 +149,6 @@ public class Main {
     private static final String LOG_MAX_HISTORY_PROPERTY = "codeagent.log.maxHistory";
     private static final String LOG_MAX_FILE_SIZE_PROPERTY = "codeagent.log.maxFileSize";
     private static final String LOG_TOTAL_SIZE_CAP_PROPERTY = "codeagent.log.totalSizeCap";
-    private static final String HISTORY_FILE_PROPERTY = "codeagent.history.file";
     private static final String HISTORY_SIZE_PROPERTY = "codeagent.history.size";
     private static final String HISTORY_FILE_SIZE_PROPERTY = "codeagent.history.fileSize";
     private static final String DEFAULT_HISTORY_FILE_NAME = "input.history";
@@ -231,6 +232,13 @@ public class Main {
     }
 
     public static void main(String[] args) {
+        try {
+            CodeAgentPaths.initialize();
+        } catch (IOException | IllegalArgumentException e) {
+            System.err.println("无法初始化 CodeAgent 数据目录：" + e.getMessage());
+            System.exit(1);
+            return;
+        }
         configureAwtForCli();
         if (isRuntimeServeCommand(args)) {
             configureLogging();
@@ -292,7 +300,7 @@ public class Main {
             lineReader.option(LineReader.Option.BRACKETED_PASTE, true);
             lineReader.option(LineReader.Option.AUTO_LIST, true);
             lineReader.option(LineReader.Option.AUTO_MENU, true);
-            configureHistory(lineReader, Path.of(System.getProperty("user.home")));
+            configureHistory(lineReader, null);
             configureSlashCommandHint(lineReader);
             configureJLineInteractiveWidgets(lineReader);
 
@@ -321,7 +329,7 @@ public class Main {
                 startupNote = "自动索引维护未启用: " + e.getClass().getSimpleName();
             }
             try {
-                McpConfigBootstrapResult bootstrapResult = ensureDefaultMcpConfig(Path.of(System.getProperty("user.home")));
+                McpConfigBootstrapResult bootstrapResult = ensureMcpConfig(CodeAgentPaths.resolve("mcp.json"));
                 if (!bootstrapResult.message().isBlank()) {
                     startupNote = bootstrapResult.message();
                 }
@@ -338,16 +346,15 @@ public class Main {
             LocalPathMentionExpander localPathMentionExpander = new LocalPathMentionExpander(Path.of("."));
 
             // === Skill 系统初始化 ===
-            Path home = Path.of(System.getProperty("user.home"));
-            Path skillsCacheDir = home.resolve(".codeagent/skills-cache");
-            Path userSkillsDir = home.resolve(".codeagent/skills");
+            Path skillsCacheDir = CodeAgentPaths.resolve("skills-cache");
+            Path userSkillsDir = CodeAgentPaths.resolve("skills");
             Path projectSkillsDir = Path.of(".codeagent/skills").toAbsolutePath();
             try {
                 new com.codeagent.skill.SkillBuiltinExtractor(skillsCacheDir).extractAll();
             } catch (Exception e) {
                 startupNote = appendStartupNote(startupNote, "内置 skill 解压失败: " + e.getMessage());
             }
-            com.codeagent.skill.SkillStateStore skillStateStore = new com.codeagent.skill.SkillStateStore(home.resolve(".codeagent/skills.json"));
+            com.codeagent.skill.SkillStateStore skillStateStore = new com.codeagent.skill.SkillStateStore(CodeAgentPaths.resolve("skills.json"));
             com.codeagent.skill.SkillRegistry skillRegistry = new com.codeagent.skill.SkillRegistry(
                     skillsCacheDir, userSkillsDir, projectSkillsDir, skillStateStore);
             skillRegistry.reload();
@@ -358,7 +365,7 @@ public class Main {
 
             ConversationLedger conversationLedger;
             try {
-                conversationLedger = ConversationLedger.openDefault(home);
+                conversationLedger = ConversationLedger.openDefault();
             } catch (IOException e) {
                 conversationLedger = ConversationLedger.disabled();
                 startupNote = appendStartupNote(
@@ -378,7 +385,7 @@ public class Main {
             SessionStore openedSessionStore = null;
             AtomicReference<SessionStore.SessionHandle> activeSession = new AtomicReference<>();
             try {
-                openedSessionStore = SessionStore.open(home.resolve(".codeagent").resolve("history"));
+                openedSessionStore = SessionStore.open(CodeAgentPaths.resolve("history"));
                 SessionStore.SessionHandle initialSession;
                 var latest = isAutomaticSessionResumeEnabled(
                         System.getProperty("codeagent.session.resume"),
@@ -1542,8 +1549,7 @@ public class Main {
         registry.setProjectPath(Path.of(".").toAbsolutePath().normalize().toString());
         Agent agent = new Agent(llmClient, registry);
         try {
-            agent.setConversationLedger(ConversationLedger.openDefault(
-                    Path.of(System.getProperty("user.home"))));
+            agent.setConversationLedger(ConversationLedger.openDefault());
         } catch (IOException ignored) {
             // A background task should still run if its audit directory is temporarily unavailable.
         }
@@ -2687,7 +2693,7 @@ public class Main {
             return;
         }
 
-        Path exportsDir = Path.of(System.getProperty("user.home"), ".codeagent", "exports");
+        Path exportsDir = CodeAgentPaths.resolve("exports");
         try {
             Files.createDirectories(exportsDir);
         } catch (IOException e) {
@@ -2981,13 +2987,16 @@ public class Main {
     }
 
     private static String chromeLaunchHelp(int port) {
+        String profile = CodeAgentPaths.resolve("cache/chrome-profile").toString();
+        String posixProfile = "'" + profile.replace("'", "'\"'\"'") + "'";
+        String windowsProfile = "\"" + profile + "\"";
         return """
                 请先用调试端口启动 Chrome：
-                  macOS: open -na "Google Chrome" --args --remote-debugging-port=%d --user-data-dir=/tmp/codeagent-chrome-profile
-                  Windows: start chrome.exe --remote-debugging-port=%d --user-data-dir=%%TEMP%%\\codeagent-chrome-profile
-                  Linux: google-chrome --remote-debugging-port=%d --user-data-dir=/tmp/codeagent-chrome-profile
+                  macOS: open -na "Google Chrome" --args --remote-debugging-port=%d --user-data-dir=%s
+                  Windows: start "" chrome.exe --remote-debugging-port=%d --user-data-dir=%s
+                  Linux: google-chrome --remote-debugging-port=%d --user-data-dir=%s
                 然后重新执行 /browser connect %d
-                """.formatted(port, port, port, port).trim();
+                """.formatted(port, posixProfile, port, windowsProfile, port, posixProfile, port).trim();
     }
 
     private static void printMcpCommandResult(PrintStream out, String result) {
@@ -3283,13 +3292,10 @@ public class Main {
     }
 
     static Path resolveHistoryFile(Path homeDir) {
-        String configured = firstNonBlank(System.getProperty(HISTORY_FILE_PROPERTY), ConfigurationValues.get(null, "CODEAGENT_HISTORY_FILE", null));
-        if (configured != null) {
-            return normalizeHistoryFile(Path.of(configured));
-        }
-        Path base = homeDir == null ? Path.of(System.getProperty("user.home")) : homeDir;
-        return base.resolve(".codeagent").resolve("history").resolve(DEFAULT_HISTORY_FILE_NAME)
-                .toAbsolutePath().normalize();
+        // Explicit homeDir is a test/host injection; interactive CLI always uses the unified root.
+        Path history = homeDir == null ? CodeAgentPaths.resolve("history")
+                : homeDir.resolve(".codeagent/history");
+        return history.resolve(DEFAULT_HISTORY_FILE_NAME).toAbsolutePath().normalize();
     }
 
     static Path normalizeHistoryFile(Path configured) {
@@ -3359,8 +3365,7 @@ public class Main {
     }
 
     private static void configureLogging() {
-        configureLogProperty(LOG_DIR_PROPERTY, "CODEAGENT_LOG_DIR",
-                Path.of(System.getProperty("user.home"), ".codeagent", "logs").toString());
+        System.setProperty(LOG_DIR_PROPERTY, CodeAgentPaths.resolve("logs").toString());
         configureLogProperty(LOG_LEVEL_PROPERTY, "CODEAGENT_LOG_LEVEL", "INFO");
         configureLogProperty(LOG_MAX_HISTORY_PROPERTY, "CODEAGENT_LOG_MAX_HISTORY", "7");
         configureLogProperty(LOG_MAX_FILE_SIZE_PROPERTY, "CODEAGENT_LOG_MAX_FILE_SIZE", "10MB");
@@ -3379,24 +3384,8 @@ public class Main {
             configuredValue = loadConfigValue(envKey, defaultValue);
         }
         if (configuredValue != null && !configuredValue.isBlank()) {
-            if (LOG_DIR_PROPERTY.equals(propertyName)) {
-                configuredValue = expandHome(configuredValue.trim());
-            }
             System.setProperty(propertyName, configuredValue.trim());
         }
-    }
-
-    private static String expandHome(String value) {
-        if (value == null || value.isBlank()) {
-            return value;
-        }
-        if (value.equals("~")) {
-            return System.getProperty("user.home");
-        }
-        if (value.startsWith("~/")) {
-            return Path.of(System.getProperty("user.home"), value.substring(2)).toString();
-        }
-        return value;
     }
 
     private static String loadConfigValue(String key, String defaultValue) {
@@ -3507,7 +3496,10 @@ public class Main {
     }
 
     static McpConfigBootstrapResult ensureDefaultMcpConfig(Path userHome) throws IOException {
-        Path configFile = userHome.resolve(".codeagent").resolve("mcp.json");
+        return ensureMcpConfig(userHome.resolve(".codeagent/mcp.json"));
+    }
+
+    static McpConfigBootstrapResult ensureMcpConfig(Path configFile) throws IOException {
         if (Files.notExists(configFile)) {
             Files.createDirectories(configFile.getParent());
             Files.writeString(configFile, DEFAULT_CHROME_DEVTOOLS_MCP_JSON);

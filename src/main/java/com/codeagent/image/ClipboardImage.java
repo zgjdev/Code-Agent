@@ -1,5 +1,7 @@
 package com.codeagent.image;
 
+import com.codeagent.config.CodeAgentPaths;
+
 import javax.imageio.ImageIO;
 import java.awt.Graphics2D;
 import java.awt.GraphicsEnvironment;
@@ -18,8 +20,6 @@ import java.util.concurrent.TimeUnit;
 
 public final class ClipboardImage {
 
-    private static final Path DEFAULT_CACHE_DIR = Path.of(
-            System.getProperty("user.home"), ".codeagent", "cache");
 
     private ClipboardImage() {}
 
@@ -34,7 +34,7 @@ public final class ClipboardImage {
     }
 
     public static GrabResult grab() {
-        return grab(DEFAULT_CACHE_DIR);
+        return grab(CodeAgentPaths.resolve("cache"));
     }
 
     static GrabResult grab(Path cacheDir) {

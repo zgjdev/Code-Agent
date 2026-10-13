@@ -104,9 +104,11 @@ class DotEnvConfigurationIntegrationTest {
     }
 
     @Test void snapshotSettingsComeFromDotEnv() throws Exception {
-        Path snapshots = project.resolve("snapshots");
+        Path data = project.resolve("data");
+        Path snapshots = data.resolve("snapshots");
         dotenv("CODEAGENT_SNAPSHOT_ENABLED=false\nCODEAGENT_SNAPSHOT_MAX=7\nCODEAGENT_SNAPSHOT_DIR="
-                + snapshots + "\nCODEAGENT_SNAPSHOT_EXCLUDES=custom-dir\n");
+                + project.resolve("ignored-snapshots") + "\nCODEAGENT_HOME=" + data
+                + "\nCODEAGENT_SNAPSHOT_EXCLUDES=custom-dir\n");
         var config = SnapshotConfig.fromEnvironment();
         assertFalse(config.enabled());
         assertEquals(7, config.maxSnapshots());
@@ -116,10 +118,11 @@ class DotEnvConfigurationIntegrationTest {
     }
 
     @Test void runtimeAndAuditSettingsComeFromDotEnv() throws Exception {
-        Path tasks = project.resolve("tasks");
-        Path runtime = project.resolve("runtime");
-        Path audit = project.resolve("audit");
-        dotenv("CODEAGENT_TASK_DIR=" + tasks + "\nCODEAGENT_RUNTIME_DIR=" + runtime
+        Path data = project.resolve("data");
+        Path tasks = data.resolve("tasks");
+        Path runtime = data.resolve("runtime");
+        Path audit = data.resolve("audit");
+        dotenv("CODEAGENT_HOME=" + data + "\nCODEAGENT_TASK_DIR=" + project.resolve("ignored-tasks") + "\nCODEAGENT_RUNTIME_DIR=" + project.resolve("ignored-runtime")
                 + "\nCODEAGENT_AUDIT_DIR=" + audit + "\nCODEAGENT_RUNTIME_API_KEY=fixture-key\n");
         assertEquals(tasks.resolve("tasks.db"), DurableTaskManager.defaultDbPath());
         assertEquals(runtime.resolve("runtime.db"), RuntimeThreadStore.defaultDbPath());

@@ -3,6 +3,7 @@ package com.codeagent.rag;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -12,19 +13,25 @@ import static org.junit.jupiter.api.Assertions.*;
 class VectorStoreTest {
 
     private VectorStore store;
+    @TempDir Path temporary;
+    private String previousRoot;
     private static final String TEST_PROJECT = "/tmp/test-project";
 
     @BeforeEach
     void setUp() throws Exception {
-        System.setProperty("codeagent.rag.dir", "/tmp/codeagent-test-rag");
+        previousRoot = System.getProperty("codeagent.home");
+        System.setProperty("codeagent.home", temporary.toString());
         store = new VectorStore(TEST_PROJECT);
         store.clearProject();
     }
 
     @AfterEach
     void tearDown() throws Exception {
-        if (store != null) {
-            store.close();
+        try {
+            if (store != null) store.close();
+        } finally {
+            if (previousRoot == null) System.clearProperty("codeagent.home");
+            else System.setProperty("codeagent.home", previousRoot);
         }
     }
 

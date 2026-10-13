@@ -1,5 +1,7 @@
 package com.codeagent.prompt;
 
+import com.codeagent.config.CodeAgentPaths;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,7 +34,7 @@ public class ProjectMemoryLoader {
     }
 
     public static ProjectMemoryLoader createDefault(Path projectRoot) {
-        return new ProjectMemoryLoader(Path.of(System.getProperty("user.home"), ".codeagent"), projectRoot);
+        return new ProjectMemoryLoader(CodeAgentPaths.root(), projectRoot);
     }
 
     public String loadForPrompt() {

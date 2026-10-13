@@ -1,6 +1,6 @@
 package com.codeagent.runtime.api;
 
-import com.codeagent.config.ConfigurationValues;
+import com.codeagent.config.CodeAgentPaths;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -24,11 +24,7 @@ public class RuntimeThreadStore implements AutoCloseable {
     }
 
     public static Path defaultDbPath() {
-        String configured = ConfigurationValues.get("codeagent.runtime.dir", "CODEAGENT_RUNTIME_DIR", null);
-        if (configured == null || configured.isBlank()) {
-            configured = Path.of(System.getProperty("user.home"), ".codeagent", "runtime").toString();
-        }
-        return Path.of(configured).resolve("runtime.db");
+        return CodeAgentPaths.resolve("runtime/runtime.db");
     }
 
     public synchronized String createThread() {

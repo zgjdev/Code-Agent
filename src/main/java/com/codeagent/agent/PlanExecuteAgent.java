@@ -1289,11 +1289,14 @@ public class PlanExecuteAgent {
     }
 
     private TaskWorkspaceDiffTracker startDiffTracker(String planId, Task task) throws IOException {
-        if (task == null || !task.getRequiredEvidence().contains(EvidenceType.DIFF)) {
+        if (task == null || (!task.getRequiredEvidence().contains(EvidenceType.DIFF)
+                && !(pipelineOptions.stepReview() && (task.getResourceClaims().workspaceWrite()
+                || !task.getResourceClaims().writePaths().isEmpty())))) {
             return null;
         }
         try {
             Path projectRoot = Path.of(toolRegistry.getProjectPath());
+            var sideGit = toolRegistry.getSnapshotService().manager();
             if (planStateStore != null) {
                 Optional<String> persisted = planStateStore.findTaskDiffBaseline(planId, task.getId());
                 if (persisted.isPresent()) {
@@ -1301,14 +1304,14 @@ public class PlanExecuteAgent {
                     TaskWorkspaceDiffTracker.Baseline baseline = JSON_MAPPER.readValue(
                             json, TaskWorkspaceDiffTracker.Baseline.class);
                     return TaskWorkspaceDiffTracker.resume(
-                            projectRoot, task.getResourceClaims(), baseline);
+                            projectRoot, task.getResourceClaims(), baseline, sideGit);
                 }
                 if (interruptedRecoveryTaskIds.contains(task.getId())) {
                     throw new IOException("persisted diff baseline missing during recovery");
                 }
 
                 TaskWorkspaceDiffTracker tracker = TaskWorkspaceDiffTracker.start(
-                        projectRoot, task.getResourceClaims());
+                        projectRoot, task.getResourceClaims(), sideGit);
                 planStateStore.saveTaskDiffBaseline(
                         planId,
                         task.getId(),
@@ -1318,7 +1321,7 @@ public class PlanExecuteAgent {
             if (interruptedRecoveryTaskIds.contains(task.getId())) {
                 throw new IOException("durable diff baseline unavailable during recovery");
             }
-            return TaskWorkspaceDiffTracker.start(projectRoot, task.getResourceClaims());
+            return TaskWorkspaceDiffTracker.start(projectRoot, task.getResourceClaims(), sideGit, false);
         } catch (SQLException e) {
             throw new IOException("durable diff baseline unavailable: " + e.getMessage(), e);
         }
@@ -1363,8 +1366,27 @@ public class PlanExecuteAgent {
         TaskRunResult result = initial;
         int retries = 0;
         while (true) {
+            if (result.verificationReport() != null
+                    && result.verificationReport().outcome() == VerificationOutcome.REJECTED) {
+                return result;
+            }
+            TaskReviewDiff reviewDiff = null;
+            if (diffTracker != null) {
+                try {
+                    reviewDiff = diffTracker.reviewDiff();
+                } catch (IOException e) {
+                    reviewDiff = TaskReviewDiff.unavailable("review diff capture failed");
+                    log.warn("Unable to collect review diff for task {}", task.getId(), e);
+                }
+                if (!reviewDiff.complete()) {
+                    return result.withReport(new TaskVerificationReport(
+                            VerificationOutcome.UNAVAILABLE, task.getAcceptanceCriteria(),
+                            result.verificationReport() == null ? List.of() : result.verificationReport().evidence(),
+                            reviewDiff.issues()));
+                }
+            }
             StepReviewDecision decision = reviewer.review(new StepReviewRequest(
-                    goal, task, result.result(), result.verificationReport()));
+                    goal, task, result.result(), result.verificationReport(), reviewDiff));
             if (decision.approved()) {
                 return result;
             }

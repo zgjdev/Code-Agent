@@ -30,6 +30,8 @@ flowchart LR
 
 接入PathGuard，规范化项目根、解析路径并校验符号链接逃逸；CommandGuard拒绝明确危险命令。命令执行在Windows用PowerShell，在类Unix用bash，并限制等待时间与输出体积。校验失败必须给出明确诊断，不能悄悄换工具执行同一动作。
 
+execute_command 直接返回 typed ToolOutput：真实进程退出码非零时 successful=false，超时、启动失败和取消同样失败，不用“执行完成”文本推断成功。structuredContent 携带实际 executedCommand，完成时同时携带 exitCode；有序 ToolExecutionResult 传播成功状态和审批后的实际命令，供 Task evidence 分类和去重，原调用参数不改写。命令 stdout/stderr 仍有上限，摘要不是测试覆盖或权限的证明。打印版本/帮助、dry-run、仅收集测试等模式不产生 TEST/PASSED。
+
 ### 3.2 将HITL与审计置于共享执行链
 
 危险操作经过审批，可批准、拒绝、跳过或修改参数。修改参数后重新校验最终参数。AuditLog记录工具、结果、原因与审批来源；凭证需脱敏，报告不复制真实工具正文或会话图片。
@@ -53,6 +55,8 @@ write_file成功后调用LspManager，将JavaParser语法诊断保存在pending�
 使用JGit在用户目录建立独立快照仓库，避免污染项目.git。SnapshotService在turn前同步保存pre状态，在turn后调度post保存；恢复前先保存pre-restore，再恢复到目标pre-turn状态。
 
 快照写入串行，排除构建产物与内部目录，数量受配置限制。恢复仍经过HITL和审计，不能用“恢复”绕过文件授权。对计划以顶层turn建立快照，不把每个Task都变成用户历史提交。
+
+Task 审核另用有界 scoped 正文保存独立 tree/commit 和 refs/codeagent/task-baselines 引用，写入与读取均由 SideGitManager 同步方法串行；不更新 HEAD、磁盘 index 或 worktree。读回按原 SHA-256 校验，缺失或超限不能补造旧版本。关闭快照时本轮仍可使用内存旧正文，跨进程恢复不能保证完整 patch。Task 引用暂不自动按 Plan 删除，显式清理 Side-Git 会同时删除这些恢复材料；配置 maxSnapshots 只限制已有用户历史展示，不是 Task 对象的自动 GC 上限。
 
 ## 4. 实现任务与测试矩阵
 

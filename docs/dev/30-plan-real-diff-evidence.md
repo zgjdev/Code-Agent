@@ -1,6 +1,6 @@
 # Plan DIFF Evidence 真实工作区差异校验
 
-> 状态：实现与审查问题修复完成；针对性、quick、全量测试、package 和 diff check 均已验证。
+> 状态：第 1–10 节保留此前 DIFF evidence 改造的已验证历史；第 11 节记录本次 Reviewer 实际 patch 与命令证据扩展，当前正在完成回归与独立审查。
 >
 > 本文是本次“将 Plan 的 DIFF evidence 从 write_file 成功标记升级为真实 before/after 工作区差异”改造的独立设计、实施与审计文档。后续审查本次修改时，应以本文结合源码和提交记录为准。
 >
@@ -775,3 +775,90 @@ docs/dev/30-plan-real-diff-evidence.md
 7. Plan 的 Reviewer 与 UNVERIFIED 终态行为不回归；
 8. 针对性测试、quick 回归、全量测试和构建结果被真实记录；
 9. 文档与最终源码保持一致。
+
+## 11. 2026-10-12 扩展：Reviewer 实际 patch 与命令证据
+
+### 11.1 背景、目标与非目标
+
+分支 `feat/plan-review-diff-and-test-evidence` 从同步后的 main 创建，初次交付保持未提交，后续按用户明确授权分批提交。目标：Reviewer 收到 Task 初始版本到最终版本的 unified patch、验收标准和执行证据；非零退出、超时、启动失败不能形成 PASSED；不同测试命令的失败不能被其他成功命令掩盖。非目标：Reviewer 工具权限、测试报告/断言数量解析、容器隔离、计划结构和自动提交。退出码成功只代表命令成功，不宣称执行了多少测试。
+
+### 11.2 现状分析与源码证据
+
+`TaskWorkspaceDiffTracker.diff` 仅输出 hash 和行统计；baseline 仅持久化 hashes，恢复无旧正文。`PlanExecuteAgent.startDiffTracker` 仅在 required DIFF 时建立基线，`applyStepReview` 只发结果和证据。`SubAgentStepReviewer` 未显式传入验收标准。`ToolRegistry.executeCommand` 返回正常完成文本，即使 exitCode 非零，默认 `classifyTextOutput` 仍标记成功；Collector 直接信任此标记。Gate 只需任意 PASSED，可掩盖 FAILED。
+
+### 11.3 方案设计、边界和恢复
+
+新增 `TaskReviewDiff(patch, complete, issues)`。Tracker 生成实际 unified diff，覆盖新增/删除/修改和上下文，始终相对首次基线，重试不重置。单文件文本仍限 2 MiB、基线缓存仍限 16 MiB，patch 输出最多 48 KiB；二进制、缺失旧正文或截断明确标为不完整，不允许 Reviewer 批准，Task 为 UNVERIFIED，不解锁后继。不完整 diff 不通过无意义 Worker 重试扩大权限。写任务启用 stepReview 时即使未声明 DIFF 也建立基线；只读任务无 patch 要求。
+
+复用 `SideGitManager` 对象库，通过内存 DirCache + ObjectInserter 保存 Task 写集中的已缓存正文，创建独立无父 commit 和 `refs/codeagent/task-baselines/` 引用；不改 HEAD/index/worktree，不扫描其他 Task 文件。SQLite baseline 增加可选 snapshotCommitId，仍无源码；旧 hash-only JSON 兼容，恢复不建立新基线。读回正文限量并核验原 SHA-256；引用丢失/快照关闭时保留 hash 证据但 review diff 不完整。启用快照时保存失败必须在 Worker 前失败关闭。引用随显式快照清理删除，暂不自动按 Plan 回收，避免损坏恢复中的 Plan；长期存储成本是已知限制。
+
+路径必须留在工作区和声明写集，拒绝符号链接祖先逃逸，恢复路径重新验证。Side-Git 接口 synchronized，与已有 writer 串行，不获得 SQLite 锁；顺序为写 snapshot、持久化 baseline、运行 Worker，持久化失败不运行 Worker。并行 Task 使用独立 tracker/ref/reviewer。Reviewer 保持无工具，patch 和 Worker 摘要是不可信执行材料，不能产生权限。证据门禁失败不得靠 Reviewer 批准绕过。patch 可能进入既有本地 session ledger，沿用敏感正文权限约束，禁止放入 SQLite/audit 摘要或交付报告。
+
+execute_command 返回 typed ToolOutput，真实 exitCode 决定成功，超时/异常/取消分类失败，展示文本兼容。Collector 保留相同完整命令的最新 TEST/BUILD 证据，不能用截断摘要作身份；不同命令分别保留。Gate 对 TEST/BUILD 要求至少成功一次且无未解决失败。明显 skip-tests 命令不能成为 TEST/PASSED；命令分类采用明确程序入口而非 echo 文本。保留有界输出摘要供 Reviewer 判断，输出文本不能作为成功或权限来源。
+
+审批改参后的实际命令由 native ToolOutput 的 structuredContent.executedCommand 传播到 ToolExecutionResult.executedCommand；调用 ID、原 argumentsJson 与 ledger 身份不改写。Collector 以实际命令分类和去重；旧 9 参数 ToolExecutionResult 构造兼容，可信旧调用者仍按原 invocation 描述执行命令。分类器只接受无 shell 控制/替换操作的字面参数，按 Maven/Gradle 目标、包管理器子命令和 pytest/cargo/go 入口识别；选项值不能冒充 test 目标。version/help/dry-run/collect-only/no-run/ignore-scripts、Maven fail-never、Gradle 排除 Task 等明显不执行或掩盖失败的模式不产生 PASSED，未知组合保守降为 TOOL_RESULT。stdout 不用来猜测批准或生成权限；任意自定义脚本是否真正执行断言仍需 Reviewer 检查，不解析测试数量。
+
+Tracker 使用所属 SnapshotService.manager 的实际 excludes（包括可信宿主自定义配置），在 workspaceWrite 的初始捕获、当前捕获和恢复验证中保持一致。transient Plan 只保留内存 baseline，仍用该 manager 的排除规则；仅 durable Plan 保存 Task 正文引用。显式声明的 writePaths 保持既有语义，不额外禁用已授权的排除路径。
+
+兼容/回滚：新代码可读旧 hash-only baseline，不自动重置或改写它。旧程序可能拒绝新 snapshotCommitId 字段且失去新增审核保证；回退程序前应停止执行、处理或显式放弃新建活动 Plan，再回退代码。不得自动删除计划或源码。Side-Git task refs 可保留；显式清理后旧正文不可恢复，当前版本会失败关闭。
+
+```mermaid
+sequenceDiagram
+    participant P as Plan
+    participant S as SideGit
+    participant DB as SQLite
+    participant W as Task Worker
+    participant D as Tracker/Gate
+    participant R as Reviewer
+    P->>D: 捕获 Task 初始写集
+    D->>S: 有界正文与独立引用
+    P->>DB: hashes + snapshotCommitId
+    P->>W: 执行和重试
+    W-->>D: typed 工具证据
+    D->>D: 初始 baseline 到最终 diff 和 gate
+    alt 完整且证据满足
+        P->>R: 验收标准 + patch + 执行证据
+        R-->>P: 结构化批准或拒绝
+    else 缺失、截断或失败
+        D-->>P: 未验证，不解锁后继
+    end
+```
+
+### 11.4 实现顺序与测试矩阵
+
+1. ToolRegistryTest 先复现 exit 7 被误判成功；实现 typed 命令结果，回归 timeout/取消/策略。Collector/Gate 测试覆盖失败重跑、不同命令失败、skip/echo 和实际输出摘要。
+2. Tracker 测试覆盖实际 patch/新增删除/范围隔离/预算不完整/legacy 恢复；SideGitManagerTest 覆盖 scoped 保存、不改 HEAD/index、跨实例读回和关闭。
+3. Reviewer 测试捕获 LLM 输入，验收标准/patch/证据完整且无工具；不完整 diff 不发批准请求。Plan 集成测试覆盖未要求 DIFF 的写任务、重试初始 baseline 和恢复正文。
+4. 同步 AGENTS、README 和 implementation 文档；运行针对性、quick、全量、构建和 git diff --check，真实结果回填下节。
+
+### 11.5 验收清单与实施记录
+
+- [x] Reviewer 实际输入包含 unified patch、验收标准和真实执行证据。
+- [x] SQLite 无源码，Task 快照不改 HEAD/index，恢复使用原 baseline。
+- [x] 不完整 patch、失败证据不能完成 Task 或解锁后继。
+- [x] 原有并发范围、HITL 和无工具 Reviewer 契约保持有效。
+- [x] 针对性/quick/全量/构建/diff 检查结果真实记录。
+
+本次基线为 `main@cb7cf06c75893ac931b21c4a6be8c487deb7611b`，已确认与 origin/main 一致后创建分支。初次验证交付时改动保持未提交。
+
+测试先行证据：`ToolRegistryTest#nativeCommandNonZeroExitIsTypedFailure` 在原实现失败，exit 7 被报告 successful=true；typed 修复后通过。Plan patch 输入测试在原接线上观察到 0 个实际 patch（预期 2）；补齐接线后通过。写任务缺失 patch 的 Reviewer 测试先返回 APPROVED（预期 UNAVAILABLE），增加材料门禁后通过。新增 API 测试最初因接口尚未实现编译失败；测试夹具的 IOException 和 Message 限定名错误已修正，随后执行 Maven javac 全量重编译和针对性测试通过。
+
+已执行针对性命令（Java 17）：
+
+```powershell
+mvn test -DskipTests=false "-Dtest=TaskReviewDiffTest,TaskWorkspaceDiffTrackerTest,PlanDiffEvidenceIntegrationTest,PlanExecuteRecoveryTest,SubAgentStepReviewerTest,TaskEvidenceCollectorTest,DeterministicEvidenceGateTest,ToolRegistryTest,SideGitManagerTest,PlanExecuteAgentTest,MainPlanAgentFactoryTest,PlanStateStoreTest,PipelineOptionsTest"
+```
+
+结果：138 项，0 failure，0 error，2 项既有 skip。另已验证实际离线 Maven 无 POM 失败，通过 native tool → collector → gate 的完整链路保持 FAILED/REJECTED。
+
+环境记录：`mvn clean test` 在 clean 阶段因 IDE 占用 `target/classes` 目录失败。该命令未运行测试；清理已移除 Maven 编译状态，随后 `mvn test` 使用 javac 重新编译全部 377 个主源码及 266 个测试源码，100 项针对性测试通过。没有停止用户 IDE，也未把 clean 失败写成验证成功。
+
+独立只读审查发现并复现三项 Important：HITL 最终参数未用于证据、custom snapshot excludes 未传入 Tracker、非执行命令被误归 TEST。三个新用例在修复前全部失败；修复后的 collector/tracker/HITL/ToolRegistry 回归 89 项全部通过。已补实际命令元数据、跨保存/恢复的真实 excludes 和字面子命令分类，并加入 verbose 测试正例避免过度拒绝。审查修复前 quick 1451 项/全量 1526 项均 0 failure、0 error，但不能作为最终源码验收；后续最终复跑结果单独记录。
+
+独立复审确认三项已闭合，未发现阻断交付的新问题。最终 quick 首次复跑发现既有非法 excludes 测试在 manager 创建之后才改全局配置，已调整为构造前注入，不改变生产实现或失败关闭断言。修正后七类针对性测试 98 项、0 failure、0 error、1 项既有 skip；最终 quick 使用 Maven javac 重编译全部 377 个主源码、266 个测试源码，`mvn test -Pquick -DskipTests=false` 结果 1455 项、0 failure、0 error、18 项既有 skip。
+
+最终 `mvn test -DskipTests=false` 全量结果：1530 项、0 failure、0 error、24 项既有 skip。跳过包括当前平台不支持的 stdio transport 用例及既有显式禁用/环境依赖用例，不宣称全部执行。
+
+最终 `mvn package -DskipTests` 构建成功，生成 shaded JAR；保留既有依赖重叠/module-info 的 shade 警告。`git diff --check` 通过，新增文件另行检查行尾空白通过。`clean` 的目录占用限制仍存在，不能宣称 clean 构建通过。初次交付未执行 commit/push/PR/merge。
+
+用户随后明确要求“分批提交这些修改”，按依赖顺序提交：`6bfaf8b` 修复实际命令执行与 TEST/BUILD 门禁；`e953ed5` 增加 Reviewer 实际 patch 与持久化基线；第三批同步指南、架构说明及本文验证记录。提交前逐批执行 `git diff --cached --check`；代码与上述通过验证的版本一致，仅更新交付状态记录。不执行 push/PR/merge。

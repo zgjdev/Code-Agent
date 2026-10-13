@@ -1263,6 +1263,7 @@ public class ToolRegistry {
                         argMap.get("query"), parseInt(argMap.get("top_k"), 5));
                 case "web_fetch" -> webFetchOutput(
                         argMap.get("url"), parseInt(argMap.get("max_chars"), DEFAULT_FETCH_MAX_CHARS));
+                case "execute_command" -> executeCommandOutput(argMap.get("command"));
                 default -> classifyTextOutput(tool.executor().execute(argMap));
             };
             if (shouldAudit) {
@@ -1547,9 +1548,24 @@ public class ToolRegistry {
     }
 
     private String executeCommand(String command) {
+        return executeCommandOutput(command).text();
+    }
+
+    private ToolOutput executeCommandOutput(String command) {
+        String normalized = command == null ? "" : command.trim();
+        ToolOutput output = runNativeCommand(normalized);
+        var metadata = mapper.createObjectNode().put("executedCommand", normalized);
+        if (output.structuredContent() != null && output.structuredContent().has("exitCode")) {
+            metadata.set("exitCode", output.structuredContent().get("exitCode"));
+        }
+        return new ToolOutput(output.text(), output.imageParts(), output.successful(), output.discoveredUrls(),
+                output.failureKind(), metadata);
+    }
+
+    private ToolOutput runNativeCommand(String command) {
         String normalized = command == null ? "" : command.trim();
         if (normalized.isEmpty()) {
-            return "执行命令失败: 命令不能为空";
+            return ToolOutput.failure("执行命令失败: 命令不能为空");
         }
         String denyReason = CommandGuard.check(normalized);
         if (denyReason != null) {
@@ -1583,23 +1599,26 @@ public class ToolRegistry {
                 process.destroyForcibly();
                 process.waitFor(2, TimeUnit.SECONDS);
                 outputFuture.cancel(true);
-                return "命令执行超时（" + commandTimeoutSeconds + "秒），已强制终止";
+                return ToolOutput.failure("命令执行超时（" + commandTimeoutSeconds + "秒），已强制终止");
             }
 
             String output = getCommandOutput(outputFuture);
             int exitCode = process.exitValue();
-            return String.format("命令执行完成 (exit code: %d)\n%s", exitCode, output);
+            String text = String.format("命令执行完成 (exit code: %d)\n%s", exitCode, output);
+            return new ToolOutput(text, List.of(), exitCode == 0, List.of(),
+                    exitCode == 0 ? ToolOutput.FailureKind.NONE : ToolOutput.FailureKind.EXECUTION_ERROR,
+                    mapper.createObjectNode().put("exitCode", exitCode));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             if (process != null) {
                 process.destroyForcibly();
             }
-            return "用户取消了此次工具调用";
+            return ToolOutput.failure(ToolOutput.FailureKind.CANCELLED, "用户取消了此次工具调用");
         } catch (Exception e) {
             if (process != null) {
                 process.destroyForcibly();
             }
-            return "执行命令失败: " + e.getMessage();
+            return ToolOutput.failure("执行命令失败: " + e.getMessage());
         } finally {
             outputReaderExecutor.shutdownNow();
         }
@@ -1679,11 +1698,20 @@ public class ToolRegistry {
                                       String result, long elapsedMillis, boolean timedOut,
                                       List<com.codeagent.llm.LlmClient.ContentPart> imageParts,
                                       boolean successful,
-                                      List<String> discoveredUrls) {
+                                      List<String> discoveredUrls,
+                                      String executedCommand) {
         public ToolExecutionResult {
             imageParts = imageParts == null ? List.of() : List.copyOf(imageParts);
             discoveredUrls = discoveredUrls == null ? List.of() : List.copyOf(discoveredUrls);
             successful = successful && !timedOut;
+        }
+
+        public ToolExecutionResult(String id, String name, String argumentsJson,
+                                   String result, long elapsedMillis, boolean timedOut,
+                                   List<com.codeagent.llm.LlmClient.ContentPart> imageParts,
+                                   boolean successful, List<String> discoveredUrls) {
+            this(id, name, argumentsJson, result, elapsedMillis, timedOut, imageParts,
+                    successful, discoveredUrls, null);
         }
 
         /** Backward-compatible constructor for existing registries and tests. */
@@ -1704,7 +1732,9 @@ public class ToolRegistry {
                     false,
                     output == null ? List.of() : output.imageParts(),
                     output != null && output.successful(),
-                    output == null ? List.of() : output.discoveredUrls());
+                    output == null ? List.of() : output.discoveredUrls(),
+                    "execute_command".equals(invocation.name()) && output != null && output.structuredContent() != null
+                            ? output.structuredContent().path("executedCommand").asText(null) : null);
         }
 
         private static ToolExecutionResult completed(ToolInvocation invocation, String result, long elapsedMillis) {

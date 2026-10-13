@@ -19,6 +19,40 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SubAgentStepReviewerTest {
+    @Test
+    void sendsActualPatchAndAcceptanceCriteriaWithoutTools() {
+        SequenceClient client = new SequenceClient(validReview(true, "", List.of(), List.of()));
+        Task task = new Task("write", "edit", Task.TaskType.FILE_WRITE, List.of(), null,
+                List.of("new behavior is covered"), java.util.Set.of());
+        SubAgentStepReviewer reviewer = new SubAgentStepReviewer(new SubAgent(
+                "reviewer", AgentRole.REVIEWER, client, new ToolRegistry()), quietOut());
+        assertTrue(reviewer.review(new StepReviewRequest("goal", task, "done", null,
+                new TaskReviewDiff("--- a/x\n+++ b/x\n-old\n+new\n", true, List.of()))).approved());
+        assertTrue(client.input.contains("new behavior is covered"));
+        assertTrue(client.input.contains("-old\n+new"));
+        assertTrue(client.toolsAbsent);
+    }
+
+    @Test
+    void incompleteDiffCannotBeApprovedOrSentAsComplete() {
+        SequenceClient client = new SequenceClient(validReview(true, "", List.of(), List.of()));
+        SubAgentStepReviewer reviewer = new SubAgentStepReviewer(new SubAgent(
+                "reviewer", AgentRole.REVIEWER, client, new ToolRegistry()), quietOut());
+        StepReviewDecision decision = reviewer.review(new StepReviewRequest("goal", TASK, "done", null,
+                TaskReviewDiff.unavailable("missing old text")));
+        assertEquals(StepReviewDecision.ReviewOutcome.UNAVAILABLE, decision.outcome());
+        assertEquals("", client.input);
+    }
+
+    @Test
+    void writingTaskCannotBeReviewedWithoutDiffMaterial() {
+        SequenceClient client = new SequenceClient(validReview(true, "", List.of(), List.of()));
+        StepReviewDecision decision = new SubAgentStepReviewer(new SubAgent("reviewer", AgentRole.REVIEWER,
+                client, new ToolRegistry()), quietOut()).review(new StepReviewRequest("goal",
+                new Task("write", "edit", Task.TaskType.FILE_WRITE), "done", null));
+        assertEquals(StepReviewDecision.ReviewOutcome.UNAVAILABLE, decision.outcome());
+        assertEquals("", client.input);
+    }
 
     private static final Task TASK = new Task("task_1", "读取配置文件", Task.TaskType.FILE_READ);
 
@@ -121,6 +155,8 @@ class SubAgentStepReviewerTest {
 
     private static final class SequenceClient extends GLMClient {
         private final Queue<LlmClient.ChatResponse> responses;
+        private String input = "";
+        private boolean toolsAbsent;
 
         private SequenceClient(String... contents) {
             super("test-key");
@@ -134,6 +170,9 @@ class SubAgentStepReviewerTest {
         public LlmClient.ChatResponse chat(List<LlmClient.Message> messages,
                                            List<LlmClient.Tool> tools,
                                            LlmClient.StreamListener listener) {
+            input = messages.stream().map(LlmClient.Message::content).filter(java.util.Objects::nonNull)
+                    .collect(java.util.stream.Collectors.joining("\n"));
+            toolsAbsent = tools == null || tools.isEmpty();
             LlmClient.ChatResponse response = responses.poll();
             return response == null
                     ? new LlmClient.ChatResponse("assistant", "", null, 10, 5)

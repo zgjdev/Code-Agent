@@ -33,6 +33,104 @@ class PlanDiffEvidenceIntegrationTest {
     Path tempDir;
 
     @Test
+    void writingTaskWithoutRequiredDiffStillReviewsInitialPatchAcrossRetry() throws Exception {
+        Files.createDirectories(tempDir.resolve("src"));
+        Files.writeString(tempDir.resolve("src/App.java"), "initial-value\n");
+        QueueLlmClient client = new QueueLlmClient(List.of(
+                write("w1", "first-attempt\n"), finalAnswer(), reviewAnswer(false),
+                write("w2", "final-value\n"), finalAnswer(), reviewAnswer(true)));
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        Planner planner = writePlanner(client);
+        PlanExecuteAgent agent = new PlanExecuteAgent(client, registry, planner, new MemoryManager(client),
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()), PipelineOptions.FULL_PRESET);
+        String result = agent.run("edit");
+        assertTrue(result.contains("计划执行完成"), result);
+        List<String> reviews = client.inputs.stream()
+                .filter(input -> input.contains("Task initial baseline to final workspace patch")).toList();
+        assertEquals(2, reviews.size());
+        assertTrue(reviews.get(0).contains("-initial-value\n+first-attempt"));
+        assertTrue(reviews.get(1).contains("-initial-value\n+final-value"));
+        assertTrue(reviews.get(1).contains("expected behavior"));
+    }
+
+    @Test
+    void incompleteReviewPatchStopsWithoutReviewerCallOrUnlockingSuccessor() throws Exception {
+        Files.createDirectories(tempDir.resolve("src"));
+        Files.writeString(tempDir.resolve("src/App.java"), "initial\n");
+        QueueLlmClient client = new QueueLlmClient(List.of(write("w", "changed-line\n".repeat(10000)), finalAnswer()));
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        Planner planner = new Planner(client) {
+            @Override public ExecutionPlan createPlan(String goal) {
+                ExecutionPlan plan = writePlan(goal);
+                plan.addTask(new Task("after", "must not execute", Task.TaskType.ANALYSIS, List.of("task_1")));
+                plan.computeExecutionOrder();
+                return plan;
+            }
+        };
+        PlanExecuteAgent agent = new PlanExecuteAgent(client, registry, planner, new MemoryManager(client),
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()), PipelineOptions.FULL_PRESET);
+        String result = agent.run("edit");
+        assertTrue(result.contains("未验证"), result);
+        assertTrue(result.contains("diff truncated"), result);
+        assertEquals(2, client.calls());
+    }
+
+    @Test
+    void taskSnapshotStorageFailureStopsBeforeWorker() throws Exception {
+        Files.createDirectories(tempDir.resolve("src"));
+        Files.writeString(tempDir.resolve("src/App.java"), "initial\n");
+        Path blockedStorage = tempDir.resolve("not-a-directory");
+        Files.writeString(blockedStorage, "block storage");
+        QueueLlmClient client = new QueueLlmClient(List.of());
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (var snapshotService = new com.codeagent.snapshot.SnapshotService(new com.codeagent.snapshot.SideGitManager(
+                tempDir, new com.codeagent.snapshot.SnapshotConfig(true, blockedStorage, 50, List.of(".git"))));
+             SessionStore sessions = SessionStore.open(tempDir.resolve("history"));
+             SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir, "test", "test-model", null, "plan", "plan-agent"))) {
+            registry.setSnapshotService(snapshotService);
+            PlanExecuteAgent agent = new PlanExecuteAgent(client, registry, writePlanner(client), new MemoryManager(client),
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()), PipelineOptions.FULL_PRESET);
+            Agent react = new Agent(client, registry);
+            react.attachSession(session);
+            agent.setParentConversationContext(react.getParentConversationContext());
+            agent.setPlanStateStore(new PlanStateStore(tempDir.resolve("plans.db")));
+            String result = agent.run("edit");
+            assertTrue(result.contains("未验证"), result);
+            assertEquals(0, client.calls());
+            assertEquals("initial\n", Files.readString(tempDir.resolve("src/App.java")));
+        }
+    }
+
+    private static Planner writePlanner(LlmClient client) {
+        return new Planner(client) {
+            @Override public ExecutionPlan createPlan(String goal) {
+                return writePlan(goal);
+            }
+        };
+    }
+
+    private static ExecutionPlan writePlan(String goal) {
+        ExecutionPlan plan = new ExecutionPlan("patch-review", goal);
+        plan.addTask(new Task("task_1", "edit src/App.java", Task.TaskType.FILE_WRITE, List.of(),
+                new TaskResourceClaims(List.of("src/App.java"), List.of("src/App.java"), false),
+                List.of("expected behavior"), Set.of()));
+        plan.computeExecutionOrder();
+        return plan;
+    }
+
+    private static LlmClient.ChatResponse reviewAnswer(boolean approved) {
+        return new LlmClient.ChatResponse("assistant", "{\"approved\":" + approved
+                + ",\"summary\":\"review\",\"issues\":[\"check behavior\"],\"suggestions\":[]}", null, 1, 1);
+    }
+
+    @Test
     void noOpWriteDoesNotSatisfyRequiredDiffEvidence() throws Exception {
         Path source = tempDir.resolve("src/App.java");
         Files.createDirectories(source.getParent());
@@ -103,15 +201,16 @@ class PlanDiffEvidenceIntegrationTest {
         Files.createDirectories(tempDir.resolve("src"));
         Files.writeString(tempDir.resolve("src/App.java"), "before\n");
         QueueLlmClient llmClient = new QueueLlmClient(List.of());
-        ToolRegistry registry = new ToolRegistry();
-        registry.setProjectPath(tempDir.toString());
-        PlanExecuteAgent agent = new PlanExecuteAgent(
-                llmClient, registry, new DiffPlanner(llmClient), new MemoryManager(llmClient),
-                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
-                new PrintStream(new ByteArrayOutputStream()), PipelineOptions.PLAN_PRESET);
         String previous = System.getProperty("codeagent.snapshot.excludes");
         System.setProperty("codeagent.snapshot.excludes", "*[");
         try {
+            // Snapshot configuration is captured when the workspace manager is created.
+            ToolRegistry registry = new ToolRegistry();
+            registry.setProjectPath(tempDir.toString());
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    llmClient, registry, new DiffPlanner(llmClient), new MemoryManager(llmClient),
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()), PipelineOptions.PLAN_PRESET);
             String result = agent.run("修改 src/App.java");
 
             assertTrue(result.contains("DIFF evidence failed"), result);
@@ -171,6 +270,7 @@ class PlanDiffEvidenceIntegrationTest {
     private static final class QueueLlmClient implements LlmClient {
         private final Queue<ChatResponse> responses;
         private int calls;
+        private final List<String> inputs = new java.util.ArrayList<>();
 
         private QueueLlmClient(List<ChatResponse> responses) {
             this.responses = new ArrayDeque<>(responses);
@@ -189,6 +289,8 @@ class PlanDiffEvidenceIntegrationTest {
         public ChatResponse chat(List<Message> messages, List<Tool> tools,
                                  StreamListener listener) throws IOException {
             calls++;
+            inputs.add(messages.stream().map(Message::content).filter(java.util.Objects::nonNull)
+                    .collect(java.util.stream.Collectors.joining("\n")));
             ChatResponse response = responses.poll();
             if (response == null) {
                 throw new IOException("unexpected extra LLM call");

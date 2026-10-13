@@ -1,5 +1,7 @@
 package com.codeagent.mcp.transport;
 
+import com.codeagent.config.CodeAgentPaths;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -42,6 +44,7 @@ public class StdioTransport implements McpTransport {
         if (env != null && !env.isEmpty()) {
             builder.environment().putAll(env);
         }
+        CodeAgentPaths.configureProcessEnvironment(builder.environment());
         this.process = builder.start();
         this.stdin = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
         startStdoutReader();

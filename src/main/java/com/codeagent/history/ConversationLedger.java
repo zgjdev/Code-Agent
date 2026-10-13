@@ -1,5 +1,7 @@
 package com.codeagent.history;
 
+import com.codeagent.config.CodeAgentPaths;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
@@ -86,6 +88,11 @@ public final class ConversationLedger {
     /**
      * Opens a new session ledger below {@code ~/.codeagent/history/raw/}.
      */
+    public static ConversationLedger openDefault() throws IOException {
+        return open(CodeAgentPaths.resolve("history"), generateSessionId());
+    }
+
+    /** Explicit user-home injection retained for trusted hosts and tests. */
     public static ConversationLedger openDefault(Path userHome) throws IOException {
         Objects.requireNonNull(userHome, "userHome");
         return open(userHome.resolve(".codeagent").resolve("history"), generateSessionId());

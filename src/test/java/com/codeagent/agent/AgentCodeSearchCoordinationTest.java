@@ -25,7 +25,7 @@ class AgentCodeSearchCoordinationTest {
     }
     private void run(String input,boolean empty,List<LlmClient.ChatResponse> responses,String expectedBody) throws Exception {
         Path root=temp.resolve("project"); CodeSearchAgentHarness.writeFixture(root,CodeSearchAgentHarness.fixture());
-        String old=System.getProperty("codeagent.memory.dir"); System.setProperty("codeagent.memory.dir",temp.resolve("memory").toString());
+        String old=System.getProperty("codeagent.home"); System.setProperty("codeagent.home",temp.resolve("memory").toString());
         var script=new ScriptClient(responses,expectedBody);
         var registry=new CodeSearchAgentHarness.RecordingRegistry(); registry.setProjectPath(root.toString());
         try(var service=new DefaultCodeRetrievalService(new SqliteRetrievalIndex(temp.resolve("index.db")),new EmbeddingResolution(Optional.empty(),"off",false));
@@ -40,7 +40,7 @@ class AgentCodeSearchCoordinationTest {
                 assertTrue(registry.outputs.get(0).result().contains("index_empty"));
                 assertEquals(0,service.status().chunkCount());
             }
-        } finally {if(old==null)System.clearProperty("codeagent.memory.dir");else System.setProperty("codeagent.memory.dir",old);}
+        } finally {if(old==null)System.clearProperty("codeagent.home");else System.setProperty("codeagent.home",old);}
     }
     private static LlmClient.ChatResponse tool(String name,String args) {
         return new LlmClient.ChatResponse("assistant","",List.of(new LlmClient.ToolCall(UUID.randomUUID().toString(),new LlmClient.ToolCall.Function(name,args))),10,2);

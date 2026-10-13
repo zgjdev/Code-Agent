@@ -46,6 +46,9 @@ class BetterHarnessRunnerTest {
                 progress::add);
 
         assertTrue(result.durable());
+        assertTrue(result.reportMarkdownPath().startsWith(
+                com.codeagent.config.CodeAgentPaths.workspaceReports(tempDir)));
+        assertFalse(Files.exists(tempDir.resolve(".codeagent/better-harness")));
         assertEquals(1, result.findingCount());
         assertEquals(4, client.callCount.get());
         assertTrue(Files.isRegularFile(result.reportMarkdownPath()));
@@ -85,6 +88,7 @@ class BetterHarnessRunnerTest {
         assertFalse(result.durable());
         assertNotNull(result.reportMarkdown());
         assertFalse(Files.exists(tempDir.resolve(".codeagent/better-harness")));
+        assertFalse(Files.exists(com.codeagent.config.CodeAgentPaths.workspaceReports(tempDir)));
     }
 
     @Test

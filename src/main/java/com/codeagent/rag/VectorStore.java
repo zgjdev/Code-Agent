@@ -1,5 +1,7 @@
 package com.codeagent.rag;
 
+import com.codeagent.config.CodeAgentPaths;
+
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -22,9 +24,7 @@ public class VectorStore implements AutoCloseable {
 
     public VectorStore(String projectPath) throws SQLException {
         this.projectPath = normalizeProjectKey(projectPath);
-        String dbDir = System.getProperty("codeagent.rag.dir",
-                System.getProperty("user.home") + "/.codeagent/rag");
-        java.io.File dir = new java.io.File(dbDir);
+        java.io.File dir = CodeAgentPaths.resolve("rag").toFile();
         if (!dir.exists()) {
             dir.mkdirs();
         }

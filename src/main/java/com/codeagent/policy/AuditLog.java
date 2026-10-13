@@ -1,6 +1,6 @@
 package com.codeagent.policy;
 
-import com.codeagent.config.ConfigurationValues;
+import com.codeagent.config.CodeAgentPaths;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -23,7 +23,7 @@ import java.util.Locale;
  *
  * 落盘策略：
  * - 一行一条 JSON（JSONL 格式），按天分文件 audit-YYYY-MM-DD.jsonl
- * - 默认目录 ~/.codeagent/audit，可通过 -Dcodeagent.audit.dir 或 CODEAGENT_AUDIT_DIR 覆盖
+ * - 目录由统一 CODEAGENT_HOME 下的 audit 派生
  * - 写入失败只在 stderr 提示，不抛出，避免审计故障影响主流程
  *
  * 设计意图：
@@ -113,9 +113,7 @@ public class AuditLog {
     }
 
     private static Path defaultAuditDir() {
-        String configured = ConfigurationValues.get("codeagent.audit.dir", "CODEAGENT_AUDIT_DIR", null);
-        if (configured != null) return Path.of(configured);
-        return Path.of(System.getProperty("user.home"), ".codeagent", "audit");
+        return CodeAgentPaths.resolve("audit");
     }
 
     private static String truncate(String s) {

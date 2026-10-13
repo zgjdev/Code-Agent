@@ -9,6 +9,16 @@ import static org.junit.jupiter.api.Assertions.*;
 class ExecutionControlPolicyTest {
 
     @Test
+    void pendingInteractionBlocksNewTasksButAllowsControl() {
+        assertFalse(ExecutionControlPolicy.allowedWhileInteractionPending(CliCommandParser.CommandType.NONE));
+        assertFalse(ExecutionControlPolicy.allowedWhileInteractionPending(CliCommandParser.CommandType.SWITCH_PLAN));
+        assertFalse(ExecutionControlPolicy.allowedWhileInteractionPending(CliCommandParser.CommandType.SWITCH_REACT));
+        assertTrue(ExecutionControlPolicy.allowedWhileInteractionPending(CliCommandParser.CommandType.TASK));
+        assertTrue(ExecutionControlPolicy.allowedWhileInteractionPending(CliCommandParser.CommandType.CANCEL));
+        assertTrue(ExecutionControlPolicy.allowedWhileInteractionPending(CliCommandParser.CommandType.SESSIONS));
+    }
+
+    @Test
     void everyCommandTypeHasAnExplicitBusyClassification() {
         assertEquals(CliCommandParser.CommandType.values().length,
                 Arrays.stream(CliCommandParser.CommandType.values())

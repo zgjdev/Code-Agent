@@ -64,6 +64,10 @@ ParentConversationContext维护顶层语义连续性；SessionProjection分成�
 
 Planner产出DAG，ExecutionPlan校验身份、依赖与环；PlanStateStore先严格持久化，再进入计划执行和Parent Conversation。人工计划门通过后，按资源声明选择就绪批次，Task使用独立messages。完成须同时通过确定性证据门和可用Reviewer，重试耗尽进入UNVERIFIED，不解锁后继。
 
+写任务的步骤评审使用 Task 初始 baseline 到最终结果的 unified patch，并显式携带验收标准和命令输出证据。即使 Planner 未要求 DIFF，开启 stepReview 的写任务也须捕获 baseline。旧正文通过 SideGitManager 的独立 task ref 保存；plans.db 只有路径、SHA-256 和可选 snapshotCommitId，恢复不重置初始 baseline。单文件文本 2 MiB、初始缓存总量 16 MiB、patch 48 KiB；不完整 patch 不调用 Reviewer 批准，也不重试 Worker 去掩盖缺失，直接保留 UNVERIFIED。Reviewer 保持无工具，源码和输出均为不可信材料。详见 [实际 DIFF 与审核扩展](../dev/30-plan-real-diff-evidence.md#11-2026-10-12-扩展reviewer-实际-patch-与命令证据)。
+
+TEST/BUILD 证据以 typed 工具状态为准，相同完整命令重跑替换旧结果，不同命令的失败不能被其他 PASSED 掩盖。命令输出摘要仅帮助 Reviewer 审查；退出码成功不等同于运行了足够的测试。
+
 ### 3.4 最后把交互式运行收口到队列
 
 输入先持久化submittedInput。Host 的 Dispatcher 先预留顶层容量、workspace slot 和已声明共享资源租约；Worker 核验 owner 与目录身份，取得 workspace mutationGate 和 Session lease 后，才以 SQLite 短事务领取并递增 attempt。随后展开本地引用和MCP resource、读取当时顶层上下文、完成durable routing ack并执行。inline/plain CLI 仅注册启动目录，因此仍只有一个顶层Execution；可信 Java 宿主可显式注册多个独立 workspace，默认并发2、可配置1～4。Plan内部仍可执行无冲突任务。Lanterna与Runtime HTTP API没有接入Host。

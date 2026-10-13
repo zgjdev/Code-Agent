@@ -131,6 +131,10 @@ Plan 路径包含：
 - 确定性证据门禁和 Reviewer 自动评审
 - 失败重试、重新规划与 SQLite checkpoint
 
+写任务的 Reviewer 会收到验收标准、真实命令证据，以及从 Task 初始版本到最终结果的 unified diff。持久化 Plan 的有界旧正文保存在 Side-Git 独立对象中，SQLite 只保存路径、SHA-256 和快照引用。patch 超过 48 KiB、二进制变更或恢复时旧正文不可用，会标记“未验证”并阻止后继任务。Reviewer 保持无工具权限。
+
+命令证据按真实退出码判断；非零退出、超时和启动失败不能算作测试通过。相同测试/构建命令重跑后以最新结果为准，不同命令的失败不会被其他命令成功掩盖。命令成功不等同于测试覆盖充分，仍需 Reviewer 按验收标准判断。
+
 使用 `/plan resume` 继续当前 Session 的未完成计划，使用 `/plan abandon` 显式放弃。
 
 inline/plain CLI 的 `/plan resume` 会将旧版、尚未绑定 Execution 的活动 Plan 收养到统一队列；已绑定 Execution 的计划随对应任务恢复。恢复保留已完成节点，从未完成的 Task 边界继续，不保证工具副作用恰好执行一次。

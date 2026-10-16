@@ -68,6 +68,23 @@ class RuntimeExecutionHostIntegrationTest {
         }
     }
 
+    @Test void missingInteractionAdapterRejectsWriteWithoutSideEffects() throws Exception {
+        Path root = Files.createDirectory(temporary.resolve("no-adapter"));
+        try (SessionStore sessions = SessionStore.open(temporary.resolve("history"));
+             RuntimeExecutionStore store = new RuntimeExecutionStore(temporary.resolve("execution.db"));
+             RuntimeExecutionHost host = new RuntimeExecutionHost(store, new RuntimeExecutionOptions(2),
+                     ExecutionEventSink.discarding(), temporary.resolve("locks"))) {
+            var factory = new DefaultWorkspaceRuntimeFactory(store, sessions,
+                    identity -> new WritingClient("blocked", new CountDownLatch(0), new CountDownLatch(0),
+                            new CopyOnWriteArrayList<>()));
+            var identity = host.registerWorkspace(root, factory);
+            var execution = host.submit(host.createSession(identity.key()), "写入 result.txt", ExecutionMode.REACT);
+            host.start();
+            awaitTerminal(store, execution.id());
+            assertFalse(Files.exists(root.resolve("result.txt")));
+        }
+    }
+
     @Test void capacityTwoKeepsThirdWorkspaceQueuedUntilOneFinishes() throws Exception {
         CountDownLatch entered = new CountDownLatch(2); CountDownLatch release = new CountDownLatch(1);
         try (SessionStore sessions = SessionStore.open(temporary.resolve("history"));
@@ -75,7 +92,7 @@ class RuntimeExecutionHostIntegrationTest {
              RuntimeExecutionHost host = new RuntimeExecutionHost(store, new RuntimeExecutionOptions(2),
                      ExecutionEventSink.discarding(), temporary.resolve("locks"))) {
             var factory = new DefaultWorkspaceRuntimeFactory(store, sessions,
-                    identity -> new WritingClient(identity.key().value(), entered, release, new CopyOnWriteArrayList<>()), false);
+                    identity -> new WritingClient(identity.key().value(), entered, release, new CopyOnWriteArrayList<>()));
             List<RuntimeExecution> executions = new ArrayList<>();
             for (String name : List.of("a", "b", "c")) {
                 var identity = host.registerWorkspace(Files.createDirectory(temporary.resolve(name)), factory);
@@ -108,7 +125,7 @@ class RuntimeExecutionHostIntegrationTest {
                 public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) { return chat(messages, tools); }
             };
             var identity = host.registerWorkspace(root, new DefaultWorkspaceRuntimeFactory(store, sessions, ignored -> client,
-                    true, () -> new com.codeagent.plan.PlanStateStore(temporary.resolve("plans.db"))));
+                    () -> new com.codeagent.plan.PlanStateStore(temporary.resolve("plans.db"))));
             RuntimeExecution execution = host.submit(host.createSession(identity.key()), "列出当前目录的文件", ExecutionMode.PLAN);
             host.start();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
@@ -137,7 +154,7 @@ class RuntimeExecutionHostIntegrationTest {
                 boolean isA = identity.canonicalRoot().equals(canonicalA);
                 return new WritingClient(isA ? "a" : "b", isA ? first : second,
                         isA ? release : new CountDownLatch(0), new CopyOnWriteArrayList<>());
-            }, false);
+            });
             var wa = host.registerWorkspace(a, factory);
             var wb = host.registerWorkspace(b, factory);
             var ea = host.submit(host.createSession(wa.key()), "写入 result.txt", ExecutionMode.REACT);

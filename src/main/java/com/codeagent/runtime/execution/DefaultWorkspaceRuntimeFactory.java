@@ -20,21 +20,16 @@ public final class DefaultWorkspaceRuntimeFactory implements WorkspaceRuntimeFac
     private final RuntimeExecutionStore executions;
     private final SessionStore sessions;
     private final Function<WorkspaceIdentity, LlmClient> clients;
-    private final boolean hitlEnabled;
     private final PlanStoreFactory planStores;
 
     public DefaultWorkspaceRuntimeFactory(RuntimeExecutionStore executions, SessionStore sessions,
                                           Function<WorkspaceIdentity, LlmClient> clients) {
-        this(executions, sessions, clients, true);
+        this(executions, sessions, clients, com.codeagent.plan.PlanStateStore::openDefault);
     }
     public DefaultWorkspaceRuntimeFactory(RuntimeExecutionStore executions, SessionStore sessions,
-                                          Function<WorkspaceIdentity, LlmClient> clients, boolean hitlEnabled) {
-        this(executions, sessions, clients, hitlEnabled, com.codeagent.plan.PlanStateStore::openDefault);
-    }
-    public DefaultWorkspaceRuntimeFactory(RuntimeExecutionStore executions, SessionStore sessions,
-            Function<WorkspaceIdentity, LlmClient> clients, boolean hitlEnabled, PlanStoreFactory planStores) {
+            Function<WorkspaceIdentity, LlmClient> clients, PlanStoreFactory planStores) {
         this.executions = Objects.requireNonNull(executions); this.sessions = Objects.requireNonNull(sessions);
-        this.clients = Objects.requireNonNull(clients); this.hitlEnabled = hitlEnabled;
+        this.clients = Objects.requireNonNull(clients);
         this.planStores = Objects.requireNonNull(planStores);
     }
     @Override public WorkspaceRuntime create(WorkspaceIdentity identity, ExecutionEventSink sink) throws Exception {
@@ -47,13 +42,13 @@ public final class DefaultWorkspaceRuntimeFactory implements WorkspaceRuntimeFac
             }
             sink.accept(new RuntimeExecutionEvent(identity.key(), request.sessionId(), request.executionId(), "interaction", request));
         };
-        BrokerHitlHandler hitl = new BrokerHitlHandler(hitlEnabled, broker, notify);
+        BrokerHitlHandler hitl = new BrokerHitlHandler(broker, notify);
         HitlToolRegistry tools = new HitlToolRegistry(hitl);
         tools.setProjectPath(identity.canonicalRoot().toString());
         ExecutionEventRenderer renderer = new ExecutionEventRenderer(identity, sink);
         SessionExecutionContextFactory contextFactory = new SessionExecutionContextFactory(sessions, identity.canonicalRoot(), buffer -> {
             Agent agent = new Agent(client, tools);
-            agent.setRenderer(renderer); agent.setHitlEnabledSupplier(hitl::isEnabled);
+            agent.setRenderer(renderer);
             return agent;
         });
         SessionExecutionContextRegistry<SessionExecutionContext> contexts = new SessionExecutionContextRegistry<>(
@@ -69,7 +64,7 @@ public final class DefaultWorkspaceRuntimeFactory implements WorkspaceRuntimeFac
                 SessionStore.SessionHandle session = sessions.create(new SessionStore.SessionCreateRequest(identity.canonicalRoot(),
                         client.getProviderName(), client.getModelName(), null, "runtime", "runtime-host"));
                 try {
-                    Agent agent = new Agent(client, tools); agent.setRenderer(renderer); agent.setHitlEnabledSupplier(hitl::isEnabled);
+                    Agent agent = new Agent(client, tools); agent.setRenderer(renderer);
                     var buffer = new com.codeagent.skill.SkillContextBuffer(); agent.setSkillContextBuffer(buffer); agent.attachSession(session);
                     contexts.adopt(session.sessionId(), new SessionExecutionContext(agent, session, buffer));
                     return session.sessionId();

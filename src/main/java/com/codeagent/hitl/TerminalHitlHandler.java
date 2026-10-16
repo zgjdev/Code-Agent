@@ -30,8 +30,6 @@ public class TerminalHitlHandler implements HitlHandler {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private volatile boolean enabled;
-
     // 本次会话中已批准"全部放行"的集合（并发安全）
     private final Set<String> approvedAllByTool = ConcurrentHashMap.newKeySet();
     private final Set<String> approvedAllByServer = ConcurrentHashMap.newKeySet();
@@ -39,29 +37,17 @@ public class TerminalHitlHandler implements HitlHandler {
     private final BufferedReader in;
     private final PrintStream out;
 
-    public TerminalHitlHandler(boolean enabled) {
-        this(enabled,
-                new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)),
+    public TerminalHitlHandler() {
+        this(new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)),
                 System.out);
     }
 
     /**
      * 包可见构造器：允许测试注入自定义 stdin / stdout。
      */
-    TerminalHitlHandler(boolean enabled, BufferedReader in, PrintStream out) {
-        this.enabled = enabled;
+    TerminalHitlHandler(BufferedReader in, PrintStream out) {
         this.in = in;
         this.out = out;
-    }
-
-    @Override
-    public boolean isEnabled() {
-        return enabled;
-    }
-
-    @Override
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
     }
 
     /**

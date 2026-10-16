@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit;
  * 继承自 ToolRegistry，覆写 executeTool 方法，在执行危险操作之前
  * 通过 HitlHandler 向用户请求审批。
  *
- * 如果 HITL 未启用，行为与父类完全相同，无额外开销。
+ * 人工审批始终启用；只读工具和已有明确会话批准的调用按原规则执行。
  *
  * HITL 拒绝 / 跳过路径会写一行 audit（approver=hitl），HITL 通过后由父类 ToolRegistry 写
  * allow / policy-deny / error，HITL 审批与策略拦截共用同一份 ~/.codeagent/audit/ 文件。
@@ -30,7 +30,7 @@ public class HitlToolRegistry extends ToolRegistry {
 
     @Override
     protected boolean requiresIsolatedExecution(ToolInvocation invocation) {
-        return hitlHandler.isEnabled() && executionBackendToolNames(invocation.name()).stream()
+        return executionBackendToolNames(invocation.name()).stream()
                 .anyMatch(toolName -> ApprovalPolicy.requiresApproval(toolName)
                         && !hitlHandler.isApprovedAllByTool(toolName)
                         && !hitlHandler.isApprovedAllByServer(ApprovalPolicy.mcpServerName(toolName)));
@@ -58,8 +58,8 @@ public class HitlToolRegistry extends ToolRegistry {
 
     @Override
     public ToolOutput executeToolOutput(String name, String argumentsJson) {
-        // HITL 未启用或该工具不需要审批，直接执行
-        if (!hitlHandler.isEnabled() || !ApprovalPolicy.requiresApproval(name)) {
+        // 不需要审批的工具直接执行
+        if (!ApprovalPolicy.requiresApproval(name)) {
             return super.doExecuteTool(name, argumentsJson);
         }
         BrowserCheckResult browserCheck = checkBrowserTool(name, argumentsJson, true);

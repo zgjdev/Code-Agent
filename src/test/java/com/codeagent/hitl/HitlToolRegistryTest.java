@@ -27,46 +27,39 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class HitlToolRegistryTest {
 
-    // ------------------ 旁路行为（原有测试保留） ------------------
+    // ------------------ 只读行为 ------------------
 
     @Test
-    void disabledHitlPassesThroughToParent() {
-        TerminalHitlHandler handler = new TerminalHitlHandler(false);
-        HitlToolRegistry registry = new HitlToolRegistry(handler);
+    void freshRegistryAlwaysRequestsApprovalBeforeWriting(@TempDir Path tempDir) {
+        StubHandler stub = new StubHandler(request -> ApprovalResult.reject("approval required"));
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+        var output = registry.executeTools(List.of(new ToolRegistry.ToolInvocation(
+                "write", "write_file", "{\"path\":\"blocked.txt\",\"content\":\"x\"}"))).get(0);
+        assertFalse(output.successful());
+        assertEquals(1, stub.requestCount());
+        assertFalse(Files.exists(tempDir.resolve("blocked.txt")));
+    }
 
-        assertFalse(handler.isEnabled());
-        handler.setEnabled(true);
-        // list_dir 不是危险工具，HITL 启用也应直接通过
-        String result = registry.executeTool("list_dir", "{\"path\": \".\"}");
-        assertNotNull(result);
-        assertFalse(result.startsWith("[HITL]"));
+    @Test
+    void readOnlyToolDoesNotRequestApproval(@TempDir Path tempDir) {
+        StubHandler handler = new StubHandler(request -> ApprovalResult.reject("unexpected approval"));
+        HitlToolRegistry registry = new HitlToolRegistry(handler);
+        registry.setProjectPath(tempDir.toString());
+        var result = registry.executeTools(List.of(new ToolRegistry.ToolInvocation(
+                "list", "list_dir", "{\"path\":\".\"}"))).get(0);
+        assertTrue(result.successful());
+        assertEquals(0, handler.requestCount());
     }
 
     @Test
     void hitlHandlerIsReturnedFromGetter() {
-        TerminalHitlHandler handler = new TerminalHitlHandler(false);
+        TerminalHitlHandler handler = new TerminalHitlHandler();
         HitlToolRegistry registry = new HitlToolRegistry(handler);
         assertSame(handler, registry.getHitlHandler());
     }
 
-    @Test
-    void enableAndDisableHitl() {
-        TerminalHitlHandler handler = new TerminalHitlHandler(false);
-        assertFalse(handler.isEnabled());
-        handler.setEnabled(true);
-        assertTrue(handler.isEnabled());
-        handler.setEnabled(false);
-        assertFalse(handler.isEnabled());
-    }
-
-    @Test
-    void clearApprovedAllResetsState() {
-        TerminalHitlHandler handler = new TerminalHitlHandler(true);
-        handler.clearApprovedAll();
-        assertTrue(handler.isEnabled());
-    }
-
-    // ------------------ 开启 HITL 后的决策分支（新增） ------------------
+    // ------------------ 审批决策分支 ------------------
 
     @Test
     void rejectedDecisionBlocksExecutionAndReturnsRejectMessage(@TempDir Path tempDir) throws Exception {
@@ -182,13 +175,11 @@ class HitlToolRegistryTest {
         assertFalse(Files.exists(tempDir.resolve("original.txt")));
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void disabledOrPreapprovedHitlKeepsIndependentWritesParallel(boolean enabled, @TempDir Path tempDir) {
+    @Test
+    void preapprovedHitlKeepsIndependentWritesParallel(@TempDir Path tempDir) {
         StubHandler stub = new StubHandler(request -> {
             throw new AssertionError("unexpected approval");
         });
-        stub.setEnabled(enabled);
         stub.approvedTools.add("write_file");
         CountDownLatch bothStarted = new CountDownLatch(2);
         HitlToolRegistry registry = new HitlToolRegistry(stub) {
@@ -224,15 +215,6 @@ class HitlToolRegistryTest {
             public ApprovalResult requestApproval(ApprovalRequest request) {
                 approvalRequests.incrementAndGet();
                 return ApprovalResult.modify("{\"path\":\"destination.txt\",\"content\":\"new-value\"}");
-            }
-
-            @Override
-            public boolean isEnabled() {
-                return true;
-            }
-
-            @Override
-            public void setEnabled(boolean enabled) {
             }
 
             @Override
@@ -444,7 +426,6 @@ class HitlToolRegistryTest {
         private final List<ApprovalRequest> received = new ArrayList<>();
         private final List<String> approvedServers = new ArrayList<>();
         private final List<String> approvedTools = new ArrayList<>();
-        private boolean enabled = true;
 
         StubHandler(Function<ApprovalRequest, ApprovalResult> decision) {
             this.decision = decision;
@@ -454,16 +435,6 @@ class HitlToolRegistryTest {
         public ApprovalResult requestApproval(ApprovalRequest request) {
             received.add(request);
             return decision.apply(request);
-        }
-
-        @Override
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        @Override
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
         }
 
         int requestCount() {

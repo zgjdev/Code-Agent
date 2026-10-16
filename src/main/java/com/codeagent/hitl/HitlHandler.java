@@ -21,19 +21,6 @@ public interface HitlHandler {
      */
     ApprovalResult requestApproval(ApprovalRequest request);
 
-    /**
-     * HITL 是否处于启用状态
-     * 如果未启用，调用方可以直接跳过审批流程
-     */
-    boolean isEnabled();
-
-    /**
-     * 启用/禁用 HITL 审批
-     *
-     * @param enabled true 表示启用，false 表示关闭
-     */
-    void setEnabled(boolean enabled);
-
     default boolean isApprovedAllByTool(String toolName) {
         return false;
     }

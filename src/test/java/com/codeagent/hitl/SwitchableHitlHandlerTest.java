@@ -21,18 +21,15 @@ class SwitchableHitlHandlerTest {
         assertEquals(1, first.requestCount);
         assertEquals(1, second.requestCount);
 
-        handler.setEnabled(true);
         handler.clearApprovedAll();
         handler.clearApprovedAllForServer("chrome-devtools");
 
-        assertTrue(second.enabled);
         assertEquals(1, second.clearAllCount);
         assertEquals("chrome-devtools", second.lastClearedServer);
     }
 
     private static final class StubHitlHandler implements HitlHandler {
         private final ApprovalResult result;
-        private boolean enabled;
         private int requestCount;
         private int clearAllCount;
         private String lastClearedServer;
@@ -45,16 +42,6 @@ class SwitchableHitlHandlerTest {
         public ApprovalResult requestApproval(ApprovalRequest request) {
             requestCount++;
             return result;
-        }
-
-        @Override
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        @Override
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
         }
 
         @Override

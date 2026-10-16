@@ -192,18 +192,6 @@ class TerminalHitlHandlerTest {
                 h.handler.requestApproval(WRITE_FILE_REQUEST).decision());
     }
 
-    @Test
-    void disabledHandlerShortCircuits() {
-        // 关闭状态下不应由 HitlToolRegistry 调用 requestApproval；但如果直接调用也得有合理行为
-        // 这里验证 disabled 状态仅影响 isEnabled()，不改变 requestApproval 语义本身
-        Harness h = Harness.withInput("y\n");
-        h.handler.setEnabled(false);
-        assertFalse(h.handler.isEnabled());
-        // 即便 disabled，requestApproval 被直接调用仍应按输入返回 APPROVED
-        assertEquals(ApprovalResult.Decision.APPROVED,
-                h.handler.requestApproval(WRITE_FILE_REQUEST).decision());
-    }
-
     /**
      * 测试辅助：封装 handler + stdin + stdout 缓冲。
      * 单个 handler 复用整个测试用例周期，所有轮次的输入在构造时一次性塞入。
@@ -221,7 +209,7 @@ class TerminalHitlHandlerTest {
             ByteArrayOutputStream bout = new ByteArrayOutputStream();
             PrintStream pout = new PrintStream(bout, true, StandardCharsets.UTF_8);
             BufferedReader in = new BufferedReader(new StringReader(stdinText));
-            TerminalHitlHandler handler = new TerminalHitlHandler(true, in, pout);
+            TerminalHitlHandler handler = new TerminalHitlHandler(in, pout);
             return new Harness(handler, bout);
         }
 

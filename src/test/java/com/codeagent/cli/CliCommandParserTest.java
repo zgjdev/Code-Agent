@@ -410,27 +410,27 @@ class CliCommandParserTest {
     }
 
     @Test
-    void parsesHitlOnCommand() {
+    void rejectsRemovedHitlOnCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/hitl on");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_HITL, command.type());
-        assertEquals("on", command.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
+        assertEquals("/hitl on", command.payload());
     }
 
     @Test
-    void parsesHitlOffCommand() {
+    void rejectsRemovedHitlOffCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/hitl off");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_HITL, command.type());
-        assertEquals("off", command.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
+        assertEquals("/hitl off", command.payload());
     }
 
     @Test
-    void parsesHitlStatusCommand() {
+    void rejectsRemovedHitlStatusCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/hitl");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_HITL, command.type());
-        assertNull(command.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
+        assertEquals("/hitl", command.payload());
     }
 
     @Test

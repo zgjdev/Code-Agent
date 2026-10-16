@@ -45,7 +45,7 @@ class BrokerInteractionHandlersTest {
     void hitlMapsExplicitDecisionsAndCachesApproveAll() throws Exception {
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try (InteractionBroker broker = new InteractionBroker()) {
-            BrokerHitlHandler handler = new BrokerHitlHandler(true, broker, request -> { });
+            BrokerHitlHandler handler = new BrokerHitlHandler(broker, request -> { });
             ApprovalRequest approval = ApprovalRequest.of("write_file", "{}", "test");
             CompletableFuture<ApprovalResult> result;
 
@@ -70,7 +70,7 @@ class BrokerInteractionHandlersTest {
     @Test
     void missingExecutionIdentityFailsClosed() {
         try (InteractionBroker broker = new InteractionBroker()) {
-            BrokerHitlHandler handler = new BrokerHitlHandler(true, broker, request -> { });
+            BrokerHitlHandler handler = new BrokerHitlHandler(broker, request -> { });
 
             ApprovalResult result = handler.requestApproval(
                     ApprovalRequest.of("write_file", "{}", "test"));

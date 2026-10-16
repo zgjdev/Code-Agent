@@ -199,7 +199,7 @@ class PlainRendererTest {
                 new PrintStream(sink, true, StandardCharsets.UTF_8),
                 new BufferedReader(new StringReader("")));
 
-        renderer.updateStatus(StatusInfo.idle("glm-5.1", 200_000L, false));
+        renderer.updateStatus(StatusInfo.idle("glm-5.1", 200_000L));
         assertEquals("", sink.toString(StandardCharsets.UTF_8));
     }
 }

@@ -31,16 +31,6 @@ public final class SwitchableHitlHandler implements HitlHandler {
     }
 
     @Override
-    public boolean isEnabled() {
-        return delegate.isEnabled();
-    }
-
-    @Override
-    public void setEnabled(boolean enabled) {
-        delegate.setEnabled(enabled);
-    }
-
-    @Override
     public boolean isApprovedAllByTool(String toolName) {
         return delegate.isApprovedAllByTool(toolName);
     }

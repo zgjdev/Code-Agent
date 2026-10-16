@@ -16,8 +16,6 @@ class TaskEvidenceCollectorTest {
     void approvalModifiedEchoCannotEraseFailedOriginalTest(@org.junit.jupiter.api.io.TempDir java.nio.file.Path temp) {
         var approvals = new java.util.concurrent.atomic.AtomicInteger();
         var handler = new com.codeagent.hitl.HitlHandler() {
-            public boolean isEnabled() { return true; }
-            public void setEnabled(boolean enabled) { }
             public com.codeagent.hitl.ApprovalResult requestApproval(com.codeagent.hitl.ApprovalRequest request) {
                 return approvals.getAndIncrement() == 0 ? com.codeagent.hitl.ApprovalResult.approve()
                         : com.codeagent.hitl.ApprovalResult.modify("{\"command\":\"echo approval-modified\"}");

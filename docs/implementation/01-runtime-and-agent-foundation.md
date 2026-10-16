@@ -72,7 +72,7 @@ TEST/BUILD 证据以 typed 工具状态为准，相同完整命令重跑替换�
 
 输入先持久化submittedInput。Host 的 Dispatcher 先预留顶层容量、workspace slot 和已声明共享资源租约；Worker 核验 owner 与目录身份，取得 workspace mutationGate 和 Session lease 后，才以 SQLite 短事务领取并递增 attempt。随后展开本地引用和MCP resource、读取当时顶层上下文、完成durable routing ack并执行。inline/plain CLI 仅注册启动目录，因此仍只有一个顶层Execution；可信 Java 宿主可显式注册多个独立 workspace，默认并发2、可配置1～4。Plan内部仍可执行无冲突任务。Lanterna与Runtime HTTP API没有接入Host。
 
-审批与计划回答交给InteractionBroker，CLI是唯一终端输入者。普通运行中输入排队；等待交互时优先回答交互，非法审批不能自动批准或变成任务。待交互时必须先完成当前审批或评审再提交新任务，显式 `/react` 与 `/plan` 新任务入口也拒绝；`/task` 仅查询、取消和日志。结束通过ExecutionFinalizer和持久化终态收敛账本与SQLite的崩溃窗口。
+审批与计划回答交给InteractionBroker，CLI是唯一终端输入者。CLI/TUI 和 Java Workspace Runtime 的 HITL 始终启用，不提供全局关闭入口；具体会话批准和无交互适配器时的拒绝行为见 [工具与安全边界](02-tools-policy-and-recovery.md#32-将hitl与审计置于共享执行链)。普通运行中输入排队；等待交互时优先回答交互，非法审批不能自动批准或变成任务。待交互时必须先完成当前审批或评审再提交新任务，显式 `/react` 与 `/plan` 新任务入口也拒绝；`/task` 仅查询、取消和日志。结束通过ExecutionFinalizer和持久化终态收敛账本与SQLite的崩溃窗口。
 
 每个 workspace 拥有局部 Session Registry、ToolRegistry、Broker 和可变运行依赖；单终端由InteractionPresentationQueue顺序展示，Host回答核对workspaceKey、executionId、interactionId。owner目录catalog和本机文件锁先于所属workspace恢复，Git common-dir用整轮粗租约；未知外部副作用资源须明确声明租约。默认headless工厂不自动创建MCP Manager或后台索引，CLI工厂复用已有服务。Tool/Plan内部executor退出时等待物理停止，SnapshotService执行`runTurnAndDrain`；Finalizer跨库失败或关闭超时保持隔离与owner，不让后继进入。schema v2迁移前使用`VACUUM INTO`一致性备份。Windows的`fileKey`为空时，目录核验退化为file store名称加创建时间，其身份强度有限。详见[多工作区执行调度方案](../dev/42-multi-workspace-execution-scheduling.md)。
 

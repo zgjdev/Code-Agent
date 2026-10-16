@@ -54,7 +54,7 @@ InlineDiffRenderer为文本变更显示差异，二进制、大文件或不适�
 
 ### 3.5 接入状态与交互控制
 
-BottomStatusBar展示模型、phase、ctx、token、cost、elapsed以及MCP/Skill摘要。ctx表示下一轮会携带的上下文估算，usage表示调用消耗，不能混用。退出或取消时清理临时区域，保留已完成正文。
+BottomStatusBar固定显示 HITL，并展示模型、phase、ctx、token、cost、elapsed以及MCP/Skill摘要。YOLO 和 Ctrl+Y 切换提示已删除；StatusInfo 不再携带 HITL 启用位，Agent 无需注入启用状态 supplier。CLI/TUI、帮助和补全不再提供 `/hitl` 启停命令。ctx表示下一轮会携带的上下文估算，usage表示调用消耗，不能混用。退出或取消时清理临时区域，保留已完成正文。
 
 计划与HITL由InteractionInputRouter按pending身份接回答；审批、普通任务和显式追加任务不能争用输入。`/clear`重置发送视图，不清除原始会话或长期记忆。
 

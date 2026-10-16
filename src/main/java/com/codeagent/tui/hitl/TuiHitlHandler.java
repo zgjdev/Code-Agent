@@ -17,8 +17,6 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class TuiHitlHandler implements HitlHandler {
 
-    private volatile boolean enabled = true;
-
     // 本次会话中已批准"全部放行"的集合
     private final Set<String> approvedAllByTool = ConcurrentHashMap.newKeySet();
     private final Set<String> approvedAllByServer = ConcurrentHashMap.newKeySet();
@@ -27,16 +25,6 @@ public class TuiHitlHandler implements HitlHandler {
 
     public TuiHitlHandler(WindowBasedTextGUI gui) {
         this.gui = gui;
-    }
-
-    @Override
-    public boolean isEnabled() {
-        return enabled;
-    }
-
-    @Override
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
     }
 
     @Override
@@ -51,10 +39,6 @@ public class TuiHitlHandler implements HitlHandler {
 
     @Override
     public ApprovalResult requestApproval(ApprovalRequest request) {
-        if (!enabled) {
-            return ApprovalResult.approve();
-        }
-
         String mcpServer = com.codeagent.hitl.ApprovalPolicy.mcpServerName(request.toolName());
         boolean sensitivePerCall = request.sensitiveNotice() != null && !request.sensitiveNotice().isBlank();
 

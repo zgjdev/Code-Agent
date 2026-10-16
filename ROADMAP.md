@@ -115,8 +115,8 @@
 - 危险操作静态规则识别（`write_file`、`execute_command`、`create_project`）
 - 三级危险等级（高危 / 中危 / 安全）
 - 审批决策：批准 / 全部放行 / 拒绝 / 跳过 / 修改参数后执行
-- HITL 默认关闭，`/hitl on|off` 运行时切换
-- `HitlToolRegistry` 透明拦截层，HITL 关闭时与普通 `ToolRegistry` 行为完全相同
+- CLI/TUI 与 Java Workspace Runtime 的 HITL 始终启用，已移除全局启停命令和 YOLO 切换提示
+- `HitlToolRegistry` 按规则拦截待审批调用；只读工具和用户明确批准的会话内工具/server 范围按既有规则执行
 
 **HITL 增强（后续补丁，归在本期叙事下）**：
 - `PathGuard` 路径围栏：`read_file` / `write_file` / `list_dir` / `create_project` 强制限定在项目根之内，拦截绝对路径越界、`..` 穿越、符号链接逃逸

@@ -20,9 +20,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class BottomStatusBarTest {
 
     @Test
+    void statusAlwaysShowsHitlWithoutToggleHints() {
+        StatusInfo info = StatusInfo.idle("test", 200_000L);
+        String plain = BottomStatusBar.formatStatusLine(info, 160);
+        String styled = BottomStatusBar.formatStatusLines(info, 160).get(0).toString();
+        for (String line : java.util.List.of(plain, styled)) {
+            assertTrue(line.contains("HITL"), line);
+            assertFalse(line.contains("YOLO"), line);
+            assertFalse(line.contains("Ctrl+Y"), line);
+        }
+    }
+
+    @Test
     void formatStatusLineIncludesAllFields() {
-        StatusInfo info = StatusInfo.tokens("glm-5.1", 200_000L, 1200L, 1000L, 234L, 100L, "¥0.0123",
-                true, 1500L, "running");
+        StatusInfo info = StatusInfo.tokens("glm-5.1", 200_000L, 1200L, 1000L, 234L, 100L, "¥0.0123", 1500L, "running");
         String line = BottomStatusBar.formatFooterLine(info, 200);
         assertTrue(line.contains("Auto Model"), line);
         assertTrue(line.contains("running"), line);
@@ -39,7 +50,7 @@ class BottomStatusBarTest {
     @Test
     void contextSegmentUsesContextTokensNotUsageTotals() {
         StatusInfo info = StatusInfo.tokens("glm-5.1", 200_000L, 1200L, 51_000L, 2_000L, 0L,
-                null, false, 0L, "idle");
+                null, 0L, "idle");
         String line = BottomStatusBar.formatFooterLine(info, 200);
 
         assertTrue(line.contains("ctx"), line);
@@ -50,7 +61,7 @@ class BottomStatusBarTest {
 
     @Test
     void formatStatusLinePadsToColumnWidth() {
-        StatusInfo info = new StatusInfo("glm-5.1", 0L, 200_000L, false, 0L);
+        StatusInfo info = new StatusInfo("glm-5.1", 0L, 200_000L, 0L);
         String line = BottomStatusBar.formatStatusLine(info, 80);
         assertTrue(visible(line).length() == 80, "status line should fill the bar: " + visible(line).length());
     }
@@ -58,14 +69,14 @@ class BottomStatusBarTest {
     @Test
     void formatStatusLineTruncatesWhenLong() {
         StatusInfo info = new StatusInfo("very-long-model-name-exceeding-cols",
-                999_999L, 200_000L, true, 0L);
+                999_999L, 200_000L, 0L);
         String line = BottomStatusBar.formatStatusLine(info, 30);
         assertTrue(visible(line).length() == 30);
     }
 
     @Test
     void formatStatusLineHidesElapsedWhenZero() {
-        StatusInfo info = new StatusInfo("glm-5.1", 0L, 200_000L, false, 0L);
+        StatusInfo info = new StatusInfo("glm-5.1", 0L, 200_000L, 0L);
         String line = BottomStatusBar.formatFooterLine(info, 80);
         assertFalse(line.contains("ms"));
         assertFalse(line.contains("0s"));
@@ -73,21 +84,21 @@ class BottomStatusBarTest {
 
     @Test
     void formatStatusLineHandlesMillisecondElapsed() {
-        StatusInfo info = new StatusInfo("glm-5.1", 0L, 0L, false, 250L);
+        StatusInfo info = new StatusInfo("glm-5.1", 0L, 0L, 250L);
         String line = BottomStatusBar.formatFooterLine(info, 80);
         assertTrue(line.contains("250ms"), line);
     }
 
     @Test
     void footerLineFitsColumnWidth() {
-        String line = BottomStatusBar.formatFooterLine(StatusInfo.idle("glm-5.1", 200_000L, false), 40);
+        String line = BottomStatusBar.formatFooterLine(StatusInfo.idle("glm-5.1", 200_000L), 40);
         assertTrue(line.length() == 40, "footer should fill requested width: " + line.length());
         assertTrue(line.contains("Auto Model"), line);
     }
 
     @Test
     void activeStatusLineShowsPhase() {
-        StatusInfo info = StatusInfo.active("glm-5.1", 200_000L, false, "plan")
+        StatusInfo info = StatusInfo.active("glm-5.1", 200_000L, "plan")
                 .withEnvironment("MCP 4/4", "Skill 2/2");
         String top = BottomStatusBar.formatStatusLine(info, 80);
         String bottom = BottomStatusBar.formatFooterLine(info, 80);
@@ -99,10 +110,10 @@ class BottomStatusBarTest {
 
     @Test
     void statusLinesUseJLineAttributes() {
-        StatusInfo info = new StatusInfo("glm-5.1", 0L, 200_000L, false, 0L);
+        StatusInfo info = new StatusInfo("glm-5.1", 0L, 200_000L, 0L);
         var lines = BottomStatusBar.formatStatusLines(info, 80);
         assertEquals(2, lines.size());
-        assertTrue(lines.get(0).toString().contains("YOLO"), "status row should show current mode");
+        assertTrue(lines.get(0).toString().contains("HITL"), "status row should show mandatory approval");
         if (AnsiStyle.isEnabled()) {
             assertTrue(lines.get(1).toAnsi().contains("[2m"), "footer row should use subtle style");
         } else {
@@ -113,13 +124,13 @@ class BottomStatusBarTest {
     @Test
     void statusLinesHighlightKeySegments() {
         StatusInfo info = StatusInfo.tokens("deepseek-v4-pro", 1_000_000L, 5200L, 16_100L,
-                        437L, 14_300L, null, false, 0L, "idle")
+                        437L, 14_300L, null, 0L, "idle")
                 .withEnvironment("MCP 5/5", "Skill 5/5");
         var lines = BottomStatusBar.formatStatusLines(info, 140);
         String top = lines.get(0).toString();
         String footer = lines.get(1).toString();
 
-        assertStyledWhenColorEnabled(lines.get(0), top, "YOLO");
+        assertStyledWhenColorEnabled(lines.get(0), top, "HITL");
         assertStyledWhenColorEnabled(lines.get(0), top, "5 MCP servers");
         assertStyledWhenColorEnabled(lines.get(0), top, "5 skills");
         assertStyledWhenColorEnabled(lines.get(1), footer, "deepseek-v4-pro");
@@ -179,7 +190,7 @@ class BottomStatusBarTest {
                 new PrintStream(sink, true, StandardCharsets.UTF_8));
         bar.start();
         try {
-            bar.update(StatusInfo.idle("glm-5.1", 200_000L, false));
+            bar.update(StatusInfo.idle("glm-5.1", 200_000L));
             bar.flushNow();
             assertTrue(sink.toString(StandardCharsets.UTF_8).isEmpty());
         } finally {
@@ -197,7 +208,7 @@ class BottomStatusBarTest {
                 new PrintStream(sink, true, StandardCharsets.UTF_8));
         bar.start();
         try {
-            bar.update(StatusInfo.idle("glm-5.1", 200_000L, false));
+            bar.update(StatusInfo.idle("glm-5.1", 200_000L));
             sink.reset();
             bar.prepareInputLine();
             String prepared = sink.toString(StandardCharsets.UTF_8);

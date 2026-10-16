@@ -19,7 +19,6 @@ final class CliCommandParser {
         SWITCH_REACT,
         PLAN_RESUME,
         PLAN_ABANDON,
-        SWITCH_HITL,
         MEMORY_STATUS,
         MEMORY_CLEAR,
         MEMORY_LIST,
@@ -148,18 +147,6 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/react ", 0, 7)) {
             return new ParsedCommand(CommandType.SWITCH_REACT, trimmed.substring(7).trim());
-        }
-
-        if (trimmed.equalsIgnoreCase("/hitl on")) {
-            return new ParsedCommand(CommandType.SWITCH_HITL, "on");
-        }
-
-        if (trimmed.equalsIgnoreCase("/hitl off")) {
-            return new ParsedCommand(CommandType.SWITCH_HITL, "off");
-        }
-
-        if (trimmed.equalsIgnoreCase("/hitl")) {
-            return new ParsedCommand(CommandType.SWITCH_HITL, null);
         }
 
         if (trimmed.equalsIgnoreCase("/memory") || trimmed.equalsIgnoreCase("/mem")) {

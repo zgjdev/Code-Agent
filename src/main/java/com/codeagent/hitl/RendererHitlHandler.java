@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 与 {@link Renderer} 协作的 HITL 处理器：
- * 状态（启用开关、全部放行集合）由本类维护，
+ * 会话内全部放行集合由本类维护，
  * 实际审批 UI 委托给 {@link Renderer#promptApproval(ApprovalRequest)}。
  *
  * <p>这样切换渲染器形态（plain / inline / lanterna）只需要换一个 Renderer 实例，
@@ -17,23 +17,11 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class RendererHitlHandler implements HitlHandler {
 
     private final Renderer renderer;
-    private volatile boolean enabled;
     private final Set<String> approvedAllByTool = ConcurrentHashMap.newKeySet();
     private final Set<String> approvedAllByServer = ConcurrentHashMap.newKeySet();
 
-    public RendererHitlHandler(Renderer renderer, boolean enabled) {
+    public RendererHitlHandler(Renderer renderer) {
         this.renderer = Objects.requireNonNull(renderer, "renderer");
-        this.enabled = enabled;
-    }
-
-    @Override
-    public boolean isEnabled() {
-        return enabled;
-    }
-
-    @Override
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
     }
 
     @Override

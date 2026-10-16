@@ -44,11 +44,11 @@ class MainBrowserCommandTest {
     @Test
     void browserConnectDefaultUsesAutoConnectWithoutLegacyProbe(@TempDir Path tempDir) {
         BrowserSession session = new BrowserSession();
-        HitlToolRegistry registry = new HitlToolRegistry(new TerminalHitlHandler(false));
+        HitlToolRegistry registry = new HitlToolRegistry(new TerminalHitlHandler());
         CountingConnectivityCheck connectivity = new CountingConnectivityCheck();
         FakeMcpServerManager manager = new FakeMcpServerManager(registry, tempDir);
 
-        String result = Main.handleBrowserCommand("connect", session, connectivity, manager, registry, new TerminalHitlHandler(false));
+        String result = Main.handleBrowserCommand("connect", session, connectivity, manager, registry, new TerminalHitlHandler());
 
         assertTrue(result.contains("--autoConnect"));
         assertEquals(BrowserMode.SHARED, session.mode());
@@ -109,7 +109,7 @@ class MainBrowserCommandTest {
     private static final class Harness {
         private final BrowserSession session = new BrowserSession();
         private final BrowserConnectivityCheck connectivity = new BrowserConnectivityCheck();
-        private final TerminalHitlHandler handler = new TerminalHitlHandler(false);
+        private final TerminalHitlHandler handler = new TerminalHitlHandler();
         private final HitlToolRegistry registry = new HitlToolRegistry(handler);
         private final McpServerManager manager;
 

@@ -72,7 +72,6 @@ public class Agent {
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private Renderer renderer;
-    private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private boolean returnFinalResponseWhenStreamed;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private final ContextTokenTracker contextTokenTracker = new ContextTokenTracker();
@@ -204,14 +203,6 @@ public class Agent {
 
     public void setReturnFinalResponseWhenStreamed(boolean returnFinalResponseWhenStreamed) {
         this.returnFinalResponseWhenStreamed = returnFinalResponseWhenStreamed;
-    }
-
-    /**
-     * 注入 HITL 启用状态的快照源，用于状态栏 / StatusInfo 显示。
-     * Main 启动后用 {@code reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled)} 接进来。
-     */
-    public void setHitlEnabledSupplier(Supplier<Boolean> supplier) {
-        this.hitlEnabledSupplier = supplier == null ? () -> false : supplier;
     }
 
     /**
@@ -579,12 +570,11 @@ public class Agent {
         String normalizedPhase = phase == null || phase.isBlank() ? "idle" : phase;
         String model = llmClient == null ? "—" : llmClient.getModelName();
         long contextWindow = llmClient == null ? 0L : llmClient.maxContextWindow();
-        boolean hitl = Boolean.TRUE.equals(hitlEnabledSupplier.get());
         long contextTokens = projectedContextTokens();
         if ("idle".equals(normalizedPhase)) {
-            return StatusInfo.idle(model, contextWindow, contextTokens, hitl);
+            return StatusInfo.idle(model, contextWindow, contextTokens);
         }
-        return StatusInfo.active(model, contextWindow, contextTokens, hitl, normalizedPhase);
+        return StatusInfo.active(model, contextWindow, contextTokens, normalizedPhase);
     }
 
     /**
@@ -965,14 +955,13 @@ public class Agent {
         return toolRegistry;
     }
 
-    /** 把当前预算/耗时/HITL 状态推送给 renderer 状态栏。 */
+    /** 把当前预算/耗时状态推送给 renderer 状态栏。 */
     private void pushStatus(AgentBudget budget, long startNanos, String phase) {
         try {
             String model = llmClient == null ? "—" : llmClient.getModelName();
             long totalTokens = budget == null ? 0L
                     : (long) (budget.totalInputTokens() + budget.totalOutputTokens());
             long contextWindow = llmClient == null ? 0L : llmClient.maxContextWindow();
-            boolean hitl = Boolean.TRUE.equals(hitlEnabledSupplier.get());
             long elapsed = (System.nanoTime() - startNanos) / 1_000_000L;
             String cost = budget == null ? null : TokenUsageFormatter.estimatedCostCny(
                     llmClient,
@@ -987,7 +976,6 @@ public class Agent {
                     budget == null ? 0L : budget.totalOutputTokens(),
                     budget == null ? 0L : budget.totalCachedInputTokens(),
                     cost,
-                    hitl,
                     elapsed,
                     phase == null || phase.isBlank()
                             ? (totalTokens > 0 || elapsed > 0 ? "running" : "idle")

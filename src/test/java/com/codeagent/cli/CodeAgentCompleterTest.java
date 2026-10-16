@@ -21,6 +21,7 @@ class CodeAgentCompleterTest {
 
         completer.complete(null, parsed("/", "/"), candidates);
 
+        assertTrue(candidates.stream().noneMatch(c -> c.displ().startsWith("/hitl")));
         assertTrue(candidates.stream().anyMatch(c -> c.displ().equals("/model")));
         assertTrue(candidates.stream().anyMatch(c -> c.displ().equals("/react")));
         assertTrue(candidates.stream().anyMatch(c -> c.displ().equals("/browser connect")));

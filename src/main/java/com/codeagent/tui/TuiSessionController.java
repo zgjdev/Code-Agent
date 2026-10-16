@@ -180,21 +180,6 @@ public final class TuiSessionController implements AutoCloseable {
             }
             return true;
         }
-        if ("/hitl on".equals(lower)) {
-            hitlHandler.setEnabled(true);
-            appendSystem("HITL 审批已启用。");
-            return true;
-        }
-        if ("/hitl off".equals(lower)) {
-            hitlHandler.setEnabled(false);
-            hitlHandler.clearApprovedAll();
-            appendSystem("HITL 审批已关闭。");
-            return true;
-        }
-        if ("/hitl".equals(lower)) {
-            appendSystem("HITL 当前状态: " + (hitlHandler.isEnabled() ? "启用" : "关闭"));
-            return true;
-        }
         if ("/snapshot".equals(lower)) {
             appendSystem(formatSnapshots());
             return true;
@@ -251,7 +236,6 @@ public final class TuiSessionController implements AutoCloseable {
             appendSystem("""
                     TUI 当前支持命令：
                     /clear, /context, /memory, /memory clear, /save <事实>
-                    /hitl, /hitl on, /hitl off
                     /snapshot, /snapshot status, /snapshot clean, /restore <N>
                     /config, /plan <任务>, /plan resume, /plan abandon, /cancel, /exit
                     其余管理命令请暂时在默认 CLI 模式执行。

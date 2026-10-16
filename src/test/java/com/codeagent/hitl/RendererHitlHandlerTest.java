@@ -21,7 +21,7 @@ class RendererHitlHandlerTest {
     void delegatesPromptToRenderer() {
         StubRenderer stub = new StubRenderer();
         stub.nextResult = ApprovalResult.approve();
-        RendererHitlHandler handler = new RendererHitlHandler(stub, true);
+        RendererHitlHandler handler = new RendererHitlHandler(stub);
 
         ApprovalResult result = handler.requestApproval(
                 ApprovalRequest.of("write_file", "{\"path\":\"a\"}", "test"));
@@ -33,7 +33,7 @@ class RendererHitlHandlerTest {
     void approveAllByToolFastPathSkipsRenderer() {
         StubRenderer stub = new StubRenderer();
         stub.nextResult = ApprovalResult.approveAll();
-        RendererHitlHandler handler = new RendererHitlHandler(stub, true);
+        RendererHitlHandler handler = new RendererHitlHandler(stub);
 
         // First call asks renderer and records approve-all
         handler.requestApproval(ApprovalRequest.of("write_file", "{}", "test"));
@@ -51,7 +51,7 @@ class RendererHitlHandlerTest {
     void approveAllByServerCoversFutureMcpCalls() {
         StubRenderer stub = new StubRenderer();
         stub.nextResult = ApprovalResult.approveAllByServer();
-        RendererHitlHandler handler = new RendererHitlHandler(stub, true);
+        RendererHitlHandler handler = new RendererHitlHandler(stub);
 
         handler.requestApproval(ApprovalRequest.of("mcp__chrome-devtools__click", "{}", "test"));
         assertTrue(handler.isApprovedAllByServer("chrome-devtools"));
@@ -67,7 +67,7 @@ class RendererHitlHandlerTest {
     void clearApprovedAllResetsState() {
         StubRenderer stub = new StubRenderer();
         stub.nextResult = ApprovalResult.approveAll();
-        RendererHitlHandler handler = new RendererHitlHandler(stub, true);
+        RendererHitlHandler handler = new RendererHitlHandler(stub);
         handler.requestApproval(ApprovalRequest.of("write_file", "{}", "test"));
         assertTrue(handler.isApprovedAllByTool("write_file"));
 
@@ -76,18 +76,10 @@ class RendererHitlHandlerTest {
     }
 
     @Test
-    void enabledFlagIsTracked() {
-        RendererHitlHandler handler = new RendererHitlHandler(new StubRenderer(), false);
-        assertFalse(handler.isEnabled());
-        handler.setEnabled(true);
-        assertTrue(handler.isEnabled());
-    }
-
-    @Test
     void rejectedResultDoesNotPersistApproval() {
         StubRenderer stub = new StubRenderer();
         stub.nextResult = ApprovalResult.reject("nope");
-        RendererHitlHandler handler = new RendererHitlHandler(stub, true);
+        RendererHitlHandler handler = new RendererHitlHandler(stub);
 
         ApprovalResult result = handler.requestApproval(
                 ApprovalRequest.of("write_file", "{}", "test"));
@@ -99,7 +91,7 @@ class RendererHitlHandlerTest {
     void nullResultFromRendererBecomesReject() {
         StubRenderer stub = new StubRenderer();
         stub.nextResult = null;
-        RendererHitlHandler handler = new RendererHitlHandler(stub, true);
+        RendererHitlHandler handler = new RendererHitlHandler(stub);
 
         ApprovalResult result = handler.requestApproval(
                 ApprovalRequest.of("write_file", "{}", "test"));

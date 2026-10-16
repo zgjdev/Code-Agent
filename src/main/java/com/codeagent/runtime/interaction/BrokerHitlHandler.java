@@ -17,13 +17,10 @@ public final class BrokerHitlHandler implements HitlHandler {
     private final Consumer<InteractionRequest> notifier;
     private final Set<String> approvedAllByTool = ConcurrentHashMap.newKeySet();
     private final Set<String> approvedAllByServer = ConcurrentHashMap.newKeySet();
-    private volatile boolean enabled;
 
     public BrokerHitlHandler(
-            boolean enabled,
             InteractionBroker broker,
             Consumer<InteractionRequest> notifier) {
-        this.enabled = enabled;
         this.broker = broker;
         this.notifier = notifier == null ? request -> { } : notifier;
     }
@@ -88,16 +85,6 @@ public final class BrokerHitlHandler implements HitlHandler {
             case "modify" -> ApprovalResult.modify(response.text());
             default -> ApprovalResult.reject("未知审批决定");
         };
-    }
-
-    @Override
-    public boolean isEnabled() {
-        return enabled;
-    }
-
-    @Override
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
     }
 
     @Override

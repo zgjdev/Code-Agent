@@ -259,7 +259,7 @@ public class Main {
 
         try (Terminal terminal = TerminalBuilder.builder().system(true).dumb(true).build()) {
             refreshTerminalColumns(terminal);
-            TerminalHitlHandler terminalHitlHandler = new TerminalHitlHandler(false);
+            TerminalHitlHandler terminalHitlHandler = new TerminalHitlHandler();
             SwitchableHitlHandler hitlHandler = new SwitchableHitlHandler(terminalHitlHandler);
             HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler);
             configureToolRegistry(hitlToolRegistry, config);
@@ -307,14 +307,14 @@ public class Main {
             // JLine-first：启动输出、命令输出、Agent 流式内容都走同一条 Renderer.stream() 通道。
             // inline 首屏要挂到 LineReader 首次初始化回调里，避免在 readLine 接管屏幕前用裸输出抢光标。
             Renderer renderer = RendererFactory.create(RendererFactory.resolveMode(), terminal);
-            RendererHitlHandler rendererHitl = new RendererHitlHandler(renderer, hitlHandler.isEnabled());
+            RendererHitlHandler rendererHitl = new RendererHitlHandler(renderer);
             hitlHandler.setDelegate(rendererHitl);
             if (renderer instanceof InlineRenderer inline) {
                 inline.bindLineReader(lineReader);
             }
             PrintStream ui = renderer.stream();
             renderer.start();
-            renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, null));
+            renderer.updateStatus(statusInfo(llmClient, "idle", mcpServerManager, null));
 
             String startupNote = "";
             try {
@@ -437,11 +437,10 @@ public class Main {
 
             InteractionBroker interactionBroker = new InteractionBroker();
             CliUiEventBridge uiEvents = new CliUiEventBridge(renderer);
-            BrokerHitlHandler brokerHitlHandler = new BrokerHitlHandler(
-                    hitlHandler.isEnabled(), interactionBroker, uiEvents::interaction);
+            BrokerHitlHandler brokerHitlHandler = new BrokerHitlHandler(interactionBroker, uiEvents::interaction);
             hitlHandler.setDelegate(brokerHitlHandler);
             configureSessionAgent(reactAgent, sessionConversationLedger, mcpServerManager,
-                    skillRegistry, skillContextBuffer, renderer, hitlHandler);
+                    skillRegistry, skillContextBuffer, renderer);
             reactAgent.getToolRegistry().setWriteFileObserver(
                     (path, ba) -> renderer.appendDiff(path, ba[0], ba[1]));
 
@@ -465,7 +464,7 @@ public class Main {
                     : new SessionExecutionContextFactory(sessionStore, workspace, buffer -> {
                         Agent agent = new Agent(llmClientRef.get(), hitlToolRegistry);
                         configureSessionAgent(agent, sessionConversationLedger, mcpServerManager,
-                                skillRegistry, buffer, renderer, hitlHandler);
+                                skillRegistry, buffer, renderer);
                         return agent;
                     });
             SessionExecutionContextRegistry<SessionExecutionContext> sessionContexts =
@@ -1090,31 +1089,13 @@ public class Main {
                         }
                         continue;
                     }
-                    case SWITCH_HITL -> {
-                        String payload = command.payload();
-                        if ("on".equals(payload)) {
-                            hitlHandler.setEnabled(true);
-                            ui.println("🔒 HITL 审批已启用：write_file / execute_command / create_project 执行前将请求人工确认\n");
-                        } else if ("off".equals(payload)) {
-                            hitlHandler.setEnabled(false);
-                            hitlHandler.clearApprovedAll();
-                            ui.println("🔓 HITL 审批已关闭：危险操作将直接执行\n");
-                        } else {
-                            String status = hitlHandler.isEnabled() ? "启用" : "关闭";
-                            ui.println("🔒 HITL 当前状态：" + status);
-                            ui.println("   /hitl on  - 启用人工审批");
-                            ui.println("   /hitl off - 关闭人工审批\n");
-                        }
-                        renderer.updateStatus(statusInfo(currentAgent, mcpServerManager, skillRegistry, "idle"));
-                        continue;
-                    }
                     case POLICY_STATUS -> {
                         printPolicyStatus(ui, currentAgent);
                         continue;
                     }
                     case CONFIG -> {
                         if (command.payload() == null || command.payload().isBlank()) {
-                            handleConfigPalette(renderer, config, llmClient, hitlHandler, skillRegistry);
+                            handleConfigPalette(renderer, config, llmClient, skillRegistry);
                         } else if (command.payload().trim().toLowerCase().startsWith("embedding")) {
                             ui.println(handleEmbeddingConfigCommand(config, command.payload(),
                                     Path.of(currentAgent.getToolRegistry().getProjectPath()),
@@ -1646,14 +1627,12 @@ public class Main {
             McpServerManager mcpServerManager,
             SkillRegistry skillRegistry,
             SkillContextBuffer skillContextBuffer,
-            Renderer renderer,
-            SwitchableHitlHandler hitlHandler) {
+            Renderer renderer) {
         agent.setConversationLedger(conversationLedger);
         agent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
         agent.setSkillRegistry(skillRegistry);
         agent.setSkillContextBuffer(skillContextBuffer);
         agent.setRenderer(renderer);
-        agent.setHitlEnabledSupplier(hitlHandler::isEnabled);
     }
 
     private static boolean legacyPlanClaimAllowed(
@@ -2166,9 +2145,6 @@ public class Main {
                 new SlashCommandHint("/plan ", "/plan <任务内容>", "直接用多 Agent 协作计划模式执行这条任务"),
                 new SlashCommandHint("/react", "/react", "下一条任务强制使用 ReAct 模式"),
                 new SlashCommandHint("/react ", "/react <任务内容>", "直接用 ReAct 模式执行这条任务"),
-                new SlashCommandHint("/hitl", "/hitl", "查看 HITL 状态"),
-                new SlashCommandHint("/hitl on", "/hitl on", "启用危险操作人工审批"),
-                new SlashCommandHint("/hitl off", "/hitl off", "关闭 HITL 审批"),
                 new SlashCommandHint("/browser", "/browser", "查看浏览器会话状态"),
                 new SlashCommandHint("/browser connect", "/browser connect", "复用已允许远程调试的登录态 Chrome"),
                 new SlashCommandHint("/browser connect ", "/browser connect <port>", "旧式 CDP 端口连接"),
@@ -2304,12 +2280,11 @@ public class Main {
     private static void handleConfigPalette(Renderer renderer,
                                             CodeAgentConfig config,
                                             LlmClient llmClient,
-                                            SwitchableHitlHandler hitlHandler,
-                                            com.codeagent.skill.SkillRegistry skillRegistry) {
+                                               com.codeagent.skill.SkillRegistry skillRegistry) {
         var items = java.util.List.of(
                 "模型: " + (llmClient == null ? "(none)" : llmClient.getModelName() + " / " + llmClient.getProviderName()),
                 "默认 Provider: " + (config == null ? "(none)" : config.getDefaultProvider()),
-                "HITL: " + (hitlHandler.isEnabled() ? "ON" : "OFF"),
+                "HITL: 始终启用",
                 "Skill 启用数: " + (skillRegistry == null ? 0 : skillRegistry.enabledSkills().size()),
                 "渲染器: " + renderer.getClass().getSimpleName(),
                 "配置文件: ~/.codeagent/config.json (只读视图，编辑请用编辑器)"
@@ -2321,7 +2296,7 @@ public class Main {
         }
         String hint = switch (selected) {
             case 0, 1 -> "💡 GLM: /model glm-5.3-flash / /model glm-5.1 / /model glm-5v-turbo；其它: /model deepseek|hunyuan|step|kimi|freellmapi|xfyun|agnes 读取配置模型";
-            case 2 -> "💡 切换 HITL: /hitl on / /hitl off";
+            case 2 -> "💡 HITL 始终启用，危险操作按审批策略请求人工确认";
             case 3 -> "💡 管理 Skill: /skill list / /skill on <name> / /skill off <name>";
             case 4 -> "💡 切换渲染器（重启后生效）: CODEAGENT_RENDERER=inline|lanterna|plain";
             case 5 -> "💡 当前不在 TUI 内编辑 config.json，建议在编辑器里改完重启";
@@ -3140,15 +3115,13 @@ public class Main {
     }
 
     private static StatusInfo statusInfo(LlmClient llmClient,
-                                         SwitchableHitlHandler hitlHandler,
                                          String phase,
                                          McpServerManager mcpServerManager,
                                          SkillRegistry skillRegistry) {
         String normalizedPhase = phase == null || phase.isBlank() ? "idle" : phase;
         StatusInfo base = "idle".equals(normalizedPhase)
-                ? StatusInfo.idle(llmClient.getModelName(), llmClient.maxContextWindow(), hitlHandler.isEnabled())
-                : StatusInfo.active(llmClient.getModelName(), llmClient.maxContextWindow(),
-                hitlHandler.isEnabled(), normalizedPhase);
+                ? StatusInfo.idle(llmClient.getModelName(), llmClient.maxContextWindow())
+                : StatusInfo.active(llmClient.getModelName(), llmClient.maxContextWindow(), normalizedPhase);
         return base.withEnvironment(mcpStatusSummary(mcpServerManager), skillStatusSummary(skillRegistry));
     }
 

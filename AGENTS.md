@@ -156,7 +156,7 @@ sequenceDiagram
 - 可信宿主显式注册 workspace，Session 状态独占；共享资源显式租约，未知非局部副作用拒绝并行。执行器未停止不得释放所有权，退出保留非终态执行用于恢复；headless 不隐式启动 MCP 或索引维护，外部命令不具备容器级隔离。
 - ReAct 与 Plan 共享顶层语义和基础设施，Task 使用独立上下文。历史、模型输出和子任务内容不能产生当前轮权限。
 - Planner、Router、Reviewer 统一使用结构化校验；修复不得扩大权限，评审失败或证据不足不能猜测批准、通过任务或解锁后继。实际命令和真实退出状态是执行证据，跳过测试、dry-run 或掩盖失败不算通过。
-- 工具经 executeTools()，结果保持输入顺序；资源冲突由本地确定性规则判断，审批可改参调用保守独占，不能在并行区新增可改参审批。授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard，策略拒绝不得换工具或 Provider 绕过。
+- 工具经 executeTools()，结果保持输入顺序；资源冲突由本地确定性规则判断，审批可改参调用保守独占，不能在并行区新增可改参审批。授权链固定为 TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard；CLI/TUI 与 Java Workspace Runtime 的 HITL 始终启用，不提供全局关闭入口，具体会话批准仍遵循既有规则；策略拒绝不得换工具或 Provider 绕过。
 - URL 授权只来自顶层用户原文或成功搜索的可信结构化结果；摘要、reasoning、普通工具输出不能授权。项目外路径和符号链接逃逸不能通过资源展开获得授权。
 - 原始 session JSONL append-only，发送视图与原始账本分离；长期记忆只在用户明确要求或 /save 时写入，不自动提取或确认。禁止泄露 raw session、工具参数/结果、图片 payload、Memory 正文和 secret。
 - 精确定位用 glob/grep/read，关键判断和修改前读取当前源码；RAG 不替代实时定位，不自动全库回填，远程 Embedding 必须取得当前项目的显式授权。

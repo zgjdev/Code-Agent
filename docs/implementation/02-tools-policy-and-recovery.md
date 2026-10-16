@@ -34,7 +34,9 @@ execute_command 直接返回 typed ToolOutput：真实进程退出码非零时 s
 
 ### 3.2 将HITL与审计置于共享执行链
 
-危险操作经过审批，可批准、拒绝、跳过或修改参数。修改参数后重新校验最终参数。AuditLog记录工具、结果、原因与审批来源；凭证需脱敏，报告不复制真实工具正文或会话图片。
+HitlToolRegistry 的 HITL 始终启用，没有全局启停状态或禁用旁路。CLI、TUI 与 Java Workspace Runtime 均按 ApprovalPolicy 对危险操作请求审批，可批准、拒绝、跳过或修改参数。只读调用不要求审批；现有按工具或 MCP server 的显式会话批准继续生效，敏感页面仍要求逐次批准。Workspace 宿主没有交互适配器时拒绝待审批调用，不自动放行。修改参数后重新校验最终参数。AuditLog记录工具、结果、原因与审批来源；凭证需脱敏，报告不复制真实工具正文或会话图片。
+
+旧 `/hitl`、`/hitl on|off` 命令已删除；handler 与 DefaultWorkspaceRuntimeFactory 的构造器不再接受启用布尔值。此变更不为独立 Runtime HTTP API 增加终端交互协议。详见 [HITL 始终启用方案](../dev/45-always-enabled-hitl.md)。
 
 Plan的人工计划门并不替代每个工具的安全策略。Reviewer只是检查任务结果，不能授予路径、URL或命令权限。
 

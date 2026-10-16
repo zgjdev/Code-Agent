@@ -393,21 +393,20 @@ TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard / CommandGuar
 ```
 
 - 策略拒绝先于人工审批，用户不能批准已经被策略拒绝的调用。
-- HITL 可用 `/hitl on` 开启，支持批准、拒绝、跳过和修改参数。
+- 交互式 CLI、TUI 与 Java Workspace Runtime 的 HITL 始终启用，支持批准、拒绝、跳过和修改参数，不再提供全局启停开关。只读工具不要求审批，用户显式批准的会话内工具/server 范围可继续自动通过。
 - 写文件、执行命令、创建项目、恢复快照以及 MCP 工具会进入审计链。
 - 路径防护阻止项目外写入和符号链接逃逸。
 - URL 来源、浏览器 tab 所有权和敏感页面操作都有独立约束。
 - Side-Git 快照与系统 Git 分离，恢复前先创建 pre-restore 快照。
 
 ```text
-/hitl on
 /policy
 /audit [N]
 /snapshot
 /restore <N>
 ```
 
-> 本地 Agent CLI 不是容器或虚拟机沙箱。运行前应理解工具权限，并在处理不可信仓库时开启 HITL。
+> 本地 Agent CLI 不是容器或虚拟机沙箱。HITL 始终启用，人工批准仍须通过路径、命令与轮次策略检查。
 
 ## 数据目录
 
@@ -479,7 +478,7 @@ graph TB
 | 模式 | `/react [任务]`、`/plan [任务]`、`/plan resume`、`/plan abandon` |
 | 会话 | `/sessions`、`/resume <id>`、`/new`、`/clear`、`/compact`、`/export` |
 | 模型 | `/model [provider或model]`、`/config`、`/context` |
-| 安全 | `/hitl on|off`、`/policy`、`/audit [N]`、`/snapshot`、`/restore <N>` |
+| 安全 | `/policy`、`/audit [N]`、`/snapshot`、`/restore <N>` |
 | 代码理解 | `/search <查询>`、`/graph <类名>` |
 | Memory | `/memory`、`/memory list`、`/memory search <词>`、`/save [--global] <事实>` |
 | MCP/浏览器 | `/mcp`、`/mcp logs <name>`、`/browser connect`、`/browser tabs` |

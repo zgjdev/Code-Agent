@@ -1,6 +1,10 @@
 package com.codeagent.cli;
 
 import com.codeagent.config.CodeAgentPaths;
+import com.codeagent.config.ProviderConfigurationService;
+import com.codeagent.config.UserConfigStore;
+import com.codeagent.config.ProviderSettingsDraft;
+import com.codeagent.config.SecretUpdate;
 
 import com.codeagent.config.ConfigurationValues;
 
@@ -132,7 +136,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 
 /**
- * CodeAgent v16.1.0 - Terminal-First Agent IDE
+ * CodeAgent - Terminal-First Agent IDE
  * 支持 ReAct、Plan-and-Execute、Memory、RAG、Multi-Agent、HITL、并行工具调用、多模型切换、MCP、CDP 会话复用
  * 第 15 期新增：Skill 系统（三层加载 + load_skill 工具 + SkillContextBuffer 注入）、内置 web-access skill
  * 第 16 期新增：TUI 界面（Lanterna 3）、文件树浏览、代码高亮、对话历史可视化、配置管理面板
@@ -143,7 +147,7 @@ import java.util.regex.Pattern;
  * HITL 增强：路径围栏（PathGuard）、命令快速拒绝（CommandGuard）、操作审计链（AuditLog）—— 见 com.codeagent.policy
  */
 public class Main {
-    private static final String VERSION = "16.1.0";
+    private static final String VERSION = buildVersion();
     private static final String LOG_DIR_PROPERTY = "codeagent.log.dir";
     private static final String LOG_LEVEL_PROPERTY = "codeagent.log.level";
     private static final String LOG_MAX_HISTORY_PROPERTY = "codeagent.log.maxHistory";
@@ -159,9 +163,9 @@ public class Main {
     private static final String APP_ARROW_UP = "OA";
     private static final String APP_ARROW_DOWN = "OB";
     private static final Pattern SENSITIVE_FLAG_VALUE = Pattern.compile(
-            "(?i)(--?(?:api[_-]?key|authorization|password|passwd|secret|token)\\s+)(\\S+)");
+            "(?i)(--?(?:api[_-]?key|key|authorization|password|passwd|secret|token)\\s+)(\\S+)");
     private static final Pattern SENSITIVE_ASSIGNMENT = Pattern.compile(
-            "(?i)((?:api[_-]?key|authorization|password|passwd|secret|token)\\s*[=:]\\s*)(\\S+)");
+            "(?i)((?:api[_-]?key|key|authorization|password|passwd|secret|token)\\s*[=:]\\s*)(\\S+)");
     private static final int CTRL_O = 15;
     private static final String DEFAULT_CHROME_DEVTOOLS_MCP_JSON = """
             {
@@ -232,15 +236,26 @@ public class Main {
     }
 
     public static void main(String[] args) {
+        var startup = StartupCommandParser.parse(args);
+        if (startup.kind() == StartupCommandParser.Kind.HELP) {
+            System.out.println(StartupCommandParser.usage()); return;
+        }
+        if (startup.kind() == StartupCommandParser.Kind.VERSION) {
+            System.out.println("CodeAgent " + VERSION); return;
+        }
+        if (startup.kind() == StartupCommandParser.Kind.ERROR) {
+            System.err.println("参数无效。" + System.lineSeparator() + StartupCommandParser.usage());
+            System.exit(2); return;
+        }
         try {
             CodeAgentPaths.initialize();
         } catch (IOException | IllegalArgumentException e) {
-            System.err.println("无法初始化 CodeAgent 数据目录：" + e.getMessage());
+            System.err.println("无法初始化 CodeAgent 数据目录，请检查路径和目录权限。");
             System.exit(1);
             return;
         }
         configureAwtForCli();
-        if (isRuntimeServeCommand(args)) {
+        if (startup.kind() == StartupCommandParser.Kind.SERVE) {
             configureLogging();
             startRuntimeApiAndBlock(args);
             return;
@@ -248,17 +263,64 @@ public class Main {
 
         configureLogging();
 
-        CodeAgentConfig config = CodeAgentConfig.load();
-        LlmClient llmClient = createStartupClient(config);
-        if (llmClient == null) {
-            System.exit(1);
+        ProviderConfigurationService providerConfiguration = new ProviderConfigurationService(
+                new UserConfigStore(), LlmClientFactory.providerDescriptors());
+        try {
+            providerConfiguration.readSnapshot();
+        } catch (UserConfigStore.ConfigStoreException failure) {
+            System.err.println(ProviderSetupController.saveFailure(failure)); System.exit(1); return;
         }
-        AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
+        // Native descriptor checks do not create a terminal reader or consume redirected stdin.
+        if ((startup.kind() == StartupCommandParser.Kind.CONFIG || !StartupOnboarding.valid(providerConfiguration))
+                && !TerminalProviderSetupUi.systemTerminalAvailable()) {
+            System.err.println("模型配置无效或缺失。请在交互终端运行 codeagent config；管道和重定向不会读取配置输入。");
+            System.exit(1); return;
+        }
+        AtomicReference<LlmClient> llmClientRef = new AtomicReference<>();
         AtomicReference<com.codeagent.rag.WorkspaceCodeIndexManager> automaticIndexRef = new AtomicReference<>();
         AtomicReference<RuntimeExecutionHost> executionHostRef = new AtomicReference<>();
 
         try (Terminal terminal = TerminalBuilder.builder().system(true).dumb(true).build()) {
             refreshTerminalColumns(terminal);
+            AtomicReference<McpServerManager> mcpCandidates = new AtomicReference<>();
+            AtomicReference<SkillRegistry> skillRegistryRef = new AtomicReference<>();
+            AtomicReference<List<String>> sessionIdCandidates = new AtomicReference<>(List.of());
+            LineReader lineReader = LineReaderBuilder.builder()
+                    .terminal(terminal)
+                    .history(new CodeAgentHistory())
+                    .completer(new CodeAgentCompleter(
+                            () -> mcpCandidates.get() == null ? List.of() : mcpCandidates.get().resourceCandidates(),
+                            () -> skillRegistryRef.get() == null ? List.of() : skillRegistryRef.get().allSkills(),
+                            sessionIdCandidates::get))
+                    .highlighter(new CodeAgentHighlighter())
+                    .build();
+            Renderer renderer = RendererFactory.create(RendererFactory.resolveMode(), terminal);
+            if (renderer instanceof InlineRenderer inline) inline.bindLineReader(lineReader);
+            PrintStream ui = renderer.stream();
+            int onboardingExit;
+            try {
+                onboardingExit = StartupOnboarding.ensure(providerConfiguration,
+                        new TerminalProviderSetupUi(terminal, lineReader, ui),
+                        startup.kind() == StartupCommandParser.Kind.CONFIG);
+            } catch (UserInterruptException interrupted) {
+                renderer.close(); System.exit(130); return;
+            } catch (EndOfFileException eof) {
+                onboardingExit = startup.kind() == StartupCommandParser.Kind.CONFIG ? 0 : 1;
+            }
+            if (startup.kind() == StartupCommandParser.Kind.CONFIG || onboardingExit != 0) {
+                renderer.close(); if (onboardingExit != 0) System.exit(onboardingExit); return;
+            }
+            // No LLM/MCP/index/session exists until local configuration and onboarding have succeeded.
+            CodeAgentConfig config = CodeAgentConfig.load();
+            LlmClient llmClient = createStartupClient(config);
+            if (llmClient == null) { renderer.close(); System.exit(1); return; }
+            llmClientRef.set(llmClient);
+            lineReader.option(LineReader.Option.BRACKETED_PASTE, true);
+            lineReader.option(LineReader.Option.AUTO_LIST, true);
+            lineReader.option(LineReader.Option.AUTO_MENU, true);
+            configureHistory(lineReader, null);
+            configureSlashCommandHint(lineReader);
+            configureJLineInteractiveWidgets(lineReader);
             TerminalHitlHandler terminalHitlHandler = new TerminalHitlHandler();
             SwitchableHitlHandler hitlHandler = new SwitchableHitlHandler(terminalHitlHandler);
             HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler);
@@ -267,8 +329,7 @@ public class Main {
             BrowserConnectivityCheck browserConnectivityCheck = new BrowserConnectivityCheck();
             hitlToolRegistry.setBrowserGuard(new BrowserGuard(browserSession, new SensitivePagePolicy()));
             McpServerManager mcpServerManager = new McpServerManager(hitlToolRegistry, Path.of("."));
-            AtomicReference<SkillRegistry> skillRegistryRef = new AtomicReference<>();
-            AtomicReference<List<String>> sessionIdCandidates = new AtomicReference<>(List.of());
+            mcpCandidates.set(mcpServerManager);
             hitlToolRegistry.setBrowserConnector(new com.codeagent.browser.BrowserConnector() {
                 @Override
                 public String status() {
@@ -289,30 +350,8 @@ public class Main {
                 }
             });
 
-            LineReader lineReader = LineReaderBuilder.builder()
-                    .terminal(terminal)
-                    .history(new CodeAgentHistory())
-                    .completer(new CodeAgentCompleter(mcpServerManager::resourceCandidates,
-                            () -> skillRegistryRef.get() == null ? List.of() : skillRegistryRef.get().allSkills(),
-                            sessionIdCandidates::get))
-                    .highlighter(new CodeAgentHighlighter())
-                    .build();
-            lineReader.option(LineReader.Option.BRACKETED_PASTE, true);
-            lineReader.option(LineReader.Option.AUTO_LIST, true);
-            lineReader.option(LineReader.Option.AUTO_MENU, true);
-            configureHistory(lineReader, null);
-            configureSlashCommandHint(lineReader);
-            configureJLineInteractiveWidgets(lineReader);
-
-            // JLine-first：启动输出、命令输出、Agent 流式内容都走同一条 Renderer.stream() 通道。
-            // inline 首屏要挂到 LineReader 首次初始化回调里，避免在 readLine 接管屏幕前用裸输出抢光标。
-            Renderer renderer = RendererFactory.create(RendererFactory.resolveMode(), terminal);
             RendererHitlHandler rendererHitl = new RendererHitlHandler(renderer);
             hitlHandler.setDelegate(rendererHitl);
-            if (renderer instanceof InlineRenderer inline) {
-                inline.bindLineReader(lineReader);
-            }
-            PrintStream ui = renderer.stream();
             renderer.start();
             renderer.updateStatus(statusInfo(llmClient, "idle", mcpServerManager, null));
 
@@ -425,13 +464,14 @@ public class Main {
             // 旧 CODEAGENT_TUI=true 路径仍走 Lanterna 全屏 TUI（Day 5 后由 LanternaRenderer 接管）。
             if (com.codeagent.tui.TuiBootstrap.shouldUseTui(terminal)) {
                 try {
+                    renderer.close();
+                    terminal.close();
                     com.codeagent.tui.TuiBootstrap.launch(config, llmClient, reactAgent, hitlHandler);
                     return;  // TUI 启动成功，不进入 CLI 循环
                 } catch (Exception e) {
-                    hitlHandler.setDelegate(terminalHitlHandler);
-                    System.err.println("❌ TUI 启动失败，降级到 CLI: " + e.getMessage());
-                    e.printStackTrace();
-                    // 降级到 CLI 继续执行
+                    System.err.println("❌ TUI 启动失败，请使用 CODEAGENT_RENDERER=plain 重新启动。");
+                    System.exit(1);
+                    return;
                 }
             }
 
@@ -653,7 +693,7 @@ public class Main {
                     break;  // Ctrl+D 退出
                 }
                 if (renderer instanceof InlineRenderer inline) {
-                    inline.clearAcceptedInput(promptInput.text());
+                    inline.clearAcceptedInput(SecretCommandGuard.commandMask().display(promptInput.text()));
                 }
 
                 if (promptInput.canceled()) {
@@ -665,6 +705,9 @@ public class Main {
                 }
 
                 String input = promptInput.text().trim();
+                if (SecretCommandGuard.rejected(input)) {
+                    ui.println(SecretCommandGuard.message()); continue;
+                }
                 CliCommandParser.ParsedCommand command = CliCommandParser.parse(input);
                 if (command.type() == CliCommandParser.CommandType.NONE) {
                     InteractionInputRouter.Result interactionResult =
@@ -1069,17 +1112,19 @@ public class Main {
                             ui.println("   /model agnes         - 切换到 Agnes 2.0 Flash（读取配置模型）\n");
                         } else {
                             ModelSelection target = resolveModelSelection(selection);
-                            if (target.explicitModel()) {
-                                ensureProviderConfig(config, target.provider()).setModel(target.model());
+                            LlmClient newClient;
+                            try {
+                                newClient = switchModelConfiguration(config, target);
+                            } catch (UserConfigStore.ConfigStoreException failure) {
+                                ui.println(ProviderSetupController.saveFailure(failure)); continue;
+                            } catch (IllegalArgumentException | IllegalStateException failure) {
+                                ui.println("❌ 切换失败，请检查对应 Provider 的模型、地址和密钥配置。"); continue;
                             }
-                            LlmClient newClient = LlmClientFactory.create(target.provider(), config);
                             if (newClient == null) {
                                 ui.println("❌ 切换失败：未配置 " + target.provider() + " 的 API Key\n");
                             } else {
                                 llmClient = newClient;
                                 llmClientRef.set(newClient);
-                                config.setDefaultProvider(target.provider());
-                                config.save();
                                 currentAgent.setLlmClient(llmClient);
                                 ui.println("✅ 已切换到: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
                                 ui.println("   上下文策略: " + currentAgent.getMemoryManager().getContextProfile().summary());
@@ -1095,7 +1140,16 @@ public class Main {
                     }
                     case CONFIG -> {
                         if (command.payload() == null || command.payload().isBlank()) {
-                            handleConfigPalette(renderer, config, llmClient, skillRegistry);
+                            ui.println("当前会话: " + llmClient.getModelName() + " / " + llmClient.getProviderName());
+                            ui.println("HITL: 始终启用；Skill 启用数: " + skillRegistry.enabledSkills().size()
+                                    + "；渲染器: " + renderer.getClass().getSimpleName());
+                            try {
+                                new ProviderSetupController(providerConfiguration).run(
+                                        new TerminalProviderSetupUi(terminal, lineReader, ui));
+                                ui.println("保存的设置重启后生效。");
+                            } catch (UserInterruptException | EndOfFileException canceled) {
+                                ui.println("已取消配置，当前会话继续。");
+                            }
                         } else if (command.payload().trim().toLowerCase().startsWith("embedding")) {
                             ui.println(handleEmbeddingConfigCommand(config, command.payload(),
                                     Path.of(currentAgent.getToolRegistry().getProjectPath()),
@@ -1381,6 +1435,11 @@ public class Main {
         }
     }
 
+    static String buildVersion() {
+        String version = Main.class.getPackage().getImplementationVersion();
+        return version == null || version.isBlank() ? "development (unpackaged)" : version;
+    }
+
     private static boolean isRuntimeServeCommand(String[] args) {
         return args != null
                 && args.length >= 1
@@ -1475,12 +1534,20 @@ public class Main {
         try {
             return LlmClientFactory.createFromConfig(config);
         } catch (IllegalArgumentException | IllegalStateException failure) {
-            System.err.println("❌ 配置错误: " + failure.getMessage());
+            System.err.println("❌ 配置错误，请检查 CODEAGENT_PROVIDER（glm/deepseek/hunyuan/step/kimi/freellmapi/xfyun/agnes）和对应密钥、模型、地址；可运行 codeagent config。");
             return null;
         }
     }
 
     private static void startRuntimeApiAndBlock(String[] args) {
+        try { new UserConfigStore().readSnapshot(); }
+        catch (UserConfigStore.ConfigStoreException failure) {
+            System.err.println(ProviderSetupController.saveFailure(failure)); System.exit(1); return;
+        }
+        var configuration = new ProviderConfigurationService(new UserConfigStore(), LlmClientFactory.providerDescriptors());
+        if (!StartupOnboarding.valid(configuration)) {
+            System.err.println("模型配置无效或缺失，请在交互终端运行 codeagent config。"); System.exit(1); return;
+        }
         CodeAgentConfig config = CodeAgentConfig.load();
         LlmClient client = createStartupClient(config);
         if (client == null) {
@@ -1821,7 +1888,7 @@ public class Main {
             String prompt = renderer.inputPrompt();
             String rightPrompt = renderer.inputRightPrompt();
             if (!allowEscCancel) {
-                return PromptInput.submitted(lineReader.readLine(prompt, rightPrompt, (MaskingCallback) null, null));
+                return PromptInput.submitted(lineReader.readLine(prompt, rightPrompt, SecretCommandGuard.commandMask(), null));
             }
 
             if (terminal != null && terminal.writer() != null) {
@@ -1834,7 +1901,7 @@ public class Main {
 
             PrefillResult prefill = readPrefillInputFromTerminal(terminal, lineReader);
             if (prefill == null) {
-                return PromptInput.submitted(lineReader.readLine("", rightPrompt, (MaskingCallback) null, null));
+                return PromptInput.submitted(lineReader.readLine("", rightPrompt, SecretCommandGuard.commandMask(), null));
             }
 
             if (prefill.canceled()) {
@@ -1845,7 +1912,7 @@ public class Main {
                 return PromptInput.submitted("");
             }
 
-            return PromptInput.submitted(lineReader.readLine("", rightPrompt, (MaskingCallback) null, prefill.seedBuffer()));
+            return PromptInput.submitted(lineReader.readLine("", rightPrompt, SecretCommandGuard.commandMask(), prefill.seedBuffer()));
         } finally {
             renderer.afterInput();
         }
@@ -1873,6 +1940,7 @@ public class Main {
     }
 
     static String redactSensitiveInput(String input) {
+        if (SecretCommandGuard.rejected(input)) return SecretCommandGuard.hiddenDisplay();
         if (input == null || input.isBlank()) {
             return input;
         }
@@ -2162,7 +2230,7 @@ public class Main {
                 new SlashCommandHint("/mcp resources ", "/mcp resources <name>", "查看 MCP resources"),
                 new SlashCommandHint("/mcp prompts ", "/mcp prompts <name>", "查看 MCP prompts"),
                 new SlashCommandHint("/policy", "/policy", "查看安全策略状态"),
-                new SlashCommandHint("/config", "/config", "打开配置 palette（只读视图 + 切换提示）"),
+                new SlashCommandHint("/config", "/config", "配置服务商、隐藏输入密钥与连接测试，重启生效"),
                 new SlashCommandHint("/audit", "/audit", "查看今日最近 10 条危险工具审计"),
                 new SlashCommandHint("/audit ", "/audit [N]", "查看今日最近 N 条危险工具审计"),
                 new SlashCommandHint("/snapshot", "/snapshot", "查看最近 Side-Git 快照"),
@@ -2273,36 +2341,30 @@ public class Main {
         return sb.toString();
     }
 
-    /**
-     * /config 命令处理：用 renderer.openPalette 展示当前配置项列表。
-     * 当前是只读视图——选中一项后提示对应的 CLI 命令，由用户自己执行。
-     */
-    private static void handleConfigPalette(Renderer renderer,
-                                            CodeAgentConfig config,
-                                            LlmClient llmClient,
-                                               com.codeagent.skill.SkillRegistry skillRegistry) {
-        var items = java.util.List.of(
-                "模型: " + (llmClient == null ? "(none)" : llmClient.getModelName() + " / " + llmClient.getProviderName()),
-                "默认 Provider: " + (config == null ? "(none)" : config.getDefaultProvider()),
-                "HITL: 始终启用",
-                "Skill 启用数: " + (skillRegistry == null ? 0 : skillRegistry.enabledSkills().size()),
-                "渲染器: " + renderer.getClass().getSimpleName(),
-                "配置文件: ~/.codeagent/config.json (只读视图，编辑请用编辑器)"
-        );
-        int selected = renderer.openPalette("配置 / config", items);
-        if (selected < 0) {
-            renderer.stream().println("(已关闭)");
-            return;
+    static LlmClient switchModelConfiguration(CodeAgentConfig config, ModelSelection target) {
+        String previousDefault = config.getDefaultProvider();
+        var previousProviders = new LinkedHashMap<>(config.getProviders());
+        var previousProvider = previousProviders.get(target.provider());
+        String previousModel = previousProvider == null ? null : previousProvider.getModel();
+        boolean saved = false;
+        try {
+            if (target.explicitModel()) {
+                ensureProviderConfig(config, target.provider()).setModel(target.model());
+            }
+            LlmClient client = LlmClientFactory.create(target.provider(), config);
+            if (client != null) {
+                config.setDefaultProvider(target.provider());
+                config.save();
+                saved = true;
+            }
+            return client;
+        } finally {
+            if (!saved) {
+                if (previousProvider != null) previousProvider.setModel(previousModel);
+                config.setProviders(previousProviders);
+                config.setDefaultProvider(previousDefault);
+            }
         }
-        String hint = switch (selected) {
-            case 0, 1 -> "💡 GLM: /model glm-5.3-flash / /model glm-5.1 / /model glm-5v-turbo；其它: /model deepseek|hunyuan|step|kimi|freellmapi|xfyun|agnes 读取配置模型";
-            case 2 -> "💡 HITL 始终启用，危险操作按审批策略请求人工确认";
-            case 3 -> "💡 管理 Skill: /skill list / /skill on <name> / /skill off <name>";
-            case 4 -> "💡 切换渲染器（重启后生效）: CODEAGENT_RENDERER=inline|lanterna|plain";
-            case 5 -> "💡 当前不在 TUI 内编辑 config.json，建议在编辑器里改完重启";
-            default -> "(unknown)";
-        };
-        renderer.stream().println(hint);
     }
 
     static String handleConfigCommand(CodeAgentConfig config, String payload) {
@@ -2311,44 +2373,25 @@ public class Main {
             return "❌ " + update.error() + "\n" + providerConfigUsage();
         }
 
-        CodeAgentConfig.ProviderConfig providerConfig = ensureProviderConfig(config, update.provider());
-        if (update.apiKey() != null) {
-            providerConfig.setApiKey(update.apiKey());
+        var service = new ProviderConfigurationService(new UserConfigStore(), LlmClientFactory.providerDescriptors());
+        try (var initial = service.newDraft(update.provider());
+             var draft = new ProviderSettingsDraft(initial.baseline(), update.provider(), update.model(),
+                     update.baseUrl(), update.loraId(), SecretUpdate.keep(), update.setDefault())) {
+            var temporary = service.temporaryConfig(draft);
+            com.codeagent.config.ProviderEndpoint.validate(temporary.getBaseUrl(update.provider()));
+            service.save(draft);
+            return "✅ provider 配置已保存，重启后生效；尚未验证。";
+        } catch (UserConfigStore.ConfigStoreException failure) {
+            return "❌ " + ProviderSetupController.saveFailure(failure);
+        } catch (IllegalArgumentException | IllegalStateException failure) {
+            return "❌ 配置字段无效，请使用 /config 向导检查服务地址和模型。";
         }
-        if (update.baseUrl() != null) {
-            providerConfig.setBaseUrl(update.baseUrl());
-        }
-        if (update.model() != null) {
-            providerConfig.setModel(update.model());
-        }
-        if (update.loraId() != null) {
-            providerConfig.setLoraId(update.loraId());
-        }
-        if (update.setDefault()) {
-            config.setDefaultProvider(update.provider());
-        }
-        config.save();
-
-        StringBuilder out = new StringBuilder();
-        out.append("✅ 已保存 provider 配置: ").append(update.provider()).append('\n');
-        out.append("   model: ").append(providerConfig.getModel() == null || providerConfig.getModel().isBlank()
-                ? "(默认)" : providerConfig.getModel()).append('\n');
-        out.append("   baseUrl: ").append(providerConfig.getBaseUrl() == null || providerConfig.getBaseUrl().isBlank()
-                ? "(默认)" : providerConfig.getBaseUrl()).append('\n');
-        out.append("   apiKey: ").append(maskSecret(providerConfig.getApiKey())).append('\n');
-        if ("xfyun".equals(update.provider())) {
-            out.append("   loraId: ").append(providerConfig.getLoraId() == null || providerConfig.getLoraId().isBlank()
-                    ? "(未配置)" : providerConfig.getLoraId()).append('\n');
-        }
-        if (update.setDefault()) {
-            out.append("   默认 provider 已设为 ").append(update.provider()).append('\n');
-        }
-        out.append("   立即切换: /model ").append(update.provider());
-        return out.toString();
     }
 
     static String handleEmbeddingConfigCommand(CodeAgentConfig config, String payload,
             Path projectRoot, ToolRegistry registry, HitlHandler hitlHandler) {
+        Runnable rollback = embeddingRollback(config.getEmbedding());
+        boolean saved = false;
         try {
             var command = new EmbeddingConfigCommandParser().parse(payload);
             var embedding = config.getEmbedding();
@@ -2362,6 +2405,7 @@ public class Main {
                     embedding.setMode("local");
                     embedding.setProvider(null);
                     config.save();
+                    saved = true;
                     registry.getCodeRetrievalService().reconfigureEmbedding(
                             new EmbeddingProviderFactory().resolve(config, projectRoot, null));
                     return "✅ Embedding 已切换为本地 Qwen3 FP32（1024 维）；模型文件需预先安装";
@@ -2370,6 +2414,7 @@ public class Main {
                     embedding.setMode("off");
                     embedding.setProvider(null);
                     config.save();
+                    saved = true;
                     registry.getCodeRetrievalService().reconfigureEmbedding(
                             new EmbeddingProviderFactory().resolve(config, projectRoot, null));
                     return "✅ Embedding 已关闭；词法、符号和关系检索保持可用";
@@ -2383,6 +2428,7 @@ public class Main {
                     embedding.setMode("local");
                     embedding.setProvider(null);
                     config.save();
+                    saved = true;
                     registry.getCodeRetrievalService().reconfigureEmbedding(
                             new EmbeddingProviderFactory().resolve(config, projectRoot, null));
                     return "✅ 已撤销当前项目远程 Embedding 授权（" + removed + " 条）";
@@ -2417,6 +2463,7 @@ public class Main {
                         return "已拒绝远程 Embedding；继续使用本地检索";
                     }
                     config.save();
+                    saved = true;
                     var resolution = new EmbeddingProviderFactory().resolve(config, projectRoot, capability.orElseThrow());
                     if (registry.getCodeRetrievalService() instanceof com.codeagent.rag.DefaultCodeRetrievalService service) {
                         service.reconfigureEmbeddingForProject(resolution, projectRoot, () -> {
@@ -2427,13 +2474,33 @@ public class Main {
                     return "✅ 已授权并启用远程 Embedding: " + provider;
                 }
             }
+        } catch (UserConfigStore.ConfigStoreException failure) {
+            if (!saved) rollback.run();
+            return "❌ " + ProviderSetupController.saveFailure(failure);
         } catch (Exception e) {
-            return "❌ " + e.getMessage();
+            if (!saved) rollback.run();
+            return "❌ Embedding 配置失败，请检查配置和授权。";
         }
         return "❌ 未知 embedding 配置命令";
     }
 
+    private static Runnable embeddingRollback(CodeAgentConfig.EmbeddingConfig embedding) {
+        String mode = embedding.getMode();
+        String provider = embedding.getProvider();
+        String model = embedding.getModel();
+        String baseUrl = embedding.getBaseUrl();
+        String persistedKey = embedding.getPersistedApiKey();
+        return () -> {
+            embedding.setMode(mode);
+            embedding.setProvider(provider);
+            embedding.setModel(model);
+            embedding.setBaseUrl(baseUrl);
+            embedding.setApiKey(persistedKey);
+        };
+    }
+
     static ProviderConfigUpdate parseProviderConfigUpdate(String payload) {
+        if (SecretCommandGuard.rejected("/config " + payload)) return ProviderConfigUpdate.error(SecretCommandGuard.message());
         List<String> args = splitArgs(payload);
         if (args.size() < 2 || !"provider".equalsIgnoreCase(args.get(0))) {
             return ProviderConfigUpdate.error("用法不正确");
@@ -2441,7 +2508,7 @@ public class Main {
 
         String provider = normalizeProviderName(args.get(1));
         if (!isSupportedProvider(provider)) {
-            return ProviderConfigUpdate.error("暂不支持 provider: " + args.get(1));
+            return ProviderConfigUpdate.error("暂不支持该服务商");
         }
 
         String apiKey = null;
@@ -2465,18 +2532,18 @@ public class Main {
             } else {
                 key = token;
                 if (i + 1 >= args.size()) {
-                    return ProviderConfigUpdate.error("缺少 " + key + " 的值");
+                    return ProviderConfigUpdate.error("配置项缺少值");
                 }
                 value = args.get(++i);
             }
 
             switch (normalizeConfigKey(key)) {
-                case "api-key" -> apiKey = value;
+                case "api-key" -> { return ProviderConfigUpdate.error(SecretCommandGuard.message()); }
                 case "base-url" -> baseUrl = value;
                 case "model" -> model = value;
                 case "lora-id" -> loraId = value;
                 default -> {
-                    return ProviderConfigUpdate.error("未知配置项: " + key);
+                    return ProviderConfigUpdate.error("未知配置项");
                 }
             }
         }
@@ -2494,16 +2561,11 @@ public class Main {
     private static String providerConfigUsage() {
         return """
                 用法:
-                  /config provider freellmapi --base-url http://localhost:5173/v1 --api-key <key> --model auto
-                  /config provider freellmapi --model qwen/qwen3-coder:free --default
-                  /config provider hunyuan --base-url https://tokenhub.tencentmaas.com/v1 --api-key <key> --model hy4-preview --default
-                  /config provider xfyun --base-url https://maas-api.cn-huabei-1.xf-yun.com/v2 --api-key <key> --model Qwen3.6-35B-A3B --default
+                  /config                              隐藏输入密钥、测试与保存
+                  /config provider <name> --model <model> --default
+                  /config provider <name> --base-url <https-url>
                   /config provider xfyun --lora-id <resourceId>
-                  /config provider agnes --api-key <key> --model agnes-2.0-flash --default
-                  /model freellmapi
-                  /model hunyuan
-                  /model xfyun
-                  /model agnes
+                保存的 Provider 设置重启后生效。
                 """.stripTrailing();
     }
 

@@ -5,8 +5,8 @@ import okhttp3.Request;
 
 public class XfyunMaaSClient extends AbstractOpenAiCompatibleClient {
 
-    private static final String DEFAULT_BASE_URL = "https://maas-api.cn-huabei-1.xf-yun.com/v2";
-    private static final String DEFAULT_MODEL = "Qwen3.6-35B-A3B";
+    private static final String DEFAULT_BASE_URL = ProviderCatalog.descriptor("xfyun").defaultBaseUrl();
+    private static final String DEFAULT_MODEL = ProviderCatalog.descriptor("xfyun").defaultModel();
 
     private final String apiKey;
     private final String model;
@@ -18,6 +18,11 @@ public class XfyunMaaSClient extends AbstractOpenAiCompatibleClient {
     }
 
     public XfyunMaaSClient(String apiKey, String model, String baseUrl, String loraId) {
+        this(apiKey, model, baseUrl, loraId, LlmClientOptions.DEFAULT);
+    }
+
+    public XfyunMaaSClient(String apiKey, String model, String baseUrl, String loraId, LlmClientOptions options) {
+        super(options);
         this.apiKey = apiKey;
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = toChatCompletionsUrl(baseUrl);

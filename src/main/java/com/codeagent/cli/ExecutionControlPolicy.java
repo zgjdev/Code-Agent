@@ -40,6 +40,6 @@ final class ExecutionControlPolicy {
     }
 
     static boolean allowedWhileInteractionPending(CliCommandParser.CommandType type) {
-        return classify(type) != Category.TASK_INPUT;
+        return type != CliCommandParser.CommandType.CONFIG && classify(type) != Category.TASK_INPUT;
     }
 }

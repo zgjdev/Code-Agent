@@ -26,8 +26,9 @@ inline/plain CLI 的普通顶层任务会先持久化到本地 Execution 队列�
 必需：
 
 - Java 17 或更高版本
-- Maven（建议使用当前稳定版本）
 - 至少一个受支持 Provider 的 API Key
+
+从源码构建时还需要 Git、Maven；使用 Windows 分发 ZIP 时不需要源码、Maven 或 `.env`。
 
 可选：
 
@@ -37,49 +38,58 @@ inline/plain CLI 的普通顶层任务会先持久化到本地 Execution 队列�
 
 ## 快速开始
 
-### 1. 获取源码
+### Windows 安装包用户
+
+解压完整 Windows 分发 ZIP，在解压目录执行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-codeagent.ps1
+```
+
+安装器验证 Java 17+，将启动器和 JAR 放入用户数据根的 `bin/`、`lib/`，并将 `bin` 加入当前用户 PATH。找不到 Java 时可以追加 `-JavaHome "C:\Path\To\jdk-17"`；不需要管理员权限。关闭正在运行的 CodeAgent 后可重复执行同一安装命令升级，已有配置、会话和模型会保留。
+
+重新打开终端，进入希望处理的项目目录：
+
+```powershell
+cd D:\Projects\my-project
+codeagent
+```
+
+缺少模型配置时会进入首次向导：选择服务商、模型及可选地址，隐藏输入 API Key，再选择测试连接或暂不测试并保存。之后在其他项目目录输入同一命令，使用该目录作为工作区并复用用户设置。启动器不会切换到安装目录。
+
+```powershell
+codeagent config       # 独立配置，不要求已有 API Key
+codeagent --help
+codeagent --version
+```
+
+正常启动不会自动测试连接。主动测试会向所选服务商发送一个短请求，可能产生少量费用；不发送项目内容。密钥保存在当前用户权限保护的本机 `config.json` 中，本版本不加密，不能分享该文件。不要在命令参数里填写密钥。
+
+配置需在支持隐藏输入的交互终端执行。管道、重定向或 `serve` 缺少配置时会立即失败并提示配置入口，不会读取管道正文作为密钥。会话内 `/config` 也可修改，保存后重启生效；运行任务或等待审批时不能打开配置。
+
+### 从源码构建
 
 ```bash
 git clone https://github.com/zgjdev/Code-Agent.git
 cd Code-Agent
 ```
 
-### 2. 创建配置
-
-macOS / Linux：
-
-```bash
-cp .env.example .env
-```
-
-Windows PowerShell：
-
-```powershell
-Copy-Item .env.example .env
-```
-
-编辑 `.env`，用 `CODEAGENT_PROVIDER` 选择一家 Provider，并填写对应密钥。例如：
-
-```dotenv
-CODEAGENT_PROVIDER=glm
-GLM_API_KEY=your_api_key_here
-GLM_MODEL=glm-5.1
-```
-
-也可以配置 DeepSeek、腾讯混元、StepFun、Kimi、FreeLLMAPI、讯飞星辰 MaaS 或 Agnes。配置示例与功能设置入口见 [.env.example](.env.example)，详细说明见下方功能说明及 [实现文档](docs/implementation/01-runtime-and-agent-foundation.md)。
-
-只使用所选 Provider；其他家的密钥可以同时保存或留空。名称无效或所选密钥缺失时启动报错，不再自动换家。`CODEAGENT_PROVIDER`（或 `-Dcodeagent.provider`）覆盖 `config.json` 的默认 Provider；未设置时使用 JSON 默认项或 `glm`。运行中的 `/model` 仍可显式切换，下一次启动重新读取选择项。
-
-示例中的配置均以 `KEY=value` 设置，布尔开关用 `true/false`，空路径/地址使用默认值。功能配置读取顺序为 Java `-D` 参数 > 进程环境变量 > 项目 `.env` > 用户 `~/.env` > 默认值；Provider 的密钥/模型/地址和 Embedding 字段保留 `config.json` 显式值优先的既有规则。项目 `.env` 空值遮蔽用户 `.env` 的同名值，不执行变量展开，也不支持赋值尾部注释。使用旧 `MOONSHOT_*`/`XFYUN_*` 环境名称时应删除对应 canonical 空赋值；其他 Provider 使用示例中的标准变量名。Skill 通过目录和 `/skill` 命令管理，自动索引通过 `config.json` 管理；LLM 超时与重试仍使用 Java 启动参数。
-
-### 3. 构建并启动
-
 ```bash
 mvn clean package
 java -jar target/codeagent-1.0-SNAPSHOT.jar
 ```
 
-`mvn clean package` 默认跳过测试，以便快速生成可运行 JAR。
+`mvn clean package` 默认跳过测试。首次启动同样可以使用向导；也可以先运行 `java -jar target/codeagent-1.0-SNAPSHOT.jar config`。Windows 源码用户可执行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-codeagent.ps1 -JarPath target/codeagent-1.0-SNAPSHOT.jar` 安装全局命令。首期全局安装脚本仅支持 Windows；其他平台可用 Java/JAR 入口。
+
+维护者打包命令为 `powershell -NoProfile -File scripts/package-distribution.ps1 -LicensePath <许可文本路径>`，默认读取当前 POM 版本的构建 JAR，输出 `target/codeagent-<版本>-windows.zip`。仓库尚无正式 LICENSE 时必须先由维护者提供，打包脚本不会选择或编造许可。ZIP 采用明确白名单，不包含源码、`.env*`、用户配置或历史。
+
+### 现有环境配置兼容
+
+已有 `.env` 或环境变量配置可以继续使用，不必迁移；它们是可选入口，不会打包进 JAR。示例见 [.env.example](.env.example)。只使用显式所选 Provider，不按其他家的密钥自动切换。`CODEAGENT_PROVIDER`（或 `-Dcodeagent.provider`）覆盖 JSON 默认项；未设置时使用 JSON 或 `glm`。向导会提示来源覆盖，保存默认项不会改写环境变量。
+
+功能配置读取顺序为 Java `-D` 参数 > 进程环境变量 > 项目 `.env` > 用户 `~/.env` > 默认值；Provider 与 Embedding 字段保留 `config.json` 显式值优先的规则。项目 `.env` 的空值遮蔽用户同名值，不展开变量或解析尾部注释。旧 `MOONSHOT_*`/`XFYUN_*` 别名不会越过 canonical 空赋值回退。环境密钥不会自动复制到 JSON。高级配置说明见 [运行时与配置文档](docs/implementation/01-runtime-and-agent-foundation.md)。
+
+手动卸载时关闭 CodeAgent，从用户 PATH 移除安装的 `bin` 条目，只删除 `bin/codeagent.cmd` 与 `lib/codeagent.jar`；保留配置、会话和模型。不要递归删除整个数据根。
 
 启动后可以直接描述任务：
 
@@ -382,7 +392,7 @@ CODEAGENT_RUNTIME_API_KEY=your_local_api_key \
 | 讯飞星辰 MaaS | `XFYUN_MAAS_*` | `/model xfyun` | 支持 MaaS modelId 和 LoRA ID |
 | Agnes AI | `AGNES_*` | `/model agnes` | OpenAI-compatible |
 
-Provider、模型和 Base URL 可以通过 `.env`、用户配置以及 `/config provider ...` 管理。不要提交包含真实密钥的 `.env`。
+Provider、模型和地址可通过 `codeagent config` 或空闲时 `/config` 管理；密钥仅使用隐藏输入。`/config provider ...` 保留非密钥字段更新，旧 `--api-key` 参数被拒绝。GLM、DeepSeek 地址由客户端确定，其他地址覆盖仍按原 Provider 协议执行，不代表支持任意新 Provider。远端地址要求 HTTPS，loopback 本地服务可以使用 HTTP；不接受带 userinfo、query 或 fragment 的地址。不要提交真实配置或密钥。
 
 ## 安全模型
 

@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -20,6 +19,10 @@ public class CodeAgentConfig {
     private String defaultProvider = "glm";
     @JsonIgnore
     private Map<String, String> environmentValues;
+    @JsonIgnore
+    private UserConfigStore.Snapshot loadedSnapshot;
+    @JsonIgnore
+    private com.fasterxml.jackson.databind.node.ObjectNode loadedView;
     private Map<String, ProviderConfig> providers = new LinkedHashMap<>();
     private EmbeddingConfig embedding = new EmbeddingConfig();
     private AutoIndexConfig autoIndex = new AutoIndexConfig();
@@ -304,12 +307,12 @@ public class CodeAgentConfig {
 
     public static CodeAgentConfig load(Path configFile, Map<String, String> environment) {
         CodeAgentConfig config = new CodeAgentConfig();
-        if (Files.exists(configFile)) {
-            try {
-                config = mapper.readValue(configFile.toFile(), CodeAgentConfig.class);
-            } catch (IOException e) {
-                System.err.println("⚠️ 配置文件读取失败，使用默认配置: " + e.getMessage());
-            }
+        try {
+            var snapshot = new UserConfigStore(configFile).readSnapshot();
+            config = mapper.treeToValue(snapshot.document(), CodeAgentConfig.class);
+            config.loadedSnapshot = snapshot;
+        } catch (IOException | UserConfigStore.ConfigStoreException e) {
+            System.err.println("⚠️ 配置文件读取失败，使用默认配置；请检查配置文件格式与访问权限。");
         }
         config.environmentValues = environment == null ? Map.of() : Map.copyOf(environment);
         String selected = config.environmentValues.get("CODEAGENT_PROVIDER");
@@ -317,6 +320,9 @@ public class CodeAgentConfig {
             config.setDefaultProvider(selected.trim().toLowerCase(java.util.Locale.ROOT));
         }
         config.getEmbedding().applyEnvironment(config.environmentValues);
+        config.loadedView = mapper.valueToTree(config);
+        // Preserve the legacy initial-save default selection contract without persisting environment keys.
+        if (config.loadedSnapshot != null && !config.loadedSnapshot.exists()) config.loadedView = null;
         return config;
     }
 
@@ -324,14 +330,23 @@ public class CodeAgentConfig {
         save(CodeAgentPaths.resolve("config.json"));
     }
 
-    public void save(Path configFile) {
+    static CodeAgentConfig fromSnapshot(UserConfigStore.Snapshot snapshot, Map<String, String> environment) {
         try {
-            Path parent = configFile.toAbsolutePath().normalize().getParent();
-            if (parent != null) Files.createDirectories(parent);
-            mapper.writeValue(configFile.toFile(), this);
-        } catch (IOException e) {
-            System.err.println("⚠️ 配置保存失败: " + e.getMessage());
+            CodeAgentConfig config = mapper.treeToValue(snapshot.document(), CodeAgentConfig.class);
+            config.environmentValues = Map.copyOf(environment);
+            config.getEmbedding().applyEnvironment(config.environmentValues);
+            config.loadedSnapshot = snapshot;
+            config.loadedView = mapper.valueToTree(config);
+            return config;
+        } catch (IOException | IllegalArgumentException e) {
+            throw new UserConfigStore.ConfigStoreException(UserConfigStore.Failure.INVALID_CONFIG);
         }
+    }
+
+    public void save(Path configFile) {
+        var view = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.valueToTree(this);
+        loadedSnapshot = new UserConfigStore(configFile).saveChanges(loadedSnapshot, loadedView, view);
+        loadedView = view.deepCopy();
     }
 
     private String configuredValue(String key) {

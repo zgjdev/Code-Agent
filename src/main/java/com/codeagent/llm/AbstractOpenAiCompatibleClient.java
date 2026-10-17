@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.codeagent.config.ProviderEndpoint;
 import okhttp3.*;
 import okio.BufferedSource;
 import org.slf4j.Logger;
@@ -14,11 +15,29 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.Objects;
 
 public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
 
     private static final Logger log = LoggerFactory.getLogger(AbstractOpenAiCompatibleClient.class);
     protected static final ObjectMapper mapper = new ObjectMapper();
+    private final LlmClientOptions options;
+    private final AtomicReference<Call> activeCall = new AtomicReference<>();
+    private final AtomicBoolean requestCanceled = new AtomicBoolean();
+
+    protected AbstractOpenAiCompatibleClient() { this(LlmClientOptions.DEFAULT); }
+
+    protected AbstractOpenAiCompatibleClient(LlmClientOptions options) {
+        this.options = Objects.requireNonNull(options);
+    }
+
+    final void cancelActiveRequest() {
+        requestCanceled.set(true);
+        Call call = activeCall.get();
+        if (call != null) call.cancel();
+    }
 
     // SSE 流式接口下，OkHttp 的 readTimeout 是"两次 read 之间的最大间隔"，不是请求总时长。
     // GLM-5.1 在生成大段 reasoning_content 时服务端可能长时间静默，所以默认值放宽到 300s；
@@ -89,11 +108,21 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
     private ChatResponse chatInternal(List<Message> messages, List<Tool> tools,
                                       StructuredOutputSpec structuredOutput,
                                       StreamListener listener) throws IOException {
+        if (options.configurationCheck()) ProviderEndpoint.validate(getApiUrl());
         StreamListener streamListener = listener == null ? StreamListener.NO_OP : listener;
         RequestBody body = RequestBody.create(
                 buildRequestBody(messages, tools, structuredOutput).toString(),
                 MediaType.parse("application/json")
         );
+        if (options.configurationCheck()) {
+            RequestBody delegate = body;
+            body = new RequestBody() {
+                @Override public MediaType contentType() { return delegate.contentType(); }
+                @Override public long contentLength() throws IOException { return delegate.contentLength(); }
+                @Override public boolean isOneShot() { return true; }
+                @Override public void writeTo(okio.BufferedSink sink) throws IOException { delegate.writeTo(sink); }
+            };
+        }
 
         Request.Builder request = new Request.Builder()
                 .url(getApiUrl())
@@ -138,9 +167,17 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                                         StreamListener streamListener,
                                         AttemptProgress progress,
                                         LlmRetryPolicy retryPolicy) throws IOException {
-        try (Response response = httpClient().newCall(builtRequest).execute()) {
+        Call call = httpClient().newCall(builtRequest);
+        if (options.configurationCheck()) {
+            activeCall.set(call);
+            if (requestCanceled.get()) call.cancel();
+        }
+        try (Response response = call.execute()) {
             ResponseBody responseBodyObj = response.body();
             if (!response.isSuccessful()) {
+                if (options.configurationCheck()) {
+                    throw new LlmHttpException(response.code(), null, "Connection check HTTP failure");
+                }
                 String errorBody = responseBodyObj != null ? responseBodyObj.string() : "无响应体";
                 if (isContextWindowError(response.code(), errorBody)) {
                     throw new ContextWindowExceededException(
@@ -207,6 +244,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 }
 
                 JsonNode choice = choices.get(0);
+                if (options.configurationCheck()) validateConnectionCheckChoice(choice);
                 JsonNode finishReason = choice.get("finish_reason");
                 if (finishReason != null && !finishReason.isNull() && !finishReason.asText("").isBlank()) {
                     streamCompleted = true;
@@ -259,6 +297,40 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                     outputTokens,
                     cachedInputTokens
             );
+        } finally {
+            if (options.configurationCheck()) activeCall.compareAndSet(call, null);
+        }
+    }
+
+    private static void validateConnectionCheckChoice(JsonNode choice) throws IOException {
+        if (!choice.isObject()) throw new IOException("Invalid connection check response");
+        JsonNode finish = choice.path("finish_reason");
+        if (!finish.isMissingNode() && !finish.isNull() && (!finish.isTextual()
+                || !List.of("stop", "length", "content_filter").contains(finish.textValue())))
+            throw new IOException("Invalid connection check response");
+        JsonNode delta = choice.path("delta");
+        if (delta.isMissingNode() || delta.isNull()) delta = choice.path("message");
+        if (delta.isMissingNode() || delta.isNull()) return;
+        if (!delta.isObject()) throw new IOException("Invalid connection check response");
+        for (String field : List.of("role", "content", "reasoning_content", "reasoning")) {
+            JsonNode value = delta.path(field);
+            if (!value.isMissingNode() && !value.isNull() && !value.isTextual())
+                throw new IOException("Invalid connection check response");
+        }
+        JsonNode tools = delta.path("tool_calls");
+        if (!tools.isMissingNode() && !tools.isNull() && (!tools.isArray() || !tools.isEmpty()))
+            throw new IOException("Unexpected connection check tools");
+        JsonNode details = delta.path("reasoning_details");
+        if (!details.isMissingNode() && !details.isNull()) {
+            if (!details.isArray()) throw new IOException("Invalid connection check response");
+            for (JsonNode detail : details) {
+                if (!detail.isObject()) throw new IOException("Invalid connection check response");
+                for (String field : List.of("text", "content")) {
+                    JsonNode value = detail.path(field);
+                    if (!value.isMissingNode() && !value.isNull() && !value.isTextual())
+                        throw new IOException("Invalid connection check response");
+                }
+            }
         }
     }
 
@@ -273,6 +345,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
     }
 
     LlmRetryPolicy retryPolicy() {
+        if (options.configurationCheck()) return LlmRetryPolicy.singleAttempt();
         return LlmRetryPolicy.fromSystemProperties();
     }
 
@@ -402,6 +475,9 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
         }
         appendResponseFormat(requestBody, structuredOutput);
         customizeRequestBody(requestBody);
+        if (options.configurationCheck()) {
+            customizeConnectionCheckBody(requestBody);
+        }
         return requestBody;
     }
 
@@ -448,11 +524,20 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
     protected void customizeRequestBody(ObjectNode requestBody) {
     }
 
+    /** Small output cap for the existing OpenAI-compatible request contract. */
+    protected void customizeConnectionCheckBody(ObjectNode requestBody) {
+        requestBody.put("max_tokens", 16);
+    }
+
     protected void customizeRequest(Request.Builder request) {
     }
 
     protected OkHttpClient httpClient() {
-        return SHARED_HTTP_CLIENT;
+        return configureHttpClient(SHARED_HTTP_CLIENT);
+    }
+
+    protected final OkHttpClient configureHttpClient(OkHttpClient original) {
+        return options.configure(original);
     }
 
     private static final class AttemptProgress {

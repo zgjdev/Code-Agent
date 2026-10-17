@@ -2,7 +2,7 @@ package com.codeagent.cli;
 
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 class CliCommandParserTest {
@@ -159,12 +159,12 @@ class CliCommandParserTest {
     @Test
     void parsesProviderConfigUpdate() {
         Main.ProviderConfigUpdate update = Main.parseProviderConfigUpdate(
-                "provider free-llm-api --base-url http://localhost:5173/v1 --api-key sk-test --model auto --default");
+                "provider free-llm-api --base-url http://localhost:5173/v1 --model auto --default");
 
         assertNull(update.error());
         assertEquals("freellmapi", update.provider());
         assertEquals("http://localhost:5173/v1", update.baseUrl());
-        assertEquals("sk-test", update.apiKey());
+        assertNull(update.apiKey());
         assertEquals("auto", update.model());
         assertEquals(true, update.setDefault());
     }
@@ -172,12 +172,12 @@ class CliCommandParserTest {
     @Test
     void parsesXfyunProviderConfigUpdate() {
         Main.ProviderConfigUpdate update = Main.parseProviderConfigUpdate(
-                "provider xfyun --base-url https://maas-api.cn-huabei-1.xf-yun.com/v2 --api-key sk-test --model Qwen3.6-35B-A3B --lora-id 0 --default");
+                "provider xfyun --base-url https://maas-api.cn-huabei-1.xf-yun.com/v2 --model Qwen3.6-35B-A3B --lora-id 0 --default");
 
         assertNull(update.error());
         assertEquals("xfyun", update.provider());
         assertEquals("https://maas-api.cn-huabei-1.xf-yun.com/v2", update.baseUrl());
-        assertEquals("sk-test", update.apiKey());
+        assertNull(update.apiKey());
         assertEquals("Qwen3.6-35B-A3B", update.model());
         assertEquals("0", update.loraId());
         assertEquals(true, update.setDefault());
@@ -186,12 +186,12 @@ class CliCommandParserTest {
     @Test
     void parsesAgnesProviderConfigUpdate() {
         Main.ProviderConfigUpdate update = Main.parseProviderConfigUpdate(
-                "provider agnes-ai --base-url https://apihub.agnes-ai.com/v1 --api-key sk-test --model agnes-2.0-flash --default");
+                "provider agnes-ai --base-url https://apihub.agnes-ai.com/v1 --model agnes-2.0-flash --default");
 
         assertNull(update.error());
         assertEquals("agnes", update.provider());
         assertEquals("https://apihub.agnes-ai.com/v1", update.baseUrl());
-        assertEquals("sk-test", update.apiKey());
+        assertNull(update.apiKey());
         assertEquals("agnes-2.0-flash", update.model());
         assertEquals(true, update.setDefault());
     }
@@ -199,12 +199,12 @@ class CliCommandParserTest {
     @Test
     void parsesHunyuanProviderConfigUpdateFromHy4Alias() {
         Main.ProviderConfigUpdate update = Main.parseProviderConfigUpdate(
-                "provider hy4 --base-url https://tokenhub.tencentmaas.com/v1 --api-key sk-test --model hy4-preview --default");
+                "provider hy4 --base-url https://tokenhub.tencentmaas.com/v1 --model hy4-preview --default");
 
         assertNull(update.error());
         assertEquals("hunyuan", update.provider());
         assertEquals("https://tokenhub.tencentmaas.com/v1", update.baseUrl());
-        assertEquals("sk-test", update.apiKey());
+        assertNull(update.apiKey());
         assertEquals("hy4-preview", update.model());
         assertEquals(true, update.setDefault());
     }
@@ -214,7 +214,23 @@ class CliCommandParserTest {
         String redacted = Main.redactSensitiveInput(
                 "/config provider freellmapi --api-key sk-secret --model auto");
 
-        assertEquals("/config provider freellmapi --api-key *** --model auto", redacted);
+        assertEquals(SecretCommandGuard.hiddenDisplay(), redacted);
+    }
+
+    @Test
+    void rejectsEveryLegacySecretAliasWithoutEcho() {
+        for (String alias : java.util.List.of("--api-key", "--api_key", "--apikey", "--key", "key")) {
+            var update = Main.parseProviderConfigUpdate("provider step " + alias + "=fixture-secret");
+            assertNotNull(update.error());
+            assertFalse(update.toString().contains("fixture-secret"));
+            assertTrue(SecretCommandGuard.rejected("/config provider step " + alias + "=fixture-secret"));
+            assertFalse(SecretCommandGuard.commandMask().display("/config provider step " + alias + "=fixture-secret").contains("fixture-secret"));
+            assertNull(SecretCommandGuard.commandMask().history("/config provider step " + alias + "=fixture-secret"));
+            var parsed = CliCommandParser.parse("/config provider step " + alias + "=fixture-secret");
+            assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, parsed.type());
+            assertFalse(parsed.toString().contains("fixture-secret"));
+        }
+        assertFalse(ExecutionControlPolicy.allowedWhileInteractionPending(CliCommandParser.CommandType.CONFIG));
     }
 
     @Test

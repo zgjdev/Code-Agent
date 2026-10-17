@@ -1,0 +1,12 @@
+@echo off
+setlocal DisableDelayedExpansion
+if not exist "@JAVA_EXECUTABLE@" (
+  echo CodeAgent: Java is unavailable. Re-run the installer with -JavaHome. 1>&2
+  exit /b 1
+)
+if not exist "%~dp0..\lib\codeagent.jar" (
+  echo CodeAgent: installation is incomplete. Re-run the installer. 1>&2
+  exit /b 1
+)
+"@JAVA_EXECUTABLE@" -jar "%~dp0..\lib\codeagent.jar" %*
+exit /b %errorlevel%

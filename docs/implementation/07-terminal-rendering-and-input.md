@@ -40,6 +40,12 @@ InlineRenderer绑定LineReader，用户正在读取时用printAbove显示异步�
 
 CodeAgentCompleter集中提供命令、Provider、MCP server/resource、Skill和本地路径候选；Highlighter只作视觉提示，不能把高亮当成命令授权。未知斜杠命令由CliCommandParser拒绝，不能回退Agent。
 
+首次模型配置和独立 `codeagent config` 在创建常规模型客户端、Session、MCP 和索引前运行；复用同一个 JLine Terminal/LineReader。`StartupOnboarding` 只做本地检查，支持安全隐藏输入才进入向导，管道/重定向失败时不读取 stdin。已有有效配置不自动发请求；Lanterna 首次配置也先完成这一阶段，再交接终端所有权。
+
+`ProviderSetupController` 共享服务商选择、字段草稿、显式测试、保存和取消流程；终端使用 `TerminalProviderSetupUi`，全屏面板使用 Lanterna 适配。字段不进入对话或 ledger，秘密读取禁历史、补全和事件展开，并使用 MaskingCallback 阻止历史保存。旧密钥参数在提交回显/命令执行前拒绝，历史过滤也覆盖此类参数；程序不承诺清理外部 shell 已保存的历史。
+
+连接检查在独立 worker 执行，终端输入所有者处理取消并直接取消 HTTP Call，恢复 signal handler/终端属性。TUI 使用隐藏控件与取消操作，不将密钥写到对话面板。运行中 `/config` 必须空闲且无 pending 交互；保存只影响以后启动，不隐式替换当前 Session 的模型客户端。共享控制器和终端/TUI 测试、实际验证边界见 [46号方案](../dev/46-global-cli-installation-and-onboarding.md)。
+
 ### 3.3 将持久正文与临时活动区分开
 
 transcript只追加，底部状态由托管区域绘制。thinking用固定高度live区域，每次只重写自己占用的行，内容和工具边界先清理live区域再追加正文。

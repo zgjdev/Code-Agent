@@ -82,7 +82,11 @@ TEST/BUILD 证据以 typed 工具状态为准，相同完整命令重跑替换�
 
 `ConfigurationValues` 是无线程、无缓存的基础读取层，按 Java 属性、进程环境变量、项目 dotenv、用户 dotenv、默认值的顺序取值。文件按 UTF-8 解析简单 KEY=value，首个赋值生效，保留值中的等号和井号；不执行 shell 或变量替换。项目空值遮蔽用户 dotenv，再使用默认值，空密钥不能意外继承用户密钥。
 
-`CodeAgentConfig.load()` 使用环境/文件合并快照；`load(Path,Map)` 保持隔离注入入口，Provider 与 Embedding 的 JSON 显式字段仍优先；环境密钥保存在忽略序列化的派生字段，不随配置保存写入 JSON。Provider canonical 键留空时阻断旧环境别名回退；工厂仅保留显式 JSON 别名密钥。启动选择由 `CODEAGENT_PROVIDER` 或 `codeagent.provider` 覆盖 JSON defaultProvider，未设置时用 JSON 或 glm。`LlmClientFactory.createFromConfig()` 只构造所选 Provider，名称非法或密钥缺失时抛出不包含配置原值的错误，Main 在 CLI/serve 启动时捕获并失败退出；不尝试其他家的密钥。`/model` 的显式切换契约保留，下一次启动再次按配置选择。旧只填其他家密钥的配置需补选择项，详细迁移与验证见 [43号方案](../dev/43-env-example-cleanup.md)。
+`CodeAgentConfig.load()` 使用环境/文件合并快照；`load(Path,Map)` 保持隔离注入入口，Provider 与 Embedding 的 JSON 显式字段仍优先；环境密钥保存在忽略序列化的派生字段，不随配置保存写入 JSON。Provider canonical 键留空时阻断旧环境别名回退；工厂仅保留显式 JSON 别名密钥。启动选择由 `CODEAGENT_PROVIDER` 或 `codeagent.provider` 覆盖 JSON defaultProvider，未设置时用 JSON 或 glm。`LlmClientFactory.createFromConfig()` 只构造所选 Provider，名称非法或密钥缺失时抛出不包含配置原值的错误，不尝试其他家的密钥。普通交互启动可先完成配置向导，非交互和 serve 仍立即失败。`/model` 的显式切换契约保留，下一次启动再次按配置选择。旧只填其他家密钥的配置需补选择项，来源迁移见 [43号方案](../dev/43-env-example-cleanup.md)，安装与首次配置见 [46号方案](../dev/46-global-cli-installation-and-onboarding.md)。
+
+交互配置通过 `ProviderConfigurationService` 解析各字段及 `SettingSource`，以 `ProviderSettingsDraft` 表达未编辑字段与 `SecretUpdate.KEEP/REPLACE`；不将环境派生字段展开保存。`UserConfigStore` 读取原始 JSON 快照，短暂取得非阻塞文件锁，重读并检查目标 Provider/defaultProvider 冲突，合并其他字段；同目录临时文件收紧当前用户权限、force 后原子替换。损坏 JSON、并发冲突、权限或原子替换失败均明确失败并保留旧文件。旧 `CodeAgentConfig.save()` 通过相同存储边界差量更新，错误显式传播，调用方不能假报保存成功。API Key 是权限保护的明文，不是加密凭据库。
+
+Windows 全局命令由 `scripts/install-codeagent.ps1` 安装到统一根的 `bin/codeagent.cmd` 与 `lib/codeagent.jar`，只追加用户 PATH；shim 使用安装时验证的 Java 17+ 和固定 JAR，保持调用 cwd、参数与退出码。运行时数据根仍按既有配置解析，shim 不固定 `codeagent.home`。安装事务锁、资产备份和 journal 处理失败/中断；无 journal 的已知 staging 资产可安全清理，未知文件保留并报错。安装和卸载都不删除用户配置、会话或模型。ZIP 由 `package-distribution.ps1` 白名单组装，正式许可必须由维护者提供。
 
 ## 4. 实现任务与测试矩阵
 

@@ -135,6 +135,7 @@
                     <archive>
                         <manifest>
                             <mainClass>com.codeagent.cli.Main</mainClass>
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
                         </manifest>
                     </archive>
                 </configuration>
@@ -177,6 +178,10 @@
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <mainClass>com.codeagent.cli.Main</mainClass>
+                                    <manifestEntries>
+                                        <Implementation-Title>${project.name}</Implementation-Title>
+                                        <Implementation-Version>${project.version}</Implementation-Version>
+                                    </manifestEntries>
                                 </transformer>
                             </transformers>
                         </configuration>

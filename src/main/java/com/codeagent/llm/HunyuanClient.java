@@ -4,8 +4,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 public class HunyuanClient extends AbstractOpenAiCompatibleClient {
 
-    private static final String DEFAULT_BASE_URL = "https://tokenhub.tencentmaas.com/v1";
-    private static final String DEFAULT_MODEL = "hy4-preview";
+    private static final String DEFAULT_BASE_URL = ProviderCatalog.descriptor("hunyuan").defaultBaseUrl();
+    private static final String DEFAULT_MODEL = ProviderCatalog.descriptor("hunyuan").defaultModel();
 
     private final String apiKey;
     private final String model;
@@ -16,6 +16,11 @@ public class HunyuanClient extends AbstractOpenAiCompatibleClient {
     }
 
     public HunyuanClient(String apiKey, String model, String baseUrl) {
+        this(apiKey, model, baseUrl, LlmClientOptions.DEFAULT);
+    }
+
+    public HunyuanClient(String apiKey, String model, String baseUrl, LlmClientOptions options) {
+        super(options);
         this.apiKey = apiKey;
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = toChatCompletionsUrl(baseUrl);

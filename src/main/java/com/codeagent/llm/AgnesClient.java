@@ -2,14 +2,19 @@ package com.codeagent.llm;
 
 public class AgnesClient extends AbstractOpenAiCompatibleClient {
 
-    private static final String DEFAULT_BASE_URL = "https://apihub.agnes-ai.com/v1";
-    private static final String DEFAULT_MODEL = "agnes-2.0-flash";
+    private static final String DEFAULT_BASE_URL = ProviderCatalog.descriptor("agnes").defaultBaseUrl();
+    private static final String DEFAULT_MODEL = ProviderCatalog.descriptor("agnes").defaultModel();
 
     private final String apiKey;
     private final String model;
     private final String apiUrl;
 
     public AgnesClient(String apiKey, String model, String baseUrl) {
+        this(apiKey, model, baseUrl, LlmClientOptions.DEFAULT);
+    }
+
+    public AgnesClient(String apiKey, String model, String baseUrl, LlmClientOptions options) {
+        super(options);
         this.apiKey = apiKey;
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = toChatCompletionsUrl(baseUrl);

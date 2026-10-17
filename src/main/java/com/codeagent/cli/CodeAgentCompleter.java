@@ -175,7 +175,6 @@ final class CodeAgentCompleter implements Completer {
             }
             addMatching(candidates, "配置项", prefix,
                     option("--base-url ", "OpenAI-compatible base URL"),
-                    option("--api-key ", "API Key"),
                     option("--model ", "模型名"),
                     option("--lora-id ", "讯飞 MaaS resourceId"),
                     option("--default", "设为默认 provider"));

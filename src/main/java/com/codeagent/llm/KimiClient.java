@@ -2,8 +2,8 @@ package com.codeagent.llm;
 
 public class KimiClient extends AbstractOpenAiCompatibleClient {
 
-    private static final String DEFAULT_BASE_URL = "https://api.moonshot.ai/v1";
-    private static final String DEFAULT_MODEL = "kimi-k2.6";
+    private static final String DEFAULT_BASE_URL = ProviderCatalog.descriptor("kimi").defaultBaseUrl();
+    private static final String DEFAULT_MODEL = ProviderCatalog.descriptor("kimi").defaultModel();
     private final String apiKey;
     private final String model;
     private final String apiUrl;
@@ -13,6 +13,11 @@ public class KimiClient extends AbstractOpenAiCompatibleClient {
     }
 
     public KimiClient(String apiKey, String model, String baseUrl) {
+        this(apiKey, model, baseUrl, LlmClientOptions.DEFAULT);
+    }
+
+    public KimiClient(String apiKey, String model, String baseUrl, LlmClientOptions options) {
+        super(options);
         this.apiKey = apiKey;
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = toChatCompletionsUrl(baseUrl);

@@ -1,12 +1,23 @@
 package com.codeagent.llm;
 
 import com.codeagent.config.CodeAgentConfig;
+import com.codeagent.config.ProviderDescriptor;
+import com.codeagent.config.ApiKeyValidation;
+import java.util.List;
 
 public class LlmClientFactory {
 
     private LlmClientFactory() {}
 
+    public static List<ProviderDescriptor> providerDescriptors() {
+        return ProviderCatalog.DESCRIPTORS;
+    }
+
     public static LlmClient create(String provider, CodeAgentConfig config) {
+        return create(provider, config, LlmClientOptions.DEFAULT);
+    }
+
+    public static LlmClient create(String provider, CodeAgentConfig config, LlmClientOptions options) {
         if (provider == null) return null;
 
         String normalized = normalizeProvider(provider);
@@ -20,6 +31,7 @@ public class LlmClientFactory {
         if (apiKey == null || apiKey.isBlank()) {
             return null;
         }
+        if (!ApiKeyValidation.isHeaderSafe(apiKey)) throw new IllegalArgumentException("Invalid API credential format");
 
         String model = firstConfigured(config.getModel(normalized),
                 configuredProvider.equals(normalized) ? null : config.getModel(configuredProvider));
@@ -29,25 +41,29 @@ public class LlmClientFactory {
                 configuredProvider.equals(normalized) ? null : config.getLoraId(configuredProvider));
 
         return switch (normalized) {
-            case "glm" -> new GLMClient(apiKey, model);
-            case "deepseek" -> new DeepSeekClient(apiKey, model);
-            case "hunyuan" -> new HunyuanClient(apiKey, model, baseUrl);
-            case "step" -> new StepClient(apiKey, model, baseUrl);
-            case "kimi" -> new KimiClient(apiKey, model, baseUrl);
-            case "freellmapi" -> new FreeLlmApiClient(apiKey, model, baseUrl);
-            case "xfyun" -> new XfyunMaaSClient(apiKey, model, baseUrl, loraId);
-            case "agnes" -> new AgnesClient(apiKey, model, baseUrl);
+            case "glm" -> new GLMClient(apiKey, model, options);
+            case "deepseek" -> new DeepSeekClient(apiKey, model, options);
+            case "hunyuan" -> new HunyuanClient(apiKey, model, baseUrl, options);
+            case "step" -> new StepClient(apiKey, model, baseUrl, options);
+            case "kimi" -> new KimiClient(apiKey, model, baseUrl, options);
+            case "freellmapi" -> new FreeLlmApiClient(apiKey, model, baseUrl, options);
+            case "xfyun" -> new XfyunMaaSClient(apiKey, model, baseUrl, loraId, options);
+            case "agnes" -> new AgnesClient(apiKey, model, baseUrl, options);
             default -> null;
         };
     }
 
     public static LlmClient createFromConfig(CodeAgentConfig config) {
+        return createFromConfig(config, LlmClientOptions.DEFAULT);
+    }
+
+    public static LlmClient createFromConfig(CodeAgentConfig config, LlmClientOptions options) {
         String selected = config.getDefaultProvider();
         String normalized = selected == null ? "" : normalizeProvider(selected);
-        if (!java.util.Set.of("glm", "deepseek", "hunyuan", "step", "kimi", "freellmapi", "xfyun", "agnes").contains(normalized)) {
+        if (providerDescriptors().stream().noneMatch(descriptor -> descriptor.id().equals(normalized))) {
             throw new IllegalArgumentException("CODEAGENT_PROVIDER 必须是 glm/deepseek/hunyuan/step/kimi/freellmapi/xfyun/agnes");
         }
-        LlmClient client = create(selected, config);
+        LlmClient client = create(selected, config, options);
         if (client == null) {
             throw new IllegalStateException("所选 Provider " + normalized + " 缺少 API Key，请配置对应密钥");
         }
@@ -55,16 +71,7 @@ public class LlmClientFactory {
     }
 
     private static String normalizeProvider(String provider) {
-        String normalized = provider.trim().toLowerCase(java.util.Locale.ROOT);
-        return switch (normalized) {
-            case "stepfun", "step-fun" -> "step";
-            case "hy4", "hy4-preview", "tokenhub", "tencent-hunyuan", "tencent_hunyuan" -> "hunyuan";
-            case "moonshot", "moonshotai", "moonshot-ai" -> "kimi";
-            case "free-llm-api", "free_llm_api", "freellm", "free-llm" -> "freellmapi";
-            case "xfyun-maas", "xfyun_maas", "iflytek", "iflytek-maas", "iflytek_maas", "maas" -> "xfyun";
-            case "agnes-ai", "agnes_ai", "sapiens", "sapiens-ai", "sapiens_ai" -> "agnes";
-            default -> normalized;
-        };
+        return ProviderDescriptor.normalizeId(provider);
     }
 
     private static String firstConfigured(String primary, String fallback) {

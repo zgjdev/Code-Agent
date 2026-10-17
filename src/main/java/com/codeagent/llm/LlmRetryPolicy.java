@@ -80,6 +80,11 @@ final class LlmRetryPolicy {
         );
     }
 
+    static LlmRetryPolicy singleAttempt() {
+        return new LlmRetryPolicy(1, 0, 0, () -> 0.5d, Thread::sleep,
+                Clock.systemUTC(), CancellationContext::isCancelled);
+    }
+
     static LlmRetryPolicy forTest(int maxAttempts,
                                   long baseDelayMillis,
                                   long maxDelayMillis,

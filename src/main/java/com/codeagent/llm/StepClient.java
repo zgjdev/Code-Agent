@@ -4,8 +4,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 public class StepClient extends AbstractOpenAiCompatibleClient {
 
-    private static final String DEFAULT_BASE_URL = "https://api.stepfun.com/v1";
-    private static final String DEFAULT_MODEL = "step-3.5-flash";
+    private static final String DEFAULT_BASE_URL = ProviderCatalog.descriptor("step").defaultBaseUrl();
+    private static final String DEFAULT_MODEL = ProviderCatalog.descriptor("step").defaultModel();
     private final String apiKey;
     private final String model;
     private final String apiUrl;
@@ -15,6 +15,11 @@ public class StepClient extends AbstractOpenAiCompatibleClient {
     }
 
     public StepClient(String apiKey, String model, String baseUrl) {
+        this(apiKey, model, baseUrl, LlmClientOptions.DEFAULT);
+    }
+
+    public StepClient(String apiKey, String model, String baseUrl, LlmClientOptions options) {
+        super(options);
         this.apiKey = apiKey;
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = toChatCompletionsUrl(baseUrl);

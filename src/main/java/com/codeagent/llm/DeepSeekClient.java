@@ -9,8 +9,8 @@ import java.util.List;
 
 public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
 
-    private static final String API_URL = "https://api.deepseek.com/chat/completions";
-    private static final String DEFAULT_MODEL = "deepseek-v4-flash";
+    private static final String API_URL = ProviderCatalog.descriptor("deepseek").defaultBaseUrl() + "/chat/completions";
+    private static final String DEFAULT_MODEL = ProviderCatalog.descriptor("deepseek").defaultModel();
     private static final OkHttpClient HTTP_1_1_CLIENT = SHARED_HTTP_CLIENT.newBuilder()
             .protocols(List.of(Protocol.HTTP_1_1))
             .build();
@@ -26,7 +26,16 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
         this(apiKey, model, API_URL);
     }
 
+    public DeepSeekClient(String apiKey, String model, LlmClientOptions options) {
+        this(apiKey, model, API_URL, options);
+    }
+
     DeepSeekClient(String apiKey, String model, String apiUrl) {
+        this(apiKey, model, apiUrl, LlmClientOptions.DEFAULT);
+    }
+
+    DeepSeekClient(String apiKey, String model, String apiUrl, LlmClientOptions options) {
+        super(options);
         this.apiKey = apiKey;
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = apiUrl != null && !apiUrl.isBlank() ? apiUrl : API_URL;
@@ -75,7 +84,7 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
 
     @Override
     protected OkHttpClient httpClient() {
-        return HTTP_1_1_CLIENT;
+        return configureHttpClient(HTTP_1_1_CLIENT);
     }
 
     @Override

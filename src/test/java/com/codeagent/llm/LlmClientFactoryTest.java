@@ -11,6 +11,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class LlmClientFactoryTest {
+    @Test void invalidHeaderCredentialFailsBeforeCreatingClientWithoutEchoingValue() {
+        var config = new CodeAgentConfig();
+        config.getProviders().put("step", new CodeAgentConfig.ProviderConfig("fixture\nprivate", null, null));
+        var failure = assertThrows(IllegalArgumentException.class, () -> LlmClientFactory.create("step", config));
+        org.junit.jupiter.api.Assertions.assertFalse(failure.toString().contains("fixture"));
+    }
 
     @Test
     void createsGlm5vTurboClientWithMultimodalEndpoint() {

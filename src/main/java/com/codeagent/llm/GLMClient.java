@@ -5,9 +5,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 public class GLMClient extends AbstractOpenAiCompatibleClient {
 
-    private static final String CODING_API_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
-    private static final String MULTIMODAL_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-    private static final String DEFAULT_MODEL = "glm-5.1";
+    private static final String CODING_API_URL = ProviderCatalog.descriptor("glm").defaultBaseUrl() + "/chat/completions";
+    private static final String MULTIMODAL_API_URL = ProviderCatalog.descriptor("glm").endpointForModel("glm-5v") + "/chat/completions";
+    private static final String DEFAULT_MODEL = ProviderCatalog.descriptor("glm").defaultModel();
     private final String apiKey;
     private final String model;
     private final String apiUrl;
@@ -17,10 +17,19 @@ public class GLMClient extends AbstractOpenAiCompatibleClient {
     }
 
     public GLMClient(String apiKey, String model) {
-        this(apiKey, model, null);
+        this(apiKey, model, (String) null);
+    }
+
+    public GLMClient(String apiKey, String model, LlmClientOptions options) {
+        this(apiKey, model, null, options);
     }
 
     GLMClient(String apiKey, String model, String apiUrl) {
+        this(apiKey, model, apiUrl, LlmClientOptions.DEFAULT);
+    }
+
+    GLMClient(String apiKey, String model, String apiUrl, LlmClientOptions options) {
+        super(options);
         this.apiKey = apiKey;
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = apiUrl != null && !apiUrl.isBlank() ? apiUrl : selectApiUrl(this.model);

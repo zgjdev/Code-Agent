@@ -69,6 +69,9 @@ final class CliCommandParser {
         if (trimmed.isEmpty()) {
             return ParsedCommand.none();
         }
+        if (SecretCommandGuard.rejected(trimmed)) {
+            return new ParsedCommand(CommandType.UNKNOWN_COMMAND, SecretCommandGuard.message());
+        }
 
         if (trimmed.equalsIgnoreCase("/exit")
                 || trimmed.equalsIgnoreCase("/quit")

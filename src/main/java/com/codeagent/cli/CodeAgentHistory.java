@@ -24,7 +24,7 @@ final class CodeAgentHistory extends DefaultHistory {
     }
 
     static boolean shouldSkip(String line) {
-        if (line == null) {
+        if (line == null || SecretCommandGuard.rejected(line)) {
             return true;
         }
         String trimmed = line.trim();

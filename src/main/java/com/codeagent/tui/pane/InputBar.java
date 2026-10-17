@@ -7,6 +7,7 @@ import com.googlecode.lanterna.gui2.LinearLayout.GrowPolicy;
 import com.googlecode.lanterna.input.KeyStroke;
 import com.googlecode.lanterna.input.KeyType;
 import com.codeagent.llm.LlmClient;
+import com.codeagent.cli.SecretCommandGuard;
 
 import java.util.function.Consumer;
 
@@ -56,6 +57,8 @@ public class InputBar extends Panel {
             }
         };
         inputBox.setPreferredSize(new TerminalSize(80, 3));
+        inputBox.setTextChangeListener((text, changedByUser) ->
+                inputBox.setMask(SecretCommandGuard.rejected(text) ? '*' : null));
 
         addComponent(inputBox.setLayoutData(
                 LinearLayout.createLayoutData(Alignment.Fill, GrowPolicy.CanGrow)));

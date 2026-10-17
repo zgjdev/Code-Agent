@@ -4,6 +4,7 @@ import com.codeagent.agent.Agent;
 import com.codeagent.agent.PipelineOptions;
 import com.codeagent.agent.PlanExecuteAgent;
 import com.codeagent.config.CodeAgentConfig;
+import com.codeagent.cli.SecretCommandGuard;
 import com.codeagent.hitl.HitlHandler;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.memory.LongTermMemory;
@@ -47,6 +48,7 @@ public final class TuiSessionController implements AutoCloseable {
 
     private volatile Future<?> currentTask;
     private volatile CancellationToken currentToken;
+    private volatile boolean configurationOpen;
 
     public TuiSessionController(CodeAgentConfig config,
                                 LlmClient llmClient,
@@ -85,6 +87,13 @@ public final class TuiSessionController implements AutoCloseable {
     public void submit(String rawInput) {
         String input = rawInput == null ? "" : rawInput.trim();
         if (input.isEmpty()) {
+            return;
+        }
+        if (SecretCommandGuard.rejected(input)) {
+            ui(() -> centerPane.appendSystemMessage(SecretCommandGuard.message()));
+            return;
+        }
+        if (configurationOpen) {
             return;
         }
 
@@ -197,7 +206,18 @@ public final class TuiSessionController implements AutoCloseable {
             return true;
         }
         if ("/config".equals(lower)) {
-            ui(showConfigPanel);
+            if (isTaskRunning()) {
+                appendSystem("当前任务或审批尚未结束，请等待完成后配置。");
+                return true;
+            }
+            configurationOpen = true;
+            ui(() -> {
+                try {
+                    showConfigPanel.run();
+                } finally {
+                    configurationOpen = false;
+                }
+            });
             return true;
         }
         if ("/plan resume".equals(lower)) {
@@ -356,7 +376,7 @@ public final class TuiSessionController implements AutoCloseable {
 
     private boolean isTaskRunning() {
         Future<?> task = currentTask;
-        return task != null && !task.isDone();
+        return currentToken != null || task != null && !task.isDone();
     }
 
     private void appendUser(String message) {

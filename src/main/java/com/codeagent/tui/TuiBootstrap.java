@@ -141,6 +141,7 @@ public final class TuiBootstrap {
                     (path, ba) -> renderer.appendDiff(path, ba[0], ba[1]));
             RendererHitlHandler rendererHitl = new RendererHitlHandler(renderer);
             hitlHandler.setDelegate(rendererHitl);
+            TuiConfigPanel configPanel = new TuiConfigPanel(config, window.getGui());
             TuiSessionController controller = new TuiSessionController(
                     config,
                     llmClient,
@@ -149,11 +150,14 @@ public final class TuiBootstrap {
                     window.getRootPane().getCenterPane(),
                     window.getRootPane().getStatusPane(),
                     window::close,
-                    () -> new TuiConfigPanel(config, window.getGui()).showConfigDialog(),
+                    configPanel::showConfigDialog,
                     window::runOnGuiThread
             );
             window.getRootPane().setMessageHandler(controller::submit);
-            window.setCloseHook(controller::close);
+            window.setCloseHook(() -> {
+                configPanel.close();
+                controller.close();
+            });
             window.start();  // 阻塞直到用户退出
             System.out.println("\n👋 再见!");
         } catch (Exception e) {

@@ -63,7 +63,7 @@ class MainInputNormalizationTest {
 
         assertTrue(lines.stream().anyMatch(line -> line.contains("CodeAgent")));
         assertTrue(lines.stream().anyMatch(line -> line.contains("██")));
-        assertTrue(lines.stream().anyMatch(line -> line.contains("v16.1.0")));
+        assertTrue(lines.stream().anyMatch(line -> line.contains("v" + Main.buildVersion())));
         assertTrue(lines.stream().anyMatch(line -> line.contains("████████")));
         assertTrue(lines.stream().anyMatch(line -> line.contains("Tips for getting started")));
         assertTrue(lines.stream().anyMatch(line -> line.contains("@path")));

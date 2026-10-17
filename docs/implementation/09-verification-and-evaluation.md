@@ -75,6 +75,10 @@ PositionBalancedPairwiseJudge比较新旧答案两次，第二次交换A/B；只
 | Prompt | PromptAssemblerTest、StructuredJsonExecutorTest | 实际发送request snapshot |
 | 图片 | ImageReferenceParserTest与Provider图片测试 | 本机剪贴板和截图 |
 | 终端 | phase16-smoke与输入测试 | 真实终端手测 |
+| 首次配置 | StartupCommandParserTest、StartupOnboardingTest、ProviderSetupControllerTest、SecretInputHistoryTest、ProviderConfigurationPanelTest | 无密钥/管道退出、取消、隐藏输入和秘密夹具扫描 |
+| 配置存储 | UserConfigStoreTest、ProviderConfigurationServiceTest | 未知字段、别名、并发冲突、权限、原子替换与旧文件保持 |
+| 连接检查 | LlmClientOptionsTest、ProviderConnectionCheckerTest | MockWebServer 请求契约、超时、真实 Call.cancel、重定向与脱敏错误；不等同真实账号验证 |
+| Windows 分发 | GlobalLauncherInstallationTest、DistributionContentTest | 临时根、两目录 PATH 调用、cwd/参数/退出码、升级恢复、ZIP/JAR 内容审计 |
 
 每份质量报告列明数据集版本、模型、阈值、TopK、预算、样本量、失败项和token来源。Provider未给出可信usage时标为估算或未知，不记作零。
 
@@ -95,3 +99,12 @@ git diff --check
 ```
 
 项目默认mvn clean package跳过测试，所以构建成功不代表测试已运行。独立测试的真实结果与本次迁移清单见 [文档重组与通道清理验收](../dev/41-document-consolidation-and-channel-cleanup.md)。返回[实现记录导航](01-runtime-and-agent-foundation.md)。
+
+Windows 安装/分发测试会编译临时 fixture JAR，所有安装调用使用 `-CodeAgentHome <TempDir> -NoPathUpdate`。真实用户 PATH 只读比较，写入/冲突/失败通过注入 adapter 检查；不能将这些测试写成已实际修改注册表或完成真实账号安装。ZIP 使用明确标记的合成许可夹具，正式分发仍需维护者提供真实许可。
+
+```powershell
+mvn test -DskipTests=false "-Dtest=GlobalLauncherInstallationTest,DistributionContentTest"
+powershell -NoProfile -ExecutionPolicy Bypass -File src/test/resources/launcher/install-smoke.ps1 -Repository <仓库绝对路径> -JavaHome <JDK17绝对路径> -CheckPackage
+```
+
+配置向导单测通过可注入 UI 验证取消、状态失效、保存失败和秘密不入历史；真实 PTY 的遮罩/焦点/终端还原仍需单独记录。连接测试只用固定短消息和模拟服务，不自动使用开发者密钥。实施证据及未测边界见 [46号方案](../dev/46-global-cli-installation-and-onboarding.md)。

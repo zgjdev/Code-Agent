@@ -8,6 +8,44 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CodeAgentProviderConfigTest {
+    @Test void saveFailureIsExplicitAndDoesNotEchoConfiguration(@TempDir Path directory) throws Exception {
+        var config = CodeAgentConfig.load(directory.resolve("absent.json"), Map.of());
+        config.getProviders().put("glm", new CodeAgentConfig.ProviderConfig("private-fixture", null, null));
+        Path blocked = directory.resolve("not-a-directory");
+        Files.writeString(blocked, "untouched");
+        var error = assertThrows(RuntimeException.class, () -> config.save(blocked.resolve("config.json")));
+        assertFalse(error.toString().contains("private-fixture"));
+        assertEquals("untouched", Files.readString(blocked));
+    }
+
+    @Test void saveRefusesDamagedJson(@TempDir Path directory) throws Exception {
+        Path file = directory.resolve("config.json");
+        Files.writeString(file, "{broken-private-fixture");
+        var captured = new java.io.ByteArrayOutputStream();
+        java.io.PrintStream originalError = System.err;
+        CodeAgentConfig config;
+        try (var error = new java.io.PrintStream(captured, true, java.nio.charset.StandardCharsets.UTF_8)) {
+            System.setErr(error);
+            config = CodeAgentConfig.load(file, Map.of());
+        } finally { System.setErr(originalError); }
+        assertFalse(captured.toString(java.nio.charset.StandardCharsets.UTF_8).contains("broken-private-fixture"));
+        assertThrows(RuntimeException.class, () -> config.save(file));
+        assertEquals("{broken-private-fixture", Files.readString(file));
+    }
+
+    @Test void saveMergesUnknownAndConcurrentUnrelatedChanges(@TempDir Path directory) throws Exception {
+        Path file = directory.resolve("config.json");
+        Files.writeString(file, "{\"future\":42,\"providers\":{\"glm\":{\"model\":\"old\",\"future\":true}}}");
+        var config = CodeAgentConfig.load(file, Map.of());
+        config.getProviders().get("glm").setModel("new");
+        Files.writeString(file, "{\"future\":43,\"providers\":{\"glm\":{\"model\":\"old\",\"future\":true},\"step\":{\"model\":\"concurrent\"}}}");
+        config.save(file);
+        var tree = new com.fasterxml.jackson.databind.ObjectMapper().readTree(file.toFile());
+        assertEquals(43, tree.path("future").asInt());
+        assertTrue(tree.at("/providers/glm/future").asBoolean());
+        assertEquals("concurrent", tree.at("/providers/step/model").asText());
+        assertEquals("new", tree.at("/providers/glm/model").asText());
+    }
     @Test void selectorOverridesJsonDefaultWithoutOverwritingModels(@TempDir Path directory) throws Exception {
         Path file = directory.resolve("config.json");
         Files.writeString(file, "{\"defaultProvider\":\"glm\",\"providers\":{\"step\":{\"model\":\"configured-model\"}}}");

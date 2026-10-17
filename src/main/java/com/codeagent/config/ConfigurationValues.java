@@ -17,19 +17,45 @@ public final class ConfigurationValues {
     }
 
     public static Map<String, String> currentEnvironment() {
-        return loadEnvironment(System.getenv(),
+        return currentEnvironmentSnapshot().values();
+    }
+
+    public static EnvironmentSnapshot currentEnvironmentSnapshot() {
+        return loadEnvironmentSnapshot(System.getenv(),
                 Path.of(System.getProperty("user.dir"), ".env"),
                 Path.of(System.getProperty("user.home"), ".env"));
     }
 
+    /** Secrets are accessible only to configuration resolution, never in diagnostic output. */
+    public static final class EnvironmentSnapshot {
+        private final Map<String, String> values;
+        private final Map<String, SettingSource> sources;
+        private EnvironmentSnapshot(Map<String, String> values, Map<String, SettingSource> sources) {
+            this.values = Map.copyOf(values); this.sources = Map.copyOf(sources);
+        }
+        public Map<String, String> values() { return values; }
+        public SettingSource source(String key) { return sources.getOrDefault(key, SettingSource.DEFAULT); }
+        @Override public String toString() { return "EnvironmentSnapshot[redacted]"; }
+    }
+
     /** Empty project values shadow user dotenv values; empty process values do not override. */
     public static Map<String, String> loadEnvironment(Map<String, String> environment, Path projectEnv, Path homeEnv) {
+        return loadEnvironmentSnapshot(environment, projectEnv, homeEnv).values();
+    }
+
+    public static EnvironmentSnapshot loadEnvironmentSnapshot(Map<String, String> environment, Path projectEnv, Path homeEnv) {
         Map<String, String> values = new LinkedHashMap<>(readDotEnv(homeEnv));
-        values.putAll(readDotEnv(projectEnv));
+        Map<String, SettingSource> sources = new LinkedHashMap<>();
+        values.keySet().forEach(key -> sources.put(key, SettingSource.USER_ENV));
+        var project = readDotEnv(projectEnv);
+        values.putAll(project);
+        project.keySet().forEach(key -> sources.put(key, SettingSource.PROJECT_ENV));
         if (environment != null) environment.forEach((key, value) -> {
-            if (value != null && !value.isBlank()) values.put(key, value.trim());
+            if (value != null && !value.isBlank()) {
+                values.put(key, value.trim()); sources.put(key, SettingSource.PROCESS_ENV);
+            }
         });
-        return Map.copyOf(values);
+        return new EnvironmentSnapshot(values, sources);
     }
 
     static String resolve(String property, String key, Properties properties,

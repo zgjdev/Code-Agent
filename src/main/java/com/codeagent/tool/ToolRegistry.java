@@ -1393,9 +1393,7 @@ public class ToolRegistry {
         }
         if (invocations.size() == 1) {
             ToolInvocation invocation = invocations.get(0);
-            long startedAt = System.nanoTime();
-            ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
-            return List.of(ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt)));
+            return List.of(executeObserved(invocation,false,false));
         }
         if (invocations.stream().anyMatch(invocation ->
                 TurnToolPolicy.isBrowserToolName(invocation.name()))) {
@@ -1405,9 +1403,7 @@ public class ToolRegistry {
                     results.add(ToolExecutionResult.failed(invocation, "用户取消了此次工具调用"));
                     continue;
                 }
-                long startedAt = System.nanoTime();
-                ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
-                results.add(ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt)));
+                results.add(executeObserved(invocation,false,false));
             }
             return results;
         }
@@ -1471,9 +1467,7 @@ public class ToolRegistry {
                         if (CancellationContext.isCancelled()) {
                             return ToolExecutionResult.failed(invocation, "用户取消了此次工具调用");
                         }
-                        long startedAt = System.nanoTime();
-                        ToolOutput output = executeBatchedToolOutput(invocation, invocations.size() > 1);
-                        return ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt));
+                        return executeObserved(invocation,true,invocations.size()>1);
                         }
                     })
                     .toList();
@@ -1531,6 +1525,21 @@ public class ToolRegistry {
 
     private long elapsedMillis(long startedAtNanos) {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+    }
+
+    private ToolExecutionResult executeObserved(ToolInvocation invocation,boolean batched,boolean concurrent) {
+        var observation=invocation.observation();
+        if(observation!=null)try{observation.observer().started(observation.context(),invocation);}
+        catch(Exception failure){return ToolExecutionResult.failed(invocation,"durable invocation unavailable; execution denied");}
+        long startedAt=System.nanoTime();
+        ToolOutput output=batched?executeBatchedToolOutput(invocation,concurrent):executeToolOutput(invocation.name(),invocation.argumentsJson());
+        ToolExecutionResult result=ToolExecutionResult.completed(invocation,output,elapsedMillis(startedAt));
+        if(observation!=null)try{observation.observer().completed(observation.context(),invocation,result);}
+        catch(Exception failure){
+            return new ToolExecutionResult(result.id(),result.name(),result.argumentsJson(),result.result(),result.elapsedMillis(),
+                    result.timedOut(),result.imageParts(),false,result.discoveredUrls(),result.executedCommand(),result.exitCode(),true);
+        }
+        return result;
     }
 
     public boolean hasTool(String name) {
@@ -1694,18 +1703,28 @@ public class ToolRegistry {
 
     private record McpRegisteredTool(McpToolDescriptor descriptor, Function<String, ToolOutput> invoker) {}
 
-    public record ToolInvocation(String id, String name, String argumentsJson) {}
+    public record ToolInvocation(String id,String name,String argumentsJson,TaskToolObservation observation) {
+        public ToolInvocation(String id,String name,String argumentsJson){this(id,name,argumentsJson,null);}
+        @Override public String toString(){return "ToolInvocation[id="+id+", name="+name+"]";}
+    }
 
     public record ToolExecutionResult(String id, String name, String argumentsJson,
                                       String result, long elapsedMillis, boolean timedOut,
                                       List<com.codeagent.llm.LlmClient.ContentPart> imageParts,
                                       boolean successful,
                                       List<String> discoveredUrls,
-                                      String executedCommand) {
+                                      String executedCommand,Integer exitCode,boolean observationUnknown) {
         public ToolExecutionResult {
             imageParts = imageParts == null ? List.of() : List.copyOf(imageParts);
             discoveredUrls = discoveredUrls == null ? List.of() : List.copyOf(discoveredUrls);
-            successful = successful && !timedOut;
+            successful = successful && !timedOut && !observationUnknown;
+        }
+
+        public ToolExecutionResult(String id, String name, String argumentsJson,
+                                   String result,long elapsedMillis,boolean timedOut,
+                                   List<com.codeagent.llm.LlmClient.ContentPart> imageParts,boolean successful,
+                                   List<String> discoveredUrls,String executedCommand) {
+            this(id,name,argumentsJson,result,elapsedMillis,timedOut,imageParts,successful,discoveredUrls,executedCommand,null,false);
         }
 
         public ToolExecutionResult(String id, String name, String argumentsJson,
@@ -1736,7 +1755,10 @@ public class ToolRegistry {
                     output != null && output.successful(),
                     output == null ? List.of() : output.discoveredUrls(),
                     "execute_command".equals(invocation.name()) && output != null && output.structuredContent() != null
-                            ? output.structuredContent().path("executedCommand").asText(null) : null);
+                            ? output.structuredContent().path("executedCommand").asText(null) : null,
+                    "execute_command".equals(invocation.name()) && output != null && output.structuredContent() != null
+                            && output.structuredContent().path("exitCode").isIntegralNumber()
+                            ? output.structuredContent().path("exitCode").intValue() : null,false);
         }
 
         private static ToolExecutionResult completed(ToolInvocation invocation, String result, long elapsedMillis) {

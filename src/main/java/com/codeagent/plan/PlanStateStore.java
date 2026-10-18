@@ -55,6 +55,60 @@ public final class PlanStateStore {
         return dbPath;
     }
 
+    /** Pure snapshot; no restoreTasks/findActive repair and no mutable Task escapes. */
+    public synchronized List<com.codeagent.model.recovery.RecoveryPlanState> readRecoveryState(
+            Path workspace, String sessionId) throws SQLException {
+        Objects.requireNonNull(sessionId, "sessionId");
+        var result = new ArrayList<com.codeagent.model.recovery.RecoveryPlanState>();
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:"
+                + dbPath.toUri() + "?mode=ro")) {
+            try (Statement statement = connection.createStatement()) { statement.execute("PRAGMA query_only=ON"); }
+            connection.setAutoCommit(false);
+            try (PreparedStatement plans = connection.prepareStatement(
+                    "SELECT * FROM plan_runs WHERE workspace=? AND session_id=? ORDER BY created_at,id")) {
+                plans.setString(1, normalizeWorkspace(workspace)); plans.setString(2, sessionId);
+                try (ResultSet rows = plans.executeQuery()) {
+                    while (rows.next()) {
+                        if (result.size() == 1000) throw new SQLException("Recovery plan limit exceeded");
+                        String planId = rows.getString("id");
+                        var tasks = new ArrayList<com.codeagent.model.recovery.RecoveryTaskState>();
+                        try (PreparedStatement query = connection.prepareStatement(
+                                "SELECT * FROM plan_tasks WHERE plan_id=? ORDER BY ordinal,task_id")) {
+                            query.setString(1, planId);
+                            try (ResultSet taskRows = query.executeQuery()) {
+                                while (taskRows.next()) {
+                                    if (tasks.size() == 1000) throw new SQLException("Recovery task limit exceeded");
+                                    String taskId=taskRows.getString("task_id"), status=taskRows.getString("status");
+                                    List<String> dependencies;
+                                    try { dependencies=JSON.readValue(taskRows.getString("dependencies_json"),STRING_LIST); }
+                                    catch (IOException e) { throw new SQLException("Recovery task metadata invalid"); }
+                                    String baseline=taskRows.getString("diff_baseline_json");
+                                    var refs = baseline == null || baseline.isBlank()
+                                            ? List.<com.codeagent.model.recovery.RecoverySourceRef>of()
+                                            : List.of(new com.codeagent.model.recovery.RecoverySourceRef(
+                                                    "plan_tasks",planId+"/"+taskId,null,null,
+                                                    com.codeagent.util.RecoveryIntegrity.hash(baseline)));
+                                    tasks.add(new com.codeagent.model.recovery.RecoveryTaskState(planId,taskId,
+                                            taskRows.getInt("ordinal"),com.codeagent.util.SecretRedactor.sanitize(taskRows.getString("description")),
+                                            status,Set.of("RUNNING","REVIEWING").contains(status)?"INTERRUPTED":status,
+                                            dependencies,com.codeagent.util.SecretRedactor.sanitize(taskRows.getString("result")),List.of(),
+                                            List.of(new com.codeagent.model.recovery.RecoveryUnknown(
+                                                    com.codeagent.model.recovery.RecoveryUnknown.Kind.INTERNAL_PROGRESS_UNKNOWN,
+                                                    taskId,null,"No verified attempt material loaded","Verify current workspace before effects")),
+                                            refs,com.codeagent.model.recovery.RecoveryCompleteness.METADATA_ONLY));
+                                }
+                            }
+                        }
+                        result.add(new com.codeagent.model.recovery.RecoveryPlanState(planId,rows.getString("execution_id"),
+                                com.codeagent.util.SecretRedactor.sanitize(rows.getString("goal")),
+                                rows.getString("status"),rows.getString("updated_at"),tasks));
+                    }
+                }
+            } finally { connection.rollback(); }
+        }
+        return List.copyOf(result);
+    }
+
     /**
      * Legacy/unbound save path retained only for callers that do not have a
      * durable parent Session. Such plans are deliberately not resumable.

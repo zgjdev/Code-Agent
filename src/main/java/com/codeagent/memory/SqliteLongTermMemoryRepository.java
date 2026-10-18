@@ -3,6 +3,7 @@ package com.codeagent.memory;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.codeagent.rag.embedding.EmbeddingSpaceDescriptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,6 +51,37 @@ final class SqliteLongTermMemoryRepository {
         this.legacyJsonPath = storageDir.resolve(LEGACY_JSON_FILE);
         initializeSchema();
         migrateLegacyJsonIfNeeded();
+        inImmediateTransaction(connection -> {
+            SqliteMemoryRetrievalIndex.backfill(connection);
+            return null;
+        });
+    }
+
+    List<String> lexicalMatches(String query, String projectKey, int limit) throws SQLException {
+        try (Connection connection = openConnection()) {
+            return SqliteMemoryRetrievalIndex.lexicalMatches(connection, query, projectKey, limit);
+        }
+    }
+
+    Map<String, float[]> readEmbeddings(List<MemoryEntry> entries, EmbeddingSpaceDescriptor space) throws SQLException {
+        try (Connection connection = openConnection()) {
+            Map<String, float[]> result = new HashMap<>();
+            for (MemoryEntry entry : entries) {
+                SqliteMemoryRetrievalIndex.readEmbedding(connection, entry, space)
+                        .ifPresent(vector -> result.put(entry.getId(), vector));
+            }
+            return result;
+        }
+    }
+
+    void writeEmbeddings(List<MemoryEntry> entries, EmbeddingSpaceDescriptor space, List<float[]> vectors)
+            throws SQLException {
+        inImmediateTransaction(connection -> {
+            for (int i = 0; i < entries.size(); i++) {
+                SqliteMemoryRetrievalIndex.writeEmbedding(connection, entries.get(i), space, vectors.get(i));
+            }
+            return null;
+        });
     }
 
     Optional<MemoryEntry> findById(String id) throws SQLException {
@@ -264,6 +296,7 @@ final class SqliteLongTermMemoryRepository {
                       AND project_key <> ''
                     """);
             putMeta(connection, META_SCHEMA_VERSION, SCHEMA_VERSION);
+            SqliteMemoryRetrievalIndex.initialize(connection);
         }
     }
 
@@ -594,6 +627,7 @@ final class SqliteLongTermMemoryRepository {
             statement.setString(index, Instant.now().toString());
             statement.executeUpdate();
         }
+        SqliteMemoryRetrievalIndex.index(connection, entry.getId(), entry.getContent());
     }
 
     private Map<String, String> normalizedMetadata(

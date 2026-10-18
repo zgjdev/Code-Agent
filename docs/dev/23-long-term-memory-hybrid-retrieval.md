@@ -1,6 +1,8 @@
 
 # 长期记忆混合检索、写入解析与时间衰减重构方案
 
+> 2026-10-18 核心检索升级：以本文末尾「持久化向量与 RRF 核心升级」为当前实现契约；早期 JSON、进程内向量和线性加权说明仅为历史基线。
+
 > 状态：已实现并于 2026-09-26 完成真实 BGE、针对性、quick、全量与构建验证
 > 基线：main@d72d2bc07a6065241940e833da33c2b4394d07f9
 > 目标分支：feat/long-term-memory-hybrid-retrieval
@@ -866,3 +868,114 @@ ToolRegistryTest
 ~~~
 
 真实执行结果：长期记忆联合针对性测试 90 tests、0 failures、0 errors；`mvn test -Pquick` 1124 tests、0 failures、0 errors、4 skipped；`mvn test -DskipTests=false` 1175 tests、0 failures、0 errors、10 skipped；`mvn clean package -DskipTests` 构建成功；`git diff --check` 通过。首次真实 BGE 黄金测试暴露原 `0.65` 阈值无法召回设计中的同义改写，修复分支按完整黄金集分布校准为普通 `0.475`、写入候选 `0.45`。
+
+## 12. 持久化向量与 RRF 核心升级（2026-10-18）
+
+### 12.1 背景、目标与非目标
+
+用户要求从最新 main 建分支，只实现讨论确认的核心：文本、embedding、时间持久化；词法与向量召回；RRF 融合排名乘现有时间系数。基线 `origin/main@1db3c790645473edb24b0f070249a6cdb3f7176c`，分支 `codex/long-term-memory-rrf`。原工作区有其他任务未提交改动，因此使用已说明原因的隔离 worktree。
+
+目标：重启复用有效 embedding；中文/英文通过一致预分词进入 FTS5/BM25；词法整词匹配，避免 Java 命中 JavaScript；全局与当前项目、active 过滤在两路候选中生效；RRF 后保留 30 天半衰期与 0.6 下限；预算不足时从后续合格候选补位，每次最多注入 10 条。
+
+非目标：不改 Agent/Plan 注入位置与 Session/账本；不改命令、显式保存权限、CREATE/DUPLICATE/SUPERSEDE 协议；不新增 reranker、远程服务、ANN、自动记忆分类、TTL、查询改写、配置项。时间字段与确认机制不变；向量按需生成，不要求启动全量推理或写入时等待推理。本次不宣称已校准新的注入阈值。
+
+### 12.2 现状分析：源码证据与约束
+
+- `MemoryManager` -> `MemoryRetriever` -> `LongTermMemory`/`MemoryEmbeddingCache`，ReAct 与 Plan 共用此入口。
+- `SqliteLongTermMemoryRepository` 在独立 `memory.db` 中事务保存文本、scope、status、created_at、last_confirmed_at；每次操作使用短连接与 `BEGIN IMMEDIATE`，已有 WAL/busy_timeout=5000。
+- `MemoryEmbeddingCache.embeddingsFor` 在事务外计算本地 BGE 向量；现有 Map 按 id、正文哈希、embedding space 隔离，但不落盘。
+- `MemoryRetriever.retrieveLongTerm` 用 contains 覆盖率和 cosine 线性加权；普通检索乘时间系数，写入关系候选故意不衰减。
+- `buildContextForQuery` 先截断 10 条，再按条目估算 token 跳过过大项；无法从第 11 名补位。
+- SQLite 3.49.1 已在 pom 中；FTS5/BM25 已用于代码 RAG，本次不引入依赖，不改变代码 RAG。
+
+### 12.3 方案设计
+
+```mermaid
+flowchart TD
+    Facts[SQLite long_term_memories 文本与时间] --> FTS[Jieba 同步预分词与 FTS5/BM25]
+    Facts --> Visible[当前 scope 的 active 事实]
+    Visible --> Cache[内存与 SQLite 派生向量缓存]
+    Cache -->|缺失或失效| BGE[事务外本地 BGE]
+    BGE -->|核验正文后条件写回| Cache
+    FTS --> Lex[词法候选排名]
+    Cache --> Dense[cosine >= 0.475 的语义候选排名]
+    Lex --> RRF[RRF k=60]
+    Dense --> RRF
+    RRF --> Decay[乘最后确认时间系数]
+    Decay --> Pack[候选补位与 token 预算 最多10条]
+```
+
+接口与数据结构：
+
+- `LongTermMemory` 增加包内检索/派生缓存入口，委托原 repository，不扩大公开 API。
+- FTS5 表保存 memory id 与预分词正文；中文 Jieba、英文小写，查询词经双引号转义后 OR 拼接，使用绑定参数。正文保留词频；不使用 raw MATCH 字符串。FTS 结果按 bm25 ASC、id 排序，通过事实表过滤 scope/status。
+- embedding 表主键 `(memory_id, embedding_space_id)`，保存 content_hash、dimension、little-endian float BLOB。embedding space 已包含模型 revision/预处理版本。正文哈希、维度、BLOB 大小与非有限数检查失败视为 miss；不能把坏缓存当成有效语义证据。
+- schema 为增量附加：不改变事实表；已有记忆首次初始化时回填词法索引，不做 embedding 推理。后续事实 upsert 同事务维护索引；删除/清空清理派生数据；确认时间刷新不需要重算 embedding。
+- 普通读取依旧全量取得当前可见 active 记忆，以精确 cosine 扫描适配数百至数千条。两路分别最多 `max(50, requestedLimit)` 候选。相同 id 合并：`rrf = sum(1/(60 + rank))`，`final = rrf * (0.6 + 0.4 * 2^(-ageDays/30))`。稳定并列顺序为融合分、确认时间、创建时间、id。
+- 沿用语义阈值 0.475；FTS 词法命中是另一条候选通路。RRF 分数不是概率，不添加无证据的新总分阈值。写入关系候选保留旧评分与 0.45 阈值、无时间衰减，避免改变写入判定。
+- 注入最多 10 条，但从上限 50 条（不足时按实际数量）的排序候选中选取；保持完整条目，不截断事实。不新增预算配置；保留现有条目 token 估算与 ContextProfile 预算约定。
+
+策略、安全、并发与恢复：
+
+- 原事实仍是唯一事实源；向量和 FTS 均可重建，不产生授权。只调用原本地 EmbeddingProvider；不发送到远程服务。
+- embedding 计算不持有 JDBC 事务/写锁；条件写入再次核验当前 id、正文与 active 状态，拒绝被删除、替代或变更的迟到结果。返回旧请求快照对应向量不表示可覆盖新事实。
+- 数据库写锁只覆盖短事务。删除事实时触发派生缓存清理；content/status 变化使过时向量失效。缓存故障使用内存计算结果，模型故障使用 FTS 结果，事实读写故障沿用原错误语义。
+- 兼容旧 DB 和旧 JSON 一次性迁移。附加表不破坏旧版事实读写；回滚代码保留事实，重新升级时补齐缺失词法项。不同版本并发修改数据库不作为新增保证。
+
+### 12.4 实现任务与测试矩阵
+
+按依赖顺序执行，每一边界先补测试并确认 RED，再实现 GREEN：
+
+| 任务 | 文件落点 | 先写测试与可观察验收 |
+|---|---|---|
+| 1. FTS5 词法与兼容初始化 | repository、MemorySearchTerms、LongTermMemory | 中英文召回；Java 不命中 JavaScript；BM25 稀有词排序；scope/active；已有事实回填、删除和确认后索引一致 |
+| 2. 派生向量落盘与复用 | repository、MemoryEmbeddingCache、MemoryRetriever 调用接线 | 关闭重开同正文不重算；正文/模型/维度变化不复用；坏 BLOB 回算；迟到写入拒绝；删除/清空无残留；缓存写入失败不影响事实与本次推理结果 |
+| 3. RRF 与注入 | MemoryRetriever | 两路共同命中获得累加贡献；时间系数正确；仅单路仍工作；写入候选不衰减；前10过长时后续短项补位且最多10条 |
+| 4. 同步文档与回归 | 本文、03模块文档、README必要段落 | 针对性、真实BGE、quick、完整回归、diff --check；只修改上述范围 |
+
+验证命令：
+
+```powershell
+mvn test -DskipTests=false "-Dtest=MemoryRetrieverTest,MemoryEmbeddingCacheTest,MemoryRetrievalPersistenceTest,LongTermMemoryTest,MemoryWriteResolverTest,MemoryManagerTest,MemoryEmbeddingGoldenTest"
+mvn test -Pquick
+mvn test -DskipTests=false
+mvn clean package
+git diff --check
+```
+
+### 12.5 验收清单与实施记录
+
+- [x] 从最新 origin/main 创建无 upstream 的新功能分支，原工作区保持原样。
+- [x] 基线 MemoryRetriever/MemoryEmbeddingCache/LongTermMemory/MemoryWriteResolver/MemoryManager 共77项通过。
+- [x] 实现前自审：不扩大授权、不改变事实生命周期，推理与数据库锁分离，缓存可失效/重建，词法与模型故障路径明确。
+- [x] FTS5 与向量持久化边界 RED/GREEN 已记录。
+- [x] RRF、时间衰减、预算补位与写入关系回归通过。
+- [x] 针对性、quick、全量与构建结果、实际测试数及限制已记录。
+- [x] git diff/diff --check、分支和 upstream 核对；实现交付时保留未提交状态，后续仅按用户明确授权提交及发布同名功能分支。
+
+验证证据与评审：
+
+- 初始新增行为测试 7 项中 6 项如预期失败（无编译错误）；补强 RRF 用例后也观察到旧线性加权排名失败。核心实现后 84 项针对性测试通过；随后边界与真实 BGE 16 项通过，包含旧库回填、坏 BLOB/非有限值、同 id 正文变更、模型空间变更、删除/替代后的迟到写入拒绝、缓存写失败时保留本次结果，以及 scope/active/最多10条限制。
+- 生产代码最后调整后的组合命令：`mvn test -DskipTests=false "-Dtest=MemoryRetrieverTest,MemoryEmbeddingCacheTest,MemoryRetrievalPersistenceTest,LongTermMemoryTest,MemoryWriteResolverTest,MemoryManagerTest,MemoryEmbeddingGoldenTest"`，93 项通过。之后新增同维度 revision 隔离及真实 BGE 经检索器落盘的 2 项测试，均在全量回归中通过。
+- `mvn test -DskipTests=false`：1648 项，0 failures、0 errors、26 skipped，BUILD SUCCESS。跳过项来自既有条件/外部模型评测门禁，本次未修改跳过条件。
+- 最终 `mvn test -Pquick`：1573 项，0 failures、0 errors、20 skipped，BUILD SUCCESS；包含新增测试及之前偶发失败的调度隔离测试。
+- `mvn clean package`：BUILD SUCCESS，产物包含新增 MemorySearchTerms 与 SqliteMemoryRetrievalIndex 类；该命令按项目既有默认跳过测试，测试证据来自前面的实际 quick/完整回归。构建有既有依赖 shading 重叠资源提示，本次不修改打包配置。
+- `git diff --check` 通过；实现交付时分支为 `codex/long-term-memory-rrf`，提交前 HEAD 与起点 origin/main 均为 `1db3c790645473edb24b0f070249a6cdb3f7176c`，无 upstream。变更限于 memory 包、对应测试和 README/本文/03模块文档。验证日志与 quick 报告保留在忽略目录 `target/verification-memory/`。
+- 后续用户已明确授权本分支本地提交并发布同名远端功能分支。发布限定在隔离 worktree，显式暂存本任务文件，执行同目标 dry-run 后推送 `origin HEAD:refs/heads/codex/long-term-memory-rrf`，并核对远端功能分支 SHA 与 main SHA；不切换或修改其他分支的未提交内容，不创建 PR 或合并。
+- 只读代码审查未发现 Critical/Important 问题；已修复发现的启动回填二次扫描：一次读取 FTS id/hash，再线性比较当前事实，缺失项直接插入。复核当前实际 JDBC 3.49.1.0、3000 条完整索引的回填约 15～51 ms（内存库），原查询约 930 ms；该测量只说明索引核对路径，不等同于整体检索延迟。
+
+环境与非本次改动的失败记录：初次 quick 的两个安装测试报 MalformedInput；在未修改 main 的归档基线上同样复现。进一步使用 Java ProcessBuilder 直接运行 fixture，定位为继承 PowerShell 7 的 PSModulePath 后 Windows PowerShell 找不到 Get-FileHash，错误输出又被 Files.readString 按 UTF-8 解码。仅为 Maven 进程临时使用 Windows PowerShell 模块目录后，两项测试均通过，未修改安装脚本/测试或系统配置。后续一次 quick 的 ExecutionShutdownQuarantineTest 出现 RUNNING/ENQUEUED 状态断言失败；该测试单独重跑与完整回归均通过，原因未确认，本次未修改调度模块。
+
+Windows 本次回归使用的进程级环境准备（结束后恢复）：
+
+```powershell
+$taskPreviousModules = $env:PSModulePath
+try {
+    $env:PSModulePath = "$env:WINDIR\System32\WindowsPowerShell\v1.0\Modules;$env:ProgramFiles\WindowsPowerShell\Modules"
+    # 在此环境依次执行上方的 quick / 完整回归命令。
+} finally {
+    $env:PSModulePath = $taskPreviousModules
+}
+```
+
+限制：继续使用原 0.475 语义阈值与 FTS 任一词命中候选规则，未引入校准后的重排门槛；向量按需持久化而非保存事实时同步推理；仍使用精确 cosine 扫描与条目 token 估算，Session 注入位置及历史生命周期不在本次范围。

@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -12,15 +13,19 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 长期记忆检索器：词法 + 本地语义混合召回，并使用有下限的确认时间衰减稳定排序。
+ * 长期记忆检索器：FTS5/BM25 与本地语义排名经 RRF 融合，再乘确认时间衰减。
  */
 public class MemoryRetriever implements AutoCloseable {
+    // Explicit write relation candidates retain the previous scoring contract.
     static final double LEXICAL_WEIGHT = 0.45d;
     static final double SEMANTIC_WEIGHT = 0.55d;
     static final double SEMANTIC_MIN_SCORE = 0.475d;
     static final double WRITE_CANDIDATE_MIN_SCORE = 0.45d;
     static final double DECAY_FLOOR = 0.60d;
     static final double DECAY_HALF_LIFE_DAYS = 30.0d;
+    static final int RRF_K = 60;
+    static final int CANDIDATE_LIMIT = 50;
+    private static final int MAX_INJECTED_MEMORIES = 10;
 
     private final LongTermMemory longTermMemory;
     private final MemoryEmbeddingCache embeddingCache;
@@ -50,13 +55,41 @@ public class MemoryRetriever implements AutoCloseable {
         if (query == null || query.isBlank() || limit <= 0) {
             return List.of();
         }
-        return score(query, longTermMemory.getActiveVisible(projectKey), false).stream()
-                .filter(scored -> scored.lexicalScore() > 0
-                        || scored.semanticScore() >= SEMANTIC_MIN_SCORE)
-                .sorted(resultComparator())
-                .limit(limit)
-                .map(ScoredEntry::entry)
-                .toList();
+        List<MemoryEntry> entries = longTermMemory.getActiveVisible(projectKey);
+        if (entries.isEmpty()) return List.of();
+        int candidateLimit = Math.max(CANDIDATE_LIMIT, limit);
+        Map<String, MemoryEntry> byId = new HashMap<>();
+        entries.forEach(entry -> byId.put(entry.getId(), entry));
+        Map<String, Double> fused = new HashMap<>();
+        addRanks(fused, longTermMemory.lexicalMatches(query, projectKey, candidateLimit).stream()
+                .filter(byId::containsKey).toList());
+
+        Optional<float[]> queryVector = embeddingCache.embedQuery(query);
+        if (queryVector.isPresent()) {
+            Map<String, float[]> vectors = embeddingCache.embeddingsFor(entries, longTermMemory);
+            List<String> semantic = entries.stream()
+                    .filter(entry -> vectors.containsKey(entry.getId()))
+                    .map(entry -> new SemanticMatch(entry.getId(), cosineSimilarity(queryVector.get(), vectors.get(entry.getId()))))
+                    .filter(match -> match.score() >= SEMANTIC_MIN_SCORE)
+                    .sorted(Comparator.comparingDouble(SemanticMatch::score).reversed().thenComparing(SemanticMatch::id))
+                    .limit(candidateLimit).map(SemanticMatch::id).toList();
+            addRanks(fused, semantic);
+        }
+        return fused.entrySet().stream()
+                .map(value -> new RankedEntry(byId.get(value.getKey()), value.getValue(),
+                        value.getValue() * decayFactor(byId.get(value.getKey()))))
+                .sorted(Comparator.comparingDouble(RankedEntry::score).reversed()
+                        .thenComparing(Comparator.comparingDouble(RankedEntry::rrf).reversed())
+                        .thenComparing(value -> LongTermMemory.lastConfirmedAtOf(value.entry()), Comparator.reverseOrder())
+                        .thenComparing(value -> value.entry().getTimestamp(), Comparator.reverseOrder())
+                        .thenComparing(value -> value.entry().getId()))
+                .limit(limit).map(RankedEntry::entry).toList();
+    }
+
+    private static void addRanks(Map<String, Double> fused, List<String> ids) {
+        for (int index = 0; index < ids.size(); index++) {
+            fused.merge(ids.get(index), 1.0d / (RRF_K + index + 1), Double::sum);
+        }
     }
 
     /**
@@ -71,7 +104,7 @@ public class MemoryRetriever implements AutoCloseable {
                 || domainEntries == null || domainEntries.isEmpty()) {
             return List.of();
         }
-        return score(query, domainEntries, true).stream()
+        return scoreWriteCandidates(query, domainEntries).stream()
                 .filter(scored -> scored.entry().getType() == type)
                 .filter(scored -> scored.lexicalScore() > 0
                         || scored.semanticScore() >= WRITE_CANDIDATE_MIN_SCORE)
@@ -91,11 +124,13 @@ public class MemoryRetriever implements AutoCloseable {
     }
 
     public String buildContextForQuery(String query, int maxTokens, String projectKey) {
-        List<MemoryEntry> relevant = retrieveLongTerm(query, 10, projectKey);
-        if (relevant.isEmpty() || maxTokens <= 0) return "";
+        if (maxTokens <= 0) return "";
+        List<MemoryEntry> relevant = retrieveLongTerm(query, CANDIDATE_LIMIT, projectKey);
+        if (relevant.isEmpty()) return "";
 
         StringBuilder body = new StringBuilder();
         int usedTokens = 0;
+        int included = 0;
         for (MemoryEntry entry : relevant) {
             if (usedTokens + entry.getTokenCount() > maxTokens) {
                 continue;
@@ -103,6 +138,7 @@ public class MemoryRetriever implements AutoCloseable {
             body.append("- [").append(entry.getType()).append("] ")
                     .append(entry.getContent()).append("\n");
             usedTokens += entry.getTokenCount();
+            if (++included == MAX_INJECTED_MEMORIES) break;
         }
         if (body.isEmpty()) {
             return "";
@@ -147,16 +183,14 @@ public class MemoryRetriever implements AutoCloseable {
         return DECAY_FLOOR + (1.0d - DECAY_FLOOR) * signal;
     }
 
-    private List<ScoredEntry> score(String query,
-                                    List<MemoryEntry> entries,
-                                    boolean writeCandidateMode) {
+    private List<ScoredEntry> scoreWriteCandidates(String query, List<MemoryEntry> entries) {
         if (entries == null || entries.isEmpty()) {
             return List.of();
         }
 
         Optional<float[]> queryVector = embeddingCache.embedQuery(query);
         Map<String, float[]> entryVectors = queryVector.isPresent()
-                ? embeddingCache.embeddingsFor(entries)
+                ? embeddingCache.embeddingsFor(entries, longTermMemory)
                 : Map.of();
 
         List<ScoredEntry> scored = new ArrayList<>(entries.size());
@@ -174,22 +208,9 @@ public class MemoryRetriever implements AutoCloseable {
             double hybrid = semantic >= 0.0d
                     ? LEXICAL_WEIGHT * lexical + SEMANTIC_WEIGHT * semantic
                     : lexical;
-            double finalScore = writeCandidateMode
-                    ? hybrid
-                    : hybrid * decayFactor(entry);
-            scored.add(new ScoredEntry(entry, lexical, semantic, hybrid, finalScore));
+            scored.add(new ScoredEntry(entry, lexical, semantic, hybrid));
         }
         return scored;
-    }
-
-    private Comparator<ScoredEntry> resultComparator() {
-        return Comparator.comparingDouble(ScoredEntry::finalScore).reversed()
-                .thenComparing(Comparator.comparingDouble(ScoredEntry::hybridRelevance).reversed())
-                .thenComparing((ScoredEntry value) -> LongTermMemory.lastConfirmedAtOf(value.entry()),
-                        Comparator.reverseOrder())
-                .thenComparing((ScoredEntry value) -> value.entry().getTimestamp(),
-                        Comparator.reverseOrder())
-                .thenComparing(value -> value.entry().getId());
     }
 
     static double cosineSimilarity(float[] left, float[] right) {
@@ -218,7 +239,9 @@ public class MemoryRetriever implements AutoCloseable {
     private record ScoredEntry(MemoryEntry entry,
                                double lexicalScore,
                                double semanticScore,
-                               double hybridRelevance,
-                               double finalScore) {
+                               double hybridRelevance) {
     }
+
+    private record SemanticMatch(String id, double score) {}
+    private record RankedEntry(MemoryEntry entry, double rrf, double score) {}
 }

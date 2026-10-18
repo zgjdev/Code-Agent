@@ -1,6 +1,7 @@
 package com.codeagent.memory;
 
 import com.codeagent.config.CodeAgentPaths;
+import com.codeagent.rag.embedding.EmbeddingSpaceDescriptor;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,7 +20,7 @@ import java.util.stream.Collectors;
  * 长期记忆 - 跨对话持久化的关键信息。
  *
  * <p>SQLite 是唯一事实源；每个 MemoryEntry 独立持久化，active/superseded 生命周期
- * 由结构化列与 metadata 共同保存。语义 embedding 仍由 MemoryEmbeddingCache 在进程内派生。</p>
+ * 由结构化列与 metadata 共同保存。FTS 与 embedding 是同库内可重建的派生检索数据。</p>
  */
 public class LongTermMemory implements Memory {
     private static final Logger log = LoggerFactory.getLogger(LongTermMemory.class);
@@ -84,6 +85,31 @@ public class LongTermMemory implements Memory {
         } catch (SQLException e) {
             log.warn("长期记忆更新持久化失败: {}", e.getMessage(), e);
             return false;
+        }
+    }
+
+    List<String> lexicalMatches(String query, String projectKey, int limit) {
+        try {
+            return repository.lexicalMatches(query, projectKey, limit);
+        } catch (SQLException e) {
+            throw readFailure(e);
+        }
+    }
+
+    Map<String, float[]> readEmbeddings(List<MemoryEntry> entries, EmbeddingSpaceDescriptor space) {
+        try {
+            return repository.readEmbeddings(entries, space);
+        } catch (SQLException e) {
+            log.warn("长期记忆向量缓存读取失败，将重新计算");
+            return Map.of();
+        }
+    }
+
+    void writeEmbeddings(List<MemoryEntry> entries, EmbeddingSpaceDescriptor space, List<float[]> vectors) {
+        try {
+            repository.writeEmbeddings(entries, space, vectors);
+        } catch (SQLException e) {
+            log.warn("长期记忆向量缓存写入失败，保留本次内存结果");
         }
     }
 

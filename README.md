@@ -237,7 +237,9 @@ CODEAGENT_SESSION_RESUME=off
 - `CODEAGENT.md` 或 `.codeagent/CODEAGENT.md`：可提交的团队规则
 - `CODEAGENT.local.md` 或 `.codeagent/CODEAGENT.local.md`：本地覆盖
 
-长期记忆不会自动从普通对话中提取。只有用户明确要求记住/更新，或执行 `/save` 时才会写入。检索使用词法 + 本地 BGE 混合召回；同义重复会 no-op，用户明确改变旧偏好/事实时旧记忆会保留为 superseded 历史，新事实成为 active。长期记忆事实持久化在 `~/.codeagent/memory/memory.db`，每条记忆独立行写入；SQLite 使用 WAL + 事务处理并发写入。旧 `long_term_memory.json` 首次升级时一次性迁移，成功后不再作为事实源；BGE embedding 仍只存在进程缓存，不写入 SQLite。
+长期记忆不会自动从普通对话中提取。只有用户明确要求记住/更新，或执行 `/save` 时才会写入。同义重复只刷新确认时间，用户明确改变旧偏好/事实时旧记忆保留为 superseded 历史，新事实成为 active。文本与时间持久化在 `~/.codeagent/memory/memory.db`，每条记忆独立行写入；SQLite 使用 WAL + 事务处理并发写入，旧 `long_term_memory.json` 首次升级时一次性迁移。
+
+检索采用 Jieba 预分词的 FTS5/BM25 与本地 BGE 双路召回，通过 RRF 合并排名，再按最后确认时间衰减。BGE 向量按需生成并持久化到同一数据库，正文或模型版本变化时重算；重启可复用有效向量，模型不可用时使用词法结果。每次从合格候选中按 token 预算选择最多 10 条完整记忆，过长条目跳过并尝试后续候选。实现边界见 [长期记忆核心升级](docs/dev/23-long-term-memory-hybrid-retrieval.md#12-持久化向量与-rrf-核心升级2026-10-18)。
 
 ```text
 /memory
@@ -433,7 +435,7 @@ TurnToolPolicy → HitlToolRegistry → ToolRegistry → PathGuard / CommandGuar
 | `~/.codeagent/config.json` | Provider、模型与 Web Tool 路由配置 |
 | `~/.codeagent/history/` | 持久化会话与事件日志 |
 | `~/.codeagent/plans/plans.db` | Plan DAG checkpoint |
-| `~/.codeagent/memory/memory.db` | 长期记忆事实与生命周期状态 |
+| `~/.codeagent/memory/memory.db` | 长期记忆事实、生命周期状态及可重建的词法/向量检索数据 |
 | `~/.codeagent/tasks/tasks.db` | inline/plain CLI 的统一 Runtime Execution 队列；旧 `runtime_tasks` 只迁移为 legacy row |
 | `~/.codeagent/snapshots/` | Side-Git 快照 |
 | `~/.codeagent/logs/` | 运行日志 |

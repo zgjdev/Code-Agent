@@ -21,8 +21,12 @@ final class MemoryTestEmbeddingProvider implements EmbeddingProvider {
     }
 
     MemoryTestEmbeddingProvider(int dimension) {
+        this(dimension, "test");
+    }
+
+    MemoryTestEmbeddingProvider(int dimension, String revision) {
         this.space = EmbeddingSpaceDescriptor.create(
-                "memory-test", "memory-test", "in-process", "test",
+                "memory-test", "memory-test", "in-process", revision,
                 dimension, "test", true, 1, 1);
     }
 

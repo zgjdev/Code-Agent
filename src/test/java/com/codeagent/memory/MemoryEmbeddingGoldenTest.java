@@ -2,18 +2,37 @@ package com.codeagent.memory;
 
 import com.codeagent.rag.embedding.InProcessBgeEmbeddingProvider;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.function.Executable;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * 使用仓库随 JAR 分发的真实本地 BGE 固化长期记忆语义阈值。
  */
 class MemoryEmbeddingGoldenTest {
+
+    @Test
+    void bundledBgeRetrievalPersistsVectorAndRecallsParaphrase(@TempDir Path directory) {
+        LongTermMemory memory = new LongTermMemory(directory.toFile());
+        MemoryEntry entry = new MemoryEntry("language", "默认使用中文回答用户", MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"), 10);
+        memory.store(entry);
+        try (MemoryRetriever retriever = new MemoryRetriever(memory)) {
+            assertEquals("language", retriever.retrieve("后续都用汉语和我沟通", 5).get(0).getId());
+        }
+        try (InProcessBgeEmbeddingProvider provider = new InProcessBgeEmbeddingProvider()) {
+            assertEquals(provider.space().dimension(), memory.readEmbeddings(List.of(entry), provider.space())
+                    .get("language").length);
+        }
+    }
 
     @Test
     void bundledBgeSeparatesRelatedFromUnrelatedQueries() throws Exception {

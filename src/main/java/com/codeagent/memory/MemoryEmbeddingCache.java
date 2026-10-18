@@ -19,9 +19,9 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 长期记忆的进程内 embedding 缓存。
+ * 长期记忆的进程内 embedding 缓存，可复用同库内持久化派生向量。
  *
- * <p>只复用本地 EmbeddingProvider，不持久化向量。缓存 key 同时包含 memory id、
+ * <p>只复用本地 EmbeddingProvider。缓存 key 同时包含 memory id、
  * content hash 和 embedding space，正文或模型版本变化都会自然失效。</p>
  */
 public final class MemoryEmbeddingCache implements AutoCloseable {
@@ -44,7 +44,7 @@ public final class MemoryEmbeddingCache implements AutoCloseable {
         }
         try {
             List<float[]> vectors = provider.embedAll(List.of(query));
-            if (vectors.size() != 1 || vectors.get(0) == null) {
+            if (vectors.size() != 1 || !SqliteMemoryRetrievalIndex.validVector(vectors.get(0), provider.space().dimension())) {
                 return Optional.empty();
             }
             return Optional.of(vectors.get(0).clone());
@@ -58,6 +58,10 @@ public final class MemoryEmbeddingCache implements AutoCloseable {
      * 返回当前 entries 的向量。缺失项会一次批量计算，已缓存项不会重复计算。
      */
     public Map<String, float[]> embeddingsFor(List<MemoryEntry> entries) {
+        return embeddingsFor(entries, null);
+    }
+
+    Map<String, float[]> embeddingsFor(List<MemoryEntry> entries, LongTermMemory memory) {
         if (entries == null || entries.isEmpty()) {
             return Map.of();
         }
@@ -78,6 +82,19 @@ public final class MemoryEmbeddingCache implements AutoCloseable {
             }
         }
 
+        if (memory != null && !missingEntries.isEmpty()) {
+            Map<String, float[]> persisted = memory.readEmbeddings(missingEntries, provider.space());
+            for (int index = missingEntries.size() - 1; index >= 0; index--) {
+                MemoryEntry entry = missingEntries.get(index);
+                float[] vector = persisted.get(entry.getId());
+                if (vector != null) {
+                    cache.put(missingKeys.remove(index), vector.clone());
+                    result.put(entry.getId(), vector.clone());
+                    missingEntries.remove(index);
+                }
+            }
+        }
+
         if (!missingEntries.isEmpty()) {
             try {
                 List<String> inputs = missingEntries.stream()
@@ -91,7 +108,7 @@ public final class MemoryEmbeddingCache implements AutoCloseable {
                 }
                 for (int index = 0; index < missingEntries.size(); index++) {
                     float[] vector = vectors.get(index);
-                    if (vector == null || vector.length != provider.space().dimension()) {
+                    if (!SqliteMemoryRetrievalIndex.validVector(vector, provider.space().dimension())) {
                         throw new EmbeddingException(
                                 "memory_embedding_dimension_mismatch",
                                 "Local embedding returned an unexpected vector dimension");
@@ -100,6 +117,7 @@ public final class MemoryEmbeddingCache implements AutoCloseable {
                     cache.put(missingKeys.get(index), copy);
                     result.put(missingEntries.get(index).getId(), copy.clone());
                 }
+                if (memory != null) memory.writeEmbeddings(missingEntries, provider.space(), vectors);
             } catch (EmbeddingException | RuntimeException e) {
                 log.warn("长期记忆 entry embedding 失败，未命中缓存的条目将使用词法分数: {}", e.getMessage());
             }

@@ -15,6 +15,26 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class WorkspaceAwareExecutionSchedulerTest {
 
+    @Test void shutdownWaitsForDispatcherReservationToDrain(@TempDir Path temporary) throws Exception {
+        CountDownLatch reserved=new CountDownLatch(1), release=new CountDownLatch(1), closed=new CountDownLatch(1);
+        try(var store=new RuntimeExecutionStore(temporary.resolve("execution.db"))) {
+            var scheduler=new WorkspaceAwareExecutionScheduler(store,temporary,(execution,token)->TopLevelExecutionResult.succeeded("done"),()->{
+                reserved.countDown();
+                boolean interrupted=false;
+                for(;;) try { release.await(); break; } catch(InterruptedException e) { interrupted=true; }
+                if(interrupted) Thread.currentThread().interrupt();
+                return false;
+            });
+            scheduler.start();
+            assertTrue(reserved.await(5,TimeUnit.SECONDS));
+            Thread closer=new Thread(()->{ scheduler.close(); closed.countDown(); });
+            closer.setDaemon(true); closer.start();
+            try { assertFalse(closed.await(150,TimeUnit.MILLISECONDS),"Close must drain the dispatcher reservation before releasing ownership"); }
+            finally { release.countDown(); closer.join(5000); scheduler.close(); }
+            assertTrue(scheduler.safelyStopped());
+        }
+    }
+
     @Test
     void bindsClaimsToOneWorkspaceAndSerializesDifferentSessions(@TempDir Path tempDir) throws Exception {
         Path workspace = tempDir.resolve("current");

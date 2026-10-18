@@ -3,5 +3,6 @@ package com.codeagent.agent;
 public enum RoutingSource {
     EXPLICIT,
     AUTO_MODEL,
-    AUTO_FALLBACK
+    AUTO_FALLBACK,
+    CONTINUATION_CONTROL
 }

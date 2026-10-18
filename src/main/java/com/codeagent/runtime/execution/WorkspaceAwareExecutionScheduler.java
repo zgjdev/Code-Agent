@@ -193,6 +193,16 @@ public final class WorkspaceAwareExecutionScheduler implements AutoCloseable {
                         else throw new IllegalStateException("Production runtime did not finalize its execution");
                     }
                 }
+            } catch (RecoveryPreparationDeferredException deferred) {
+                entry.lastFailure = deferred;
+                try {
+                    RuntimeExecution current = store.find(execution.id()).orElseThrow();
+                    if (!current.awaitingInput() || current.status() != ExecutionStatus.ENQUEUED
+                            || current.recoveryGeneration() <= execution.recoveryGeneration())
+                        throw new IllegalStateException("Runner did not persist preparation deferral");
+                } catch (Exception invalidDeferral) {
+                    entry.lastFailure = invalidDeferral; entry.active = false; entry.quarantined = true;
+                }
             } catch (Exception failure) {
                 entry.lastFailure = failure;
                 if (execution != null) {
@@ -243,15 +253,23 @@ public final class WorkspaceAwareExecutionScheduler implements AutoCloseable {
     }
     @Override public void close() {
         ThreadPoolExecutor pool;
+        Thread dispatchThread;
         synchronized (this) {
             closed = true; running = false;
             workspaces.values().forEach(e -> e.active = false);
             tokens.values().forEach(CancellationToken::cancel);
             workspaces.values().forEach(e -> { if (e.runtime != null) e.runtime.broker().close(); });
             pool = workers;
+            dispatchThread = dispatcher;
             if (dispatcher != null) dispatcher.interrupt();
         }
         signalWork();
+        // Dispatcher also owns transient capacity/slot reservations before submitting a worker.
+        // Drain those before Host inspects slots and decides whether ownership must be retained.
+        if (dispatchThread != null && dispatchThread != Thread.currentThread()) {
+            try { dispatchThread.join(5000); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
         if (pool != null) {
             for (Runnable pending : pool.shutdownNow()) ((Reservation) pending).discard();
             try { pool.awaitTermination(5, TimeUnit.SECONDS); }

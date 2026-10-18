@@ -45,6 +45,11 @@ public final class TopLevelExecutionCoordinator implements TopLevelExecutionRunn
         }
         ensureNotCancelled(token);
 
+        // Old trusted-host constructors remain compatible for null legacy semantics, but may
+        // never erase an already durable no-tools/control contract.
+        if (current.requestSemantics() != null && current.requestSemantics() != RequestSemantics.NEW_REQUEST)
+            throw new IllegalStateException("Request requires the continuation-aware adapter: " + current.requestSemantics());
+
         if (current.resolvedTaskInput() == null) {
             String resolved = inputResolver.resolve(current);
             current = store.commitResolvedInput(claim, resolved);

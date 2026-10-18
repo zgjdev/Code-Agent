@@ -27,7 +27,11 @@ public final class RuntimeExecutionHost implements AutoCloseable {
         this.scheduler = new WorkspaceAwareExecutionScheduler(store, options, locks);
     }
     public synchronized WorkspaceIdentity registerWorkspace(Path root, WorkspaceRuntimeFactory factory) throws Exception {
+        return registerWorkspace(root, factory, RecoveryPolicy.AUTOMATIC);
+    }
+    public synchronized WorkspaceIdentity registerWorkspace(Path root, WorkspaceRuntimeFactory factory, RecoveryPolicy policy) throws Exception {
         requireOpen();
+        Objects.requireNonNull(policy,"policy");
         WorkspaceIdentity identity = new WorkspaceIdentityResolver().resolve(root);
         Registration existing = registrations.get(identity.key());
         if (existing != null) {
@@ -43,7 +47,9 @@ public final class RuntimeExecutionHost implements AutoCloseable {
             if (!identity.equals(runtime.identity())) throw new IllegalStateException("Factory workspace identity mismatch");
             store.registerWorkspace(owner, root);
             runtime.reconcile(store, owner);
-            store.recoverStaleRunning(owner);
+            if(policy==RecoveryPolicy.WAIT_FOR_USER) store.freezeForUser(owner);
+            else store.recoverStaleRunning(owner);
+            runtime.bindContinuationCapability(new ContinuationCapability(store, owner, runtime, scheduler::signalWork));
             scheduler.register(runtime, owner);
             registrations.put(identity.key(), new Registration(runtime, owner, factory));
             return identity;
@@ -83,8 +89,18 @@ public final class RuntimeExecutionHost implements AutoCloseable {
         return execution;
     }
     public synchronized CancelRequestResult cancel(String id) throws Exception {
-        requireExecution(id);
-        return scheduler.cancel(id);
+        RuntimeExecution execution=requireExecution(id);
+        CancelRequestResult result=scheduler.cancel(id);
+        RuntimeExecution canceled=store.find(id).orElseThrow();
+        if(canceled.terminal()&&canceled.selectedMode()!=null) {
+            Registration registration=requireRegistration(execution.workspaceKey());
+            if(registration.runtime.mutationGate().tryLock()) {
+                try(var lease=registration.runtime.contexts().acquire(canceled.sessionId())) {
+                    new ExecutionFinalizer(store).reconcileTerminal(registration.owner,canceled,lease.context().session());
+                } finally { registration.runtime.mutationGate().unlock(); }
+            }
+        }
+        return result;
     }
     public synchronized List<RuntimeExecution> list(WorkspaceKey workspace, int limit) throws Exception {
         return store.list(requireRegistration(workspace).runtime.identity().canonicalRoot(), limit);
@@ -108,6 +124,7 @@ public final class RuntimeExecutionHost implements AutoCloseable {
             throw new IllegalStateException("Workspace has queued or running executions");
         }
         scheduler.unregister(key);
+        registration.runtime.stopContinuationAdmission();
         unregistering.add(key);
         registration.runtime.close();
         registration.owner.close();
@@ -129,7 +146,10 @@ public final class RuntimeExecutionHost implements AutoCloseable {
     private void requireOpen() { if (closed) throw new IllegalStateException("Execution host is closed"); }
     public synchronized boolean safelyStopped() { return scheduler.safelyStopped(); }
     @Override public void close() throws Exception {
-        synchronized (this) { closed = true; }
+        synchronized (this) {
+            closed = true;
+            registrations.values().forEach(registration -> registration.runtime.stopContinuationAdmission());
+        }
         scheduler.close();
         Exception failure = null;
         synchronized (this) {

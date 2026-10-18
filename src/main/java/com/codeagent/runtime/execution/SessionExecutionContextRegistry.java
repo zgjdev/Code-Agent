@@ -11,6 +11,7 @@ public final class SessionExecutionContextRegistry<T extends AutoCloseable> impl
     private final Predicate<String> hasPendingInteraction;
     private final Map<String, Entry<T>> contexts = new LinkedHashMap<>();
     private String leasedSessionId;
+    private Lease<T> activeLease;
     private boolean closed;
 
     public SessionExecutionContextRegistry(
@@ -54,7 +55,8 @@ public final class SessionExecutionContextRegistry<T extends AutoCloseable> impl
         }
         entry.leased = true;
         leasedSessionId = sessionId;
-        return new Lease<>(this, sessionId, entry.context);
+        activeLease = new Lease<>(this, sessionId, entry.context);
+        return activeLease;
     }
 
     public synchronized boolean evictIfIdle(String sessionId, String currentSessionId) throws Exception {
@@ -77,13 +79,41 @@ public final class SessionExecutionContextRegistry<T extends AutoCloseable> impl
         return contexts.containsKey(sessionId);
     }
 
-    private synchronized void release(String sessionId, T context) {
+    private synchronized void release(Lease<T> lease) {
+        String sessionId = lease.sessionId;
+        T context = lease.context;
+        requireCurrent(lease, sessionId, context);
         Entry<T> entry = contexts.get(sessionId);
         if (entry == null || entry.context != context || !entry.leased) {
             throw new IllegalStateException("Invalid or duplicate session execution lease release: " + sessionId);
         }
         entry.leased = false;
         leasedSessionId = null;
+        activeLease = null;
+    }
+
+    /** Opaque proof of this physical lease; cannot survive release/reacquire or cross threads. */
+    static final class LeaseAttestation {
+        private final Object lease;
+        private LeaseAttestation(Object lease) { this.lease = lease; }
+    }
+
+    synchronized LeaseAttestation attest(String sessionId, T context) {
+        requireCurrent(activeLease, sessionId, context);
+        return new LeaseAttestation(activeLease);
+    }
+
+    synchronized void requireStillCurrent(LeaseAttestation token, String sessionId, T context) {
+        if (token == null || token.lease != activeLease) throw new IllegalStateException("Session lease has changed");
+        requireCurrent(activeLease, sessionId, context);
+    }
+
+    private synchronized void requireCurrent(Lease<T> lease, String sessionId, T context) {
+        if (closed || lease == null || lease != activeLease || lease.closed
+                || lease.thread != Thread.currentThread() || !sessionId.equals(leasedSessionId)
+                || lease.context != context || contexts.get(sessionId) == null
+                || contexts.get(sessionId).context != context || !contexts.get(sessionId).leased)
+            throw new IllegalStateException("Current thread does not own this Session lease");
     }
 
     @Override
@@ -129,6 +159,7 @@ public final class SessionExecutionContextRegistry<T extends AutoCloseable> impl
         private final SessionExecutionContextRegistry<T> owner;
         private final String sessionId;
         private final T context;
+        private final Thread thread = Thread.currentThread();
         private boolean closed;
 
         private Lease(SessionExecutionContextRegistry<T> owner, String sessionId, T context) {
@@ -138,9 +169,7 @@ public final class SessionExecutionContextRegistry<T extends AutoCloseable> impl
         }
 
         public T context() {
-            if (closed) {
-                throw new IllegalStateException("Session execution lease is closed");
-            }
+            owner.requireCurrent(this, sessionId, context);
             return context;
         }
 
@@ -149,7 +178,7 @@ public final class SessionExecutionContextRegistry<T extends AutoCloseable> impl
             if (closed) {
                 return;
             }
-            owner.release(sessionId, context);
+            owner.release(this);
             closed = true;
         }
     }

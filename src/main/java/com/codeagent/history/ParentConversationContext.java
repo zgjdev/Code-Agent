@@ -106,6 +106,38 @@ public final class ParentConversationContext {
         return event;
     }
 
+    /** Explicit owner, raw semantic input, and provider parts remain separate; never uses ThreadLocal. */
+    public synchronized SessionEvent appendExecutionMessage(String executionId, LlmClient.Message message,
+            String semanticContent, String actor, String source) throws IOException {
+        Objects.requireNonNull(message); Objects.requireNonNull(semanticContent);
+        if (sessionHandle == null) throw new IllegalStateException("parent session is not attached");
+        boolean user = "user".equals(message.role());
+        if (!user && !"assistant".equals(message.role()) || message.toolCallId() != null
+                || message.toolCalls() != null && !message.toolCalls().isEmpty()
+                || executionId == null || actor == null || source == null)
+            throw new IllegalArgumentException("Only explicit top-level user/final assistant messages are supported");
+        var envelope = sessionHandle.projection().executionEnvelopes().get(executionId);
+        if (envelope == null) throw new IllegalStateException("Execution must start before its messages");
+        Long existing = user ? envelope.userSequence() : envelope.assistantSequence();
+        if (existing != null) {
+            var event = sessionHandle.readAll().stream().filter(e -> e.sequence() == existing).findFirst().orElseThrow();
+            if (!JSON.valueToTree(message).equals(event.payload().get("message"))
+                    || !semanticContent.equals(event.payload().path("conversation").path("content").asText())
+                    || !actor.equals(event.actor()) || !source.equals(event.source()))
+                throw new IllegalStateException("Execution message already has different durable content");
+            return event;
+        }
+        if (envelope.ended()) throw new IllegalStateException("Cannot append to ended execution");
+        ObjectNode payload = JSON.createObjectNode().put("executionId", executionId);
+        payload.set("message", JSON.valueToTree(message));
+        payload.putObject("conversation").put("executionId", executionId).put("role", message.role())
+                .put("content", semanticContent).put("mode", "react");
+        var event = append(new SessionEventDraft(user ? SessionEvent.Types.USER_MESSAGE : SessionEvent.Types.ASSISTANT_MESSAGE,
+                "react", actor, source, false, SessionEvent.SurfaceOperation.append(), payload));
+        synchronizeProviderFromProjection();
+        return event;
+    }
+
     public synchronized ParentCompactionResult compactIfNeeded(int triggerTokens,
                                                                long effectiveTokens,
                                                                String mode,

@@ -100,6 +100,9 @@ public final class DefaultWorkspaceRuntimeFactory implements WorkspaceRuntimeFac
                                     return result(plan.runOrResumeExecution(input, value.submittedInput()));
                                 });
                         proposed = coordinator.run(execution, token);
+                    } catch (RecoveryPreparationDeferredException e) {
+                        tools.getSnapshotService().drain();
+                        throw e;
                     } catch (InterruptedException e) { throw e; }
                     catch (CancellationException e) { proposed = new TopLevelExecutionResult(null, null, ExecutionOutcome.CANCELED, null, null); }
                     catch (Exception e) { proposed = TopLevelExecutionResult.failed(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); }

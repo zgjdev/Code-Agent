@@ -49,4 +49,15 @@ class RuntimeExecutionTaskCommandFormatterTest {
             assertTrue(manager.list(20).isEmpty());
         }
     }
+    @Test void heldExecutionsShowWaitingForUser(@TempDir Path temporary) throws Exception {
+        try(var store=new RuntimeExecutionStore(temporary.resolve("execution.db"));
+            var owner=com.codeagent.runtime.execution.WorkspaceOwnerLease.acquire(temporary.resolve("locks"),
+                new com.codeagent.runtime.execution.WorkspaceIdentityResolver().resolve(temporary),"owner")) {
+            var task=store.enqueue(temporary,"session","old",null);
+            store.freezeForUser(owner);
+            task=store.find(task.id()).orElseThrow();
+            assertTrue(TaskCommandFormatter.formatExecution(task).contains("\u7b49\u5f85\u7528\u6237\u7ee7\u7eed"));
+            assertTrue(TaskCommandFormatter.formatExecutions(java.util.List.of(task)).contains("\u7b49\u5f85\u7528\u6237\u7ee7\u7eed"));
+        }
+    }
 }

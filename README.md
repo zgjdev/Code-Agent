@@ -206,12 +206,12 @@ CodeAgent 把实时确定性工具与索引式 RAG 分开：
 ### 持久化会话与上下文
 
 - 原始会话以 append-only JSONL 保存到 `~/.codeagent/history/sessions/`。
-- 默认恢复当前工作区最近的未完成会话。
+- inline/plain 启动后空闲等待，不自动附着会话；第一条普通任务输入才创建新会话。
 - Provider Surface 和 Top-level Conversation View 分离维护。
 - ReAct 与 Plan 共享顶层语义连续性，但不共享 Task transcript 或隐式权限。
 - 上下文接近预算时自动压缩，也可以手动执行 `/compact`。
 
-inline/plain CLI 由 Session Context Registry 管理每个 Session 的 Agent、上下文和 writable 会话句柄。`/new`、`/resume` 在源或目标 Session 有非终态任务时拒绝切换；共享运行态正被其他 Session 执行使用时，也会拒绝修改会话或运行配置。退出会停止当前执行并保留可恢复的非终态任务，相关 Session 保持未关闭；恢复任务不会因关闭终端而继续在独立服务中运行。
+inline/plain CLI 由 Session Context Registry 管理每个 Session 的 Agent、上下文和 writable 会话句柄。启动先冻结旧的排队和中断任务，等待用户继续；选择会话、浏览历史和 `/new` 不执行或取消这些任务。源或目标会话正在执行、有可调度任务或等待审批时拒绝切换；共享运行态正被其他 Session 使用时也会拒绝切换。退出会停止当前执行并保留可恢复的非终态任务。Lanterna 全屏和 Runtime HTTP API 保留各自原入口，不具备此处的 Host 等待门及会话选择器保证。
 
 常用命令：
 
@@ -224,11 +224,13 @@ inline/plain CLI 由 Session Context Registry 管理每个 Session 的 Agent、�
 /export
 ```
 
-如需每次启动新会话：
+`/resume` 打开当前工作区的父会话选择器，每页 20 项；输入编号选择，`n`/`p` 翻页，`? 搜索词` 本地搜索，`cancel` 取消。`/resume last` 选择最近可安全恢复的非空会话，`/resume <id>` 指定会话。选择后按每页 30 条显示 Plan/ReAct 顶层历史；`n` 或 Enter 继续，`all` 主动展开 clear 前历史，`cancel` 停止显示并保留已选会话。浏览每行按一次 Enter 提交，也可用 `q` 或 Ctrl+C 取消。超长消息分块显示；浏览不会把等待中的输入伪装成已执行对话。`/sessions` 只显示摘要，`/new` 明确创建新会话。
 
-```dotenv
-CODEAGENT_SESSION_RESUME=off
-```
+选择历史后，直接输入新问题即可开始新一轮；询问进度会结合保存的执行、计划和任务状态回答，不调用工具，也不自动继续旧任务。明确要求继续时，先保存本轮请求与确认，再调度原 Execution；已绑定的 Plan 保持原计划和已完成节点，恢复的子任务读取其对应的旧子会话完整消息组，并遵守本次继续请求中的约束。历史工具结果仅供参考，仍需重新验证。
+
+`/plan resume` 明确继续当前会话已绑定的未完成 Plan，`/plan abandon` 关闭该 Plan、对应原 Execution 和对话轮，其他等待任务保留。没有绑定原 Execution 的旧版 Plan 会给出说明，当前不自动迁移。审批和计划评审优先接收输入；若浏览历史期间出现审批，浏览会取消，输入交给当前审批。
+
+`codeagent.session.resume` 与 `CODEAGENT_SESSION_RESUME` 已弃用；配置后只显示本地提示，不自动恢复会话或执行任务。
 
 ### Memory、项目规则与 Skill
 
@@ -486,7 +488,7 @@ graph TB
 | 类别 | 命令 |
 |---|---|
 | 模式 | `/react [任务]`、`/plan [任务]`、`/plan resume`、`/plan abandon` |
-| 会话 | `/sessions`、`/resume <id>`、`/new`、`/clear`、`/compact`、`/export` |
+| 会话 | `/sessions`、`/resume [last\|<id>]`、`/new`、`/clear`、`/compact`、`/export` |
 | 模型 | `/model [provider或model]`、`/config`、`/context` |
 | 安全 | `/policy`、`/audit [N]`、`/snapshot`、`/restore <N>` |
 | 代码理解 | `/search <查询>`、`/graph <类名>` |

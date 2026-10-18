@@ -190,6 +190,16 @@ class CodeAgentCompleterTest {
         assertTrue(candidates.stream().anyMatch(c -> c.value().equals("session-123")));
     }
 
+    @Test void completesResumeLastAndBarePickerCommand() {
+        var completer = new CodeAgentCompleter(List::of);
+        var candidates = new ArrayList<Candidate>();
+        completer.complete(null, parsed("/resume l", "l"), candidates);
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("last")));
+        candidates.clear();
+        completer.complete(null, parsed("/resume", "/resume"), candidates);
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("/resume")));
+    }
+
     @Test
     void completesLocalPathMentions() {
         CodeAgentCompleter completer = new CodeAgentCompleter(List::of);

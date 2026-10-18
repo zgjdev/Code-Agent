@@ -23,6 +23,33 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MainInputNormalizationTest {
+    @Test void browsingSelectionUsesOneNormalJlineReadWithOneEnter() throws Exception {
+        var output=new ByteArrayOutputStream();
+        try(var source=new java.io.PipedInputStream();var writer=new java.io.PipedOutputStream(source);
+            var terminal=TerminalBuilder.builder().dumb(true).streams(source,output).build()) {
+            writer.write("1\ncancel\n".getBytes(StandardCharsets.UTF_8));writer.flush();
+            var reader=LineReaderBuilder.builder().terminal(terminal).build();
+            var renderer=new com.codeagent.render.PlainRenderer();
+            try(var browsing=Main.sessionBrowsingInput(reader)) {
+                var selection=Main.readPromptInput(terminal,reader,renderer,(com.codeagent.agent.ExecutionMode)null,false);
+                assertEquals("1",selection.text());assertFalse(selection.canceled());
+                var cancel=Main.readPromptInput(terminal,reader,renderer,(com.codeagent.agent.ExecutionMode)null,false);
+                assertEquals("cancel",cancel.text());assertFalse(cancel.canceled());
+            }
+        }
+    }
+    @Test void resumeInputHasNoCommandHistoryOrCompletionAndRestoresReaderOnFailure() throws Exception {
+        LineReader reader = newLineReader();
+        reader.setVariable(LineReader.DISABLE_HISTORY, "prior-history");
+        reader.setVariable(LineReader.DISABLE_COMPLETION, "prior-completion");
+        try (var scope = Main.sessionBrowsingInput(reader)) {
+            assertEquals(Boolean.TRUE, reader.getVariable(LineReader.DISABLE_HISTORY));
+            assertEquals(Boolean.TRUE, reader.getVariable(LineReader.DISABLE_COMPLETION));
+            assertTrue(reader.isSet(LineReader.Option.DISABLE_EVENT_EXPANSION));
+        }
+        assertEquals("prior-history", reader.getVariable(LineReader.DISABLE_HISTORY));
+        assertEquals("prior-completion", reader.getVariable(LineReader.DISABLE_COMPLETION));
+    }
 
     @Test
     void keepsMultilinePasteStructure() {

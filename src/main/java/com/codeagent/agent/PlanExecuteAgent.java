@@ -34,6 +34,14 @@ import com.codeagent.tool.ToolRegistry.ToolExecutionResult;
 import com.codeagent.tool.ToolRegistry.ToolInvocation;
 import com.codeagent.tool.TurnToolPolicy;
 import com.codeagent.tool.ToolResourceScope;
+import com.codeagent.model.recovery.TaskExecutionIdentity;
+import com.codeagent.model.recovery.TaskAttemptBinding;
+import com.codeagent.model.recovery.TaskObservationContext;
+import com.codeagent.model.recovery.*;
+import com.codeagent.history.TaskTranscriptReader;
+import com.codeagent.runtime.execution.ContinuationInvocation;
+import com.codeagent.prompt.RecoveryContextFormatter;
+import com.codeagent.memory.TokenBudget;
 import com.codeagent.util.TerminalMarkdownRenderer;
 import com.codeagent.image.ImageReferenceParser;
 import org.slf4j.Logger;
@@ -163,6 +171,48 @@ public class PlanExecuteAgent {
     private TurnToolPolicy turnToolPolicy = TurnToolPolicy.forExplicitTask("");
     private String submittedPolicyInput = "";
     private String runtimeExecutionId;
+    private TaskExecutionIdentity taskRecoveryIdentity;
+    private TaskRecoveryStore taskRecoveryStore;
+    private TaskTranscriptReader taskTranscriptReader;
+    private final Map<String, TaskTranscript> recoveryTranscripts = new ConcurrentHashMap<>();
+    private final Map<String, TaskAttemptBinding> recoverySources = new ConcurrentHashMap<>();
+    private String expectedResumePlanId;
+    private String continuationInput;
+    private String originalContinuationInput;
+    private RecoveryRequestContext recoveryRequestContext;
+    private RecoveryContextSupplier recoveryContextSupplier;
+    @FunctionalInterface public interface RecoveryContextSupplier { RecoveryRequestContext get() throws Exception; }
+    public void setTaskTranscriptReader(TaskTranscriptReader reader) { taskTranscriptReader=reader; }
+    public void setRecoveryContextSupplier(RecoveryContextSupplier supplier) { recoveryContextSupplier=supplier; }
+
+    public AgentExecutionResult runContinuation(ContinuationInvocation invocation) {
+        try {
+            continuationInput=invocation.currentInput();
+            originalContinuationInput=invocation.execution().submittedInput();
+            recoveryRequestContext=invocation.recoveryContext();
+            var lineage=planStateStore.findByExecution(planWorkspace(),currentSessionId(),invocation.execution().id());
+            var active=lineage.stream().filter(PlanStateStore.StoredPlanInfo::active).findFirst();
+            if(active.isEmpty())return runOrResumeExecution(invocation.execution().resolvedTaskInput()==null
+                    ?invocation.execution().submittedInput():invocation.execution().resolvedTaskInput(),invocation.currentInput());
+            return resumeBoundPlanExecution(active.get().planId(),invocation.execution().id(),invocation.currentInput(),invocation.recoveryContext());
+        } catch(SQLException e) { throw new TaskRecoveryPreparationException(); }
+    }
+
+    public AgentExecutionResult resumeBoundPlanExecution(String planId,String executionId,String currentInput,RecoveryRequestContext recovery) {
+        if(!Objects.equals(runtimeExecutionId,executionId))throw new TaskRecoveryPreparationException();
+        expectedResumePlanId=planId; continuationInput=Objects.requireNonNull(currentInput); recoveryRequestContext=recovery;
+        return resumeActivePlanExecution();
+    }
+    private final java.util.concurrent.atomic.AtomicBoolean taskExecutionStarted =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Host injects its already validated claim; legacy callers without it remain metadata-only. */
+    public void setTaskRecoveryIdentity(TaskExecutionIdentity identity) {
+        this.taskRecoveryIdentity=identity;
+        if(identity!=null)this.runtimeExecutionId=identity.executionId();
+    }
+
+    public void setTaskRecoveryStore(TaskRecoveryStore store) { this.taskRecoveryStore=store; }
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private final PlannerConversationContextBuilder plannerConversationContextBuilder =
             new PlannerConversationContextBuilder();
@@ -326,6 +376,11 @@ public class PlanExecuteAgent {
             return Optional.empty();
         }
         try {
+            if(expectedResumePlanId!=null) {
+                var active=planStateStore.findActiveRecord(planWorkspace(),sessionId);
+                if(active.isEmpty()||!expectedResumePlanId.equals(active.get().planId())
+                        ||!Objects.equals(runtimeExecutionId,active.get().executionId()))throw new TaskRecoveryPreparationException();
+            }
             return planStateStore.findActive(planWorkspace(), sessionId);
         } catch (SQLException e) {
             log.warn("Failed to load active plan for session {}", sessionId, e);
@@ -498,6 +553,7 @@ public class PlanExecuteAgent {
     }
 
     public AgentExecutionResult runExecution(String userInput, String submittedUserInput) {
+        taskExecutionStarted.set(false);
         reconcilePlanConversationSafely();
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
         submittedPolicyInput = submittedUserInput == null ? "" : submittedUserInput;
@@ -531,6 +587,8 @@ public class PlanExecuteAgent {
             }
             return new AgentExecutionResult(
                     outcome.outcome(), outcome.displayResult(), outcomeError(outcome));
+        } catch (TaskRecoveryPreparationException preparation) {
+            throw preparation;
         } catch (Exception e) {
             log.error("Plan run failed", e);
             String errorMessage = "❌ 执行失败: " + e.getMessage();
@@ -600,10 +658,28 @@ public class PlanExecuteAgent {
         }
 
         interruptedRecoveryTaskIds.clear();
+        String initialTurn=null;
+        if(recoveryContextSupplier!=null) {
+            initialTurn="plan-turn-"+UUID.randomUUID();
+            String provisionalPlan="planning-"+runtimeExecutionId;
+            PlanConversationReconciler.appendTurnStart(parentConversationContext,initialTurn,provisionalPlan,false,runtimeExecutionId);
+            PlanConversationReconciler.appendTopLevelMessage(parentConversationContext,initialTurn,provisionalPlan,
+                    "user",originalContinuationInput==null?submittedPolicyInput:originalContinuationInput,runtimeExecutionId,
+                    originalContinuationInput==null?ImageReferenceParser.userMessage(goal,planWorkspace()):LlmClient.Message.user(goal));
+            parentConversationContext.synchronizeProviderFromProjection();
+            try { recoveryRequestContext=recoveryContextSupplier.get(); }
+            catch(Exception e) { throw new TaskRecoveryPreparationException(); }
+        }
         Planner.PlannerRequest plannerRequest = preparePlannerRequest(goal);
         String priorConversation = plannerRequest.priorConversationContext();
         ExecutionPlan plan = planner.createPlan(plannerRequest);
-        return reviewAndExecutePlan(plan, streamState, 0, priorConversation, null);
+        var outcome=reviewAndExecutePlan(plan, streamState, 0, priorConversation, initialTurn);
+        if(initialTurn!=null&&!outcome.persistAssistantMessage()) {
+            PlanConversationReconciler.appendTopLevelMessage(parentConversationContext,initialTurn,"planning-"+runtimeExecutionId,
+                    "assistant",outcome.displayResult(),runtimeExecutionId,null);
+            PlanConversationReconciler.appendTurnEnd(parentConversationContext,initialTurn,"planning-"+runtimeExecutionId,"canceled",runtimeExecutionId);
+        }
+        return outcome;
     }
 
     public Optional<ActivePlanInfo> activePlanInfo() {
@@ -620,6 +696,7 @@ public class PlanExecuteAgent {
     }
 
     public AgentExecutionResult resumeActivePlanExecution() {
+        taskExecutionStarted.set(false);
         String sessionId = currentSessionId();
         if (planStateStore == null || sessionId == null || sessionId.isBlank()) {
             return AgentExecutionResult.failed(
@@ -644,7 +721,22 @@ public class PlanExecuteAgent {
         PlanStateStore.ResumeCandidate candidate = candidateOptional.get();
         interruptedRecoveryTaskIds.clear();
         interruptedRecoveryTaskIds.addAll(candidate.interruptedTaskIds());
-        submittedPolicyInput = candidate.policyInput();
+        submittedPolicyInput = continuationInput==null?candidate.policyInput():continuationInput;
+        recoveryTranscripts.clear(); recoverySources.clear();
+        if(continuationInput!=null&&taskRecoveryIdentity!=null) {
+            try {
+                for(var task:candidate.plan().getAllTasks()) {
+                    if(!interruptedRecoveryTaskIds.contains(task.getId()))continue;
+                    var sources=taskRecoveryStore.findTaskAttempts(planWorkspace(),sessionId,runtimeExecutionId,candidate.plan().getId(),task.getId());
+                    if(!sources.isEmpty()) {
+                        var source=sources.get(sources.size()-1);
+                        if(taskTranscriptReader==null)throw new TaskRecoveryPreparationException();
+                        recoveryTranscripts.put(task.getId(),taskTranscriptReader.read(source,-1));
+                        recoverySources.put(task.getId(),source);
+                    }
+                }
+            } catch(Exception e) {throw new TaskRecoveryPreparationException();}
+        }
         memoryManager.setSubmittedUserInput(submittedPolicyInput);
         turnToolPolicy = TurnToolPolicy.forExplicitTask(
                 submittedPolicyInput,
@@ -661,6 +753,7 @@ public class PlanExecuteAgent {
                         "durable plan turn unavailable");
             }
             String priorConversationContext = priorConversationContextBeforeTurn(turnId);
+            if(continuationInput!=null)priorConversationContext += "\n当前继续请求及约束：\n"+continuationInput;
             PlanRunOutcome outcome = executePlan(
                     candidate.plan(), new StreamState(), 0, priorConversationContext, turnId);
             if (outcome.persistAssistantMessage()
@@ -672,6 +765,8 @@ public class PlanExecuteAgent {
             }
             return new AgentExecutionResult(
                     outcome.outcome(), outcome.displayResult(), outcomeError(outcome));
+        } catch (TaskRecoveryPreparationException preparation) {
+            throw preparation;
         } catch (Exception e) {
             log.error("Plan resume failed: {}", candidate.plan().getId(), e);
             return AgentExecutionResult.failed(
@@ -836,7 +931,7 @@ public class PlanExecuteAgent {
 
     private Planner.PlannerRequest preparePlannerRequest(String goal) throws IOException {
         String prior = currentPlannerConversationContext();
-        Planner.PlannerRequest request = new Planner.PlannerRequest(goal, prior);
+        Planner.PlannerRequest request = new Planner.PlannerRequest(goal, prior, formattedRecovery(goal,prior));
         int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
         int estimated = planner.estimateRequestTokens(request);
 
@@ -859,7 +954,7 @@ public class PlanExecuteAgent {
                                 "afterTokens", result.afterTokens(),
                                 "strategy", result.strategy().name().toLowerCase(Locale.ROOT)));
                 prior = currentPlannerConversationContext();
-                request = new Planner.PlannerRequest(goal, prior);
+                request = new Planner.PlannerRequest(goal, prior, formattedRecovery(goal,prior));
                 estimated = planner.estimateRequestTokens(request);
                 out.println("📦 Plan 会话上下文接近窗口上限，已压缩 Parent Session 后继续。");
             }
@@ -868,9 +963,17 @@ public class PlanExecuteAgent {
         if (estimated >= trigger && parentConversationContext != null) {
             prior = plannerConversationContextBuilder.build(
                     recentPlannerConversationNodes(parentConversationContext.conversationNodes()));
-            request = new Planner.PlannerRequest(goal, prior);
+            request = new Planner.PlannerRequest(goal, prior, formattedRecovery(goal,prior));
         }
         return request;
+    }
+
+    private FormattedRecoveryContext formattedRecovery(String goal,String prior) {
+        if(recoveryRequestContext==null)return null;
+        int limit=Math.min(llmClient.maxContextWindow(),memoryManager.getContextProfile().compressionTriggerTokens());
+        long available=Math.max(0,limit-com.codeagent.memory.MemoryEntry.estimateTokens(goal+prior)-2000);
+        return new RecoveryContextFormatter().formatForParent(recoveryRequestContext.snapshot(),
+                new RecoveryContextBudget(available,4096,2000),recoveryRequestContext.boundary().inputExecutionId());
     }
 
     private static List<SessionProjection.ConversationNode> recentPlannerConversationNodes(
@@ -988,6 +1091,21 @@ public class PlanExecuteAgent {
             List<Task> selectedTasks = new ConflictAwareBatchSelector().select(executableTasks, 4);
             List<TaskExecutionResult> batchResults = executeTaskBatch(
                     plan, selectedTasks, streamState, taskTrustedUrls);
+            if (!taskExecutionStarted.get() && batchResults.stream()
+                    .anyMatch(result -> result.error() instanceof TaskRecoveryPreparationException)) {
+                // executeTaskBatch has already drained every worker. Reconcile the entire
+                // preparation-only batch before deferring; throwing on its first result
+                // would strand the other started tasks as RUNNING.
+                for (TaskExecutionResult result : batchResults) {
+                    Task prepared = result.task();
+                    if (prepared.getStatus() == Task.TaskStatus.RUNNING
+                            || prepared.getStatus() == Task.TaskStatus.REVIEWING) {
+                        prepared.markInterrupted("Task recovery preparation unavailable");
+                        checkpointTaskSafely(plan.getId(), prepared);
+                    }
+                }
+                throw new TaskRecoveryPreparationException();
+            }
             for (TaskExecutionResult batchResult : batchResults) {
                 Task task = batchResult.task();
 
@@ -1247,10 +1365,31 @@ public class PlanExecuteAgent {
                 .restrictTo(toResourceScope(task));
         TaskEvidenceCollector evidenceCollector = new TaskEvidenceCollector();
         SessionStore.SessionHandle child = null;
+        TaskRecoveryObserver recoveryObserver=null;
+        TaskAttemptBinding recoveryBinding=null;
         try {
+            if(taskRecoveryIdentity!=null&&parentSession==null)throw new TaskRecoveryPreparationException();
             if (parentSession != null) {
-                child = parentSession.createChild("plan", "task:" + task.getId());
+                try {
+                    child = parentSession.createChild("plan", "task:" + task.getId());
+                } catch (IOException failure) {
+                    if (taskRecoveryIdentity != null) throw new TaskRecoveryPreparationException();
+                    throw failure;
+                }
                 childSession.set(child);
+                if(taskRecoveryIdentity!=null){
+                    if(planStateStore==null||!parentSession.sessionId().equals(taskRecoveryIdentity.parentSessionId())
+                            ||!Objects.equals(runtimeExecutionId,taskRecoveryIdentity.executionId()))
+                        throw new TaskRecoveryPreparationException();
+                    try {
+                        TaskRecoveryStore store=taskRecoveryStore==null?new TaskRecoveryStore(planStateStore.dbPath()):taskRecoveryStore;
+                        TaskAttemptBinding source=recoverySources.get(task.getId());
+                        recoveryBinding=store.bindAttempt(planWorkspace(),parentSession.sessionId(),runtimeExecutionId,
+                                plan.getId(),task.getId(),child.sessionId(),source==null?null:source.attemptId(),taskRecoveryIdentity.ownerId(),taskRecoveryIdentity.runtimeAttempt());
+                        recoveryObserver=new TaskRecoveryObserver(store,child,recoveryBinding);
+                        recoveryObserver.checkpoint("BOUND");
+                    } catch(Exception e){throw new TaskRecoveryPreparationException();}
+                }
             }
             String recoveryFeedback = interruptedRecoveryTaskIds.contains(task.getId())
                     ? "该任务来自进程中断恢复。请先检查当前 workspace / 外部资源状态和已有产物，"
@@ -1258,7 +1397,7 @@ public class PlanExecuteAgent {
                     : null;
             TaskRunResult result = executeTaskWithPolicy(
                     goal, plan, task, streamState, out, dependencyUrls, recoveryFeedback,
-                    taskToolPolicy, evidenceCollector);
+                    taskToolPolicy, evidenceCollector,recoveryBinding,recoveryObserver);
             result = result.withReport(evaluateEvidence(task, evidenceCollector, diffTracker));
             int evidenceRetries = 0;
             while (result.verificationReport().outcome() == VerificationOutcome.REJECTED
@@ -1266,26 +1405,33 @@ public class PlanExecuteAgent {
                 evidenceRetries++;
                 result = executeTaskWithPolicy(goal, plan, task, streamState, out, dependencyUrls,
                         String.join("; ", result.verificationReport().blockingReasons()),
-                        taskToolPolicy, evidenceCollector);
+                        taskToolPolicy, evidenceCollector,recoveryBinding,recoveryObserver);
                 result = result.withReport(evaluateEvidence(task, evidenceCollector, diffTracker));
             }
             if (pipelineOptions.stepReview()) {
                 task.markReviewing();
                 checkpointTaskSafely(plan.getId(), task);
+                checkpointRecovery(recoveryObserver,"REVIEWING");
                 result = applyStepReview(
                         goal, plan, task, streamState, out, dependencyUrls, taskToolPolicy,
-                        evidenceCollector, diffTracker, result);
+                        evidenceCollector, diffTracker, result,recoveryBinding,recoveryObserver);
             }
             if (child != null) {
                 parentSession.recordChildResult(child, result.result(), "completed");
                 child.markClosed("completed");
             }
+            checkpointRecovery(recoveryObserver,"TASK_RESULT");
             return result;
         } finally {
             childSession.remove();
             if (child != null) child.close();
             taskToolPolicy.releaseBrowserLease();
         }
+    }
+
+    private void checkpointRecovery(TaskRecoveryObserver observer,String phase)throws IOException {
+        if(observer==null)return;
+        try { observer.checkpoint(phase); } catch(Exception failure) {throw new IOException("Task recovery checkpoint unavailable");}
     }
 
     private TaskWorkspaceDiffTracker startDiffTracker(String planId, Task task) throws IOException {
@@ -1358,7 +1504,8 @@ public class PlanExecuteAgent {
                                           TurnToolPolicy taskToolPolicy,
                                           TaskEvidenceCollector evidenceCollector,
                                           TaskWorkspaceDiffTracker diffTracker,
-                                          TaskRunResult initial) throws IOException {
+                                          TaskRunResult initial,TaskAttemptBinding recoveryBinding,
+                                          TaskRecoveryObserver recoveryObserver) throws IOException {
         // 每个任务独占一个 Reviewer：并行批次最多 4 个任务同时进来，
         // 共享实例会让多条线程写同一份 SubAgent 会话历史。
         StepReviewer reviewer = new SubAgentStepReviewer(
@@ -1404,7 +1551,7 @@ public class PlanExecuteAgent {
             out.println("⚠️ 任务 [" + task.getId() + "] 审查未通过，重新执行...");
             out.println("   反馈: " + decision.feedback() + "\n");
             result = executeTaskWithPolicy(goal, plan, task, streamState, out, dependencyUrls,
-                    decision.feedback(), taskToolPolicy, evidenceCollector);
+                    decision.feedback(), taskToolPolicy, evidenceCollector,recoveryBinding,recoveryObserver);
             result = result.withReport(evaluateEvidence(task, evidenceCollector, diffTracker));
         }
     }
@@ -1414,7 +1561,8 @@ public class PlanExecuteAgent {
             List<TurnToolPolicy.TrustedUrlContext> dependencyUrls,
             String retryFeedback,
             TurnToolPolicy taskToolPolicy,
-            TaskEvidenceCollector evidenceCollector) throws IOException {
+            TaskEvidenceCollector evidenceCollector,TaskAttemptBinding recoveryBinding,
+            TaskRecoveryObserver recoveryObserver) throws IOException {
         String prompt = promptAssembler.assemble(PromptMode.PLAN, PromptContext.builder()
                 .projectMemoryContext(buildProjectMemoryContext())
                 .variable("taskType", task.getType())
@@ -1437,13 +1585,13 @@ public class PlanExecuteAgent {
         String actor = "task:" + task.getId();
         List<LlmClient.Message> messages = new ArrayList<>();
         appendTaskMessage(messages, actor, "system_prompt", LlmClient.Message.system(prompt));
+        var currentTaskInput=currentTaskInput(taskInput);
+        restoreTaskContext(messages,task,currentTaskInput,recoveryBinding);
         appendTaskMessage(
                 messages,
                 actor,
                 "task_input",
-                ImageReferenceParser.userMessage(
-                        taskInput,
-                        Path.of(toolRegistry.getProjectPath())));
+                currentTaskInput);
 
         StringBuilder allResults = new StringBuilder();
         TaskStreamRenderer streamRenderer = new TaskStreamRenderer(task.getId(), streamState, out);
@@ -1496,6 +1644,7 @@ public class PlanExecuteAgent {
                         llmClient, messages, toolExposure.definitions(), historyVersion);
                 prediction = contextTokenTracker.predict(requestSnapshot);
             }
+            taskExecutionStarted.set(true);
             LlmClient.ChatResponse response = llmClient.chat(
                     messages,
                     toolExposure.definitions(),
@@ -1563,7 +1712,7 @@ public class PlanExecuteAgent {
             streamRenderer.resetBetweenIterations();
 
             List<ToolExecutionResult> toolResults = executeToolCalls(
-                    task.getId(), response.toolCalls(), taskToolPolicy, toolExposure, evidenceCollector);
+                    task.getId(), response.toolCalls(), taskToolPolicy, toolExposure, evidenceCollector,recoveryBinding,recoveryObserver);
             for (ToolExecutionResult toolResult : toolResults) {
                 allResults.append(toolResult.result()).append("\n");
                 appendTaskMessage(
@@ -1573,6 +1722,7 @@ public class PlanExecuteAgent {
                         LlmClient.Message.tool(toolResult.id(), toolResult.result()));
             }
             appendImageToolMessages(messages, toolResults, actor);
+            checkpointRecovery(recoveryObserver,"TOOL_BATCH");
         }
     }
 
@@ -1684,24 +1834,23 @@ public class PlanExecuteAgent {
                                                        List<LlmClient.ToolCall> toolCalls,
                                                        TurnToolPolicy taskToolPolicy,
                                                        TurnToolPolicy.ToolExposure toolExposure,
-                                                       TaskEvidenceCollector evidenceCollector) {
+                                                       TaskEvidenceCollector evidenceCollector,TaskAttemptBinding recoveryBinding,
+                                                       TaskRecoveryObserver recoveryObserver) {
         List<ToolInvocation> invocations = new ArrayList<>();
         for (LlmClient.ToolCall toolCall : toolCalls) {
             String toolName = toolCall.function().name();
             String toolArgs = toolCall.function().arguments();
             log.info("Task {} scheduling tool {}", taskId, toolName);
-            log.debug("Task {} tool args [{}]: {}", taskId, toolName, toolArgs);
             invocations.add(new ToolInvocation(toolCall.id(), toolName, toolArgs));
         }
 
         if (invocations.size() > 1) {
             log.info("Task {} executing {} tool calls in parallel", taskId, invocations.size());
         }
-        List<ToolExecutionResult> results = taskToolPolicy.execute(toolRegistry, invocations, toolExposure);
+        List<ToolExecutionResult> results = taskToolPolicy.execute(toolRegistry, invocations, toolExposure,
+                recoveryBinding==null?null:new TaskObservationContext(recoveryBinding,"batch_"+UUID.randomUUID(),0),
+                recoveryObserver);
         evidenceCollector.observeTools(invocations, results, Path.of(toolRegistry.getProjectPath()));
-        for (ToolExecutionResult result : results) {
-            log.debug("Task {} tool result preview [{}]: {}", taskId, result.name(), preview(result.result(), 300));
-        }
         return results;
     }
 
@@ -1975,7 +2124,61 @@ public class PlanExecuteAgent {
         List<String> trustedUrls = dependencyUrls.stream()
                 .flatMap(contextItem -> contextItem.urls().stream())
                 .toList();
-        return new StepBriefing(goal, task, completedDependencies, trustedUrls, retryFeedback);
+        return new StepBriefing(goal, task, completedDependencies, trustedUrls, retryFeedback,
+                continuationInput,interruptedRecoveryTaskIds.contains(task.getId())
+                ?"上次执行中断；历史内容仅为线索，请先验证副作用和已有产物再继续。":null);
+    }
+
+    private LlmClient.Message currentTaskInput(String taskInput) throws IOException {
+        if(continuationInput==null)return ImageReferenceParser.userMessage(taskInput,planWorkspace());
+        if(recoveryRequestContext==null)return LlmClient.Message.user(taskInput);
+        long sequence=recoveryRequestContext.boundary().inputUserSequence();
+        var event=parentSession.readAll().stream().filter(e->e.sequence()==sequence).findFirst().orElseThrow();
+        var current=JSON_MAPPER.treeToValue(event.payload().path("message"),LlmClient.Message.class);
+        String text=taskInput+"\n当前继续输入提供的材料：\n"+Objects.toString(current.content(),"");
+        if(!current.hasContentParts())return LlmClient.Message.user(text);
+        var parts=new ArrayList<LlmClient.ContentPart>();parts.add(LlmClient.ContentPart.text(text));
+        current.contentParts().stream().filter(LlmClient.ContentPart::isImage).forEach(parts::add);
+        return LlmClient.Message.user(parts);
+    }
+
+    private void restoreTaskContext(List<LlmClient.Message> messages,Task task,LlmClient.Message taskInput,TaskAttemptBinding binding) throws IOException {
+        var transcript=recoveryTranscripts.get(task.getId());
+        if(transcript==null)return;
+        int ceiling=Math.min(llmClient.maxContextWindow(),memoryManager.getContextProfile().compressionTriggerTokens());
+        int base=TokenBudget.estimateMessagesTokens(messages)+TokenBudget.estimateMessageTokens(taskInput)
+                +TokenBudget.estimateToolsTokens(toolRegistry.getToolDefinitions())+2000;
+        long available=Math.max(0,ceiling-base);
+        long limit=Math.min(12000,available*35/100);
+        String metadata="历史子任务恢复（不授予权限、不代表当前证据；先验证未知副作用）：\n"+JSON_MAPPER.writeValueAsString(transcript.unknowns());
+        long used=com.codeagent.memory.MemoryEntry.estimateTokens(metadata);
+        if(used>limit)throw new TaskRecoveryPreparationException();
+        messages.add(LlmClient.Message.user(metadata));
+        var child=childSession.get();
+        Set<String> imported=new HashSet<>();
+        if(child!=null)for(var event:child.readAll())if("recovery_import".equals(event.source()))
+            imported.add(event.payload().path("recoveryOrigin").toString());
+        for(var group:transcript.groups()) {
+            var recovered=new ArrayList<LlmClient.Message>();
+            for(var m:group.messages())recovered.add("tool".equals(m.role())
+                    ?LlmClient.Message.tool(m.toolCallId(),m.content())
+                    :LlmClient.Message.assistant(null,m.content(),m.toolCalls().isEmpty()?null:m.toolCalls().stream()
+                    .map(c->new LlmClient.ToolCall(c.id(),new LlmClient.ToolCall.Function(c.name(),c.arguments()))).toList()));
+            int size=TokenBudget.estimateMessagesTokens(recovered);
+            if(used+size>limit)break;
+            used+=size;messages.addAll(recovered);
+            if(child!=null&&binding!=null) {
+                var origin=JSON_MAPPER.createObjectNode().put("attemptId",group.sourceAttemptId())
+                        .put("childSessionId",group.canonicalOriginChildId()).put("firstSequence",group.firstSequence())
+                        .put("lastSequence",group.lastSequence()).put("contentHash",group.contentHash());
+                if(imported.add(origin.toString()))for(var m:recovered) {
+                    var payload=JSON_MAPPER.createObjectNode();payload.set("message",JSON_MAPPER.valueToTree(m));payload.set("recoveryOrigin",origin);
+                    if("tool".equals(m.role()))payload.put("invocationId",m.toolCallId());
+                    child.append(new SessionEventDraft("tool".equals(m.role())?SessionEvent.Types.TOOL_RESULT:SessionEvent.Types.ASSISTANT_MESSAGE,
+                            "plan",child.manifest().actor(),"recovery_import",false,SessionEvent.SurfaceOperation.append(),payload));
+                }
+            }
+        }
     }
 
     private String buildFinalResult(ExecutionPlan plan, Map<String, Boolean> streamedTaskOutputs) {

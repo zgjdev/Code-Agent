@@ -15,7 +15,13 @@ public record StepBriefing(
         Task task,
         List<Task> completedDependencies,
         List<String> trustedDependencyUrls,
-        String retryFeedback) {
+        String retryFeedback,
+        String currentConstraints,
+        String recoveryContext) {
+
+    public StepBriefing(String goal,Task task,List<Task> dependencies,List<String> urls,String retryFeedback) {
+        this(goal,task,dependencies,urls,retryFeedback,null,null);
+    }
 
     public String render() {
         StringBuilder briefing = new StringBuilder();
@@ -24,6 +30,8 @@ public record StepBriefing(
                 .append(" / ").append(task.getDescription())
                 .append(" / 类型=").append(task.getType())
                 .append("\n");
+        if(currentConstraints!=null&&!currentConstraints.isBlank())briefing.append("当前用户约束：\n").append(currentConstraints).append("\n");
+        if(recoveryContext!=null&&!recoveryContext.isBlank())briefing.append("恢复说明：\n").append(recoveryContext).append("\n");
 
         briefing.append("依赖任务结果：\n");
         if (completedDependencies.isEmpty()) {

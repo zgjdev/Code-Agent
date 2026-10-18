@@ -90,6 +90,7 @@ final class CodeAgentCompleter implements Completer {
     }
 
     private boolean completeResume(String input, List<Candidate> candidates) {
+        if (input.equalsIgnoreCase("/resume")) return false;
         if (!input.regionMatches(true, 0, "/resume", 0, Math.min(7, input.length()))) {
             return false;
         }
@@ -98,6 +99,10 @@ final class CodeAgentCompleter implements Completer {
             return false;
         }
         String prefix = input.length() <= 8 ? "" : input.substring(8).trim();
+        if ("last".startsWith(prefix.toLowerCase(java.util.Locale.ROOT))) {
+            candidates.add(new Candidate("last", "last", "Sessions",
+                    "最近可安全恢复的会话", null, null, true));
+        }
         for (String sessionId : sessionSupplier.get()) {
             if (sessionId != null && sessionId.startsWith(prefix)) {
                 candidates.add(new Candidate(sessionId, sessionId, "Sessions",

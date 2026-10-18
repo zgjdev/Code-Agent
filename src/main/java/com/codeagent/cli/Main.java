@@ -32,7 +32,9 @@ import com.codeagent.hitl.TerminalHitlHandler;
 import com.codeagent.history.ConversationLedger;
 import com.codeagent.history.SessionProjection;
 import com.codeagent.history.SessionStore;
-import com.codeagent.history.SessionSummary;
+import com.codeagent.history.SessionResumeService;
+import com.codeagent.runtime.execution.RecoveryPolicy;
+import com.codeagent.runtime.execution.WorkspaceRuntimeFactory;
 import com.codeagent.harness.BetterHarnessOptions;
 import com.codeagent.harness.BetterHarnessRunner;
 import com.codeagent.llm.LlmClient;
@@ -185,7 +187,7 @@ public class Main {
         OTHER
     }
 
-    private record PromptInput(String text, boolean canceled) {
+    record PromptInput(String text, boolean canceled) {
         static PromptInput submitted(String text) {
             return new PromptInput(text, false);
         }
@@ -425,27 +427,23 @@ public class Main {
             AtomicReference<SessionStore.SessionHandle> activeSession = new AtomicReference<>();
             try {
                 openedSessionStore = SessionStore.open(CodeAgentPaths.resolve("history"));
-                SessionStore.SessionHandle initialSession;
-                var latest = isAutomaticSessionResumeEnabled(
-                        System.getProperty("codeagent.session.resume"),
-                        ConfigurationValues.get(null, "CODEAGENT_SESSION_RESUME", null))
-                        ? openedSessionStore.latestUnclosed(workspace)
-                        : Optional.<SessionSummary>empty();
-                if (latest.isPresent()) {
-                    initialSession = openedSessionStore.resumeWritable(latest.get().sessionId(), workspace);
-                    startupNote = appendStartupNote(startupNote,
-                            "已恢复会话 " + initialSession.sessionId());
+                // Inline/plain start without a Session. Lanterna retains its explicit phase-1 path.
+                if (com.codeagent.tui.TuiBootstrap.shouldUseTui(terminal)) {
+                    SessionStore.SessionHandle initialSession = openStartupSession(openedSessionStore,
+                            new SessionStore.SessionCreateRequest(workspace, llmClient.getProviderName(),
+                                    llmClient.getModelName(), null, "react", "agent"), true);
+                    reactAgent.attachSession(initialSession);
+                    activeSession.set(initialSession);
                 } else {
-                    initialSession = openedSessionStore.create(new SessionStore.SessionCreateRequest(
-                            workspace, llmClient.getProviderName(), llmClient.getModelName(),
-                            null, "react", "agent"));
+                    activeSession.set(openStartupSession(openedSessionStore,
+                            new SessionStore.SessionCreateRequest(workspace, llmClient.getProviderName(),
+                                    llmClient.getModelName(), null, "react", "agent"), false));
+                    startupNote = appendStartupNote(startupNote, "会话空闲；/resume 选择历史会话，首条任务输入创建新会话。");
+                    startupNote = appendStartupNote(startupNote, automaticResumeDeprecationNotice(
+                            System.getProperty("codeagent.session.resume"),
+                            ConfigurationValues.get(null, "CODEAGENT_SESSION_RESUME", null)));
                 }
-                reactAgent.attachSession(initialSession);
-                activeSession.set(initialSession);
                 sessionIdCandidates.set(sessionIds(openedSessionStore, workspace));
-                startupNote = appendStartupNote(
-                        startupNote,
-                        activePlanNotice(workspace, initialSession));
             } catch (Exception e) {
                 startupNote = appendStartupNote(startupNote,
                         "可恢复会话初始化失败，当前仅使用内存上下文: " + e.getMessage());
@@ -530,59 +528,21 @@ public class Main {
             }
             AtomicReference<Agent> activeAgent = new AtomicReference<>(reactAgent);
             ReentrantLock sharedRuntimeLock = new ReentrantLock();
-            Function<Agent, TopLevelExecutionCoordinator> coordinatorFor = executionAgent ->
-                    new TopLevelExecutionCoordinator(
-                            executionStore,
-                            execution -> localPathMentionExpander.expand(
-                                    mentionExpander.expand(execution.submittedInput())),
-                            (submittedInput, history) -> {
-                                LlmClient client = llmClientRef.get();
-                                ExecutionModeRouter router = new ExecutionModeRouter(
-                                        client, modeRouterPromptBuilder);
-                                return selectExecutionMode(null, router, submittedInput, history);
-                            },
-                            sessionId -> {
-                                SessionStore.SessionHandle bound = executionAgent.getSessionHandle();
-                                if (bound == null || !bound.sessionId().equals(sessionId)) {
-                                    throw new IllegalStateException(
-                                            "Execution 与 Session 上下文不匹配: " + sessionId);
-                                }
-                                return executionAgent.getParentConversationContext().conversationNodes();
-                            },
-                            (mode, submittedInput, action) -> executionAgent.getToolRegistry()
-                                    .getSnapshotService()
-                                    .runTurnAndDrain(mode.name().toLowerCase(Locale.ROOT),
-                                            submittedInput, action::run),
-                            (execution, resolvedInput, token) -> topLevelResult(
-                                    executionAgent.runExecution(
-                                            resolvedInput, execution.submittedInput())),
-                            (execution, resolvedInput, token) -> {
-                                PlanExecuteAgent planAgent = createPlanAgent(
-                                        llmClientRef.get(),
-                                        executionAgent,
-                                        new BrokerPlanReviewHandler(
-                                                interactionBroker, uiEvents::interaction),
-                                        ui);
-                                planAgent.setRuntimeExecutionId(execution.id());
-                                planAgent.setExternalContextSupplier(
-                                        mcpServerManager::resourceIndexForPrompt);
-                                planAgent.setSkillRegistry(skillRegistry);
-                                planAgent.setSkillContextBuffer(
-                                        executionAgent.getToolRegistry().getSkillContextBuffer());
-                                return topLevelResult(planAgent.runOrResumeExecution(
-                                        resolvedInput, execution.submittedInput()));
-                            });
+            com.codeagent.plan.TaskRecoveryStore taskRecoveryStore;
+            try { taskRecoveryStore = new com.codeagent.plan.TaskRecoveryStore(executionPlanStore.dbPath()); }
+            catch (java.sql.SQLException failure) { throw new IllegalStateException("任务恢复索引初始化失败",failure); }
             RuntimeExecutionHost executionHost = new RuntimeExecutionHost(
                     executionStore, new RuntimeExecutionOptions(1), ExecutionEventSink.discarding());
             executionHostRef.set(executionHost);
             WorkspaceIdentity registeredWorkspace;
             try {
-                registeredWorkspace = executionHost.registerWorkspace(workspace, (identity, sink) -> {
+                registeredWorkspace = registerIdleWorkspace(executionHost, workspace, (identity, sink) -> {
                     Set<String> sharedResources = new java.util.HashSet<>(DefaultWorkspaceRuntimeFactory.sharedGitResources(workspace));
                     sharedResources.add("mcp:global-unknown"); sharedResources.add("browser:global-default");
+                    AtomicReference<WorkspaceRuntime> workerRuntime = new AtomicReference<>();
                     WorkspaceRuntime runtime = new WorkspaceRuntime(identity, sessionContexts, interactionBroker,
                             sharedRuntimeLock, sharedResources,
-                            () -> legacyPlanClaimAllowed(executionPlanStore, workspace, activeSession.get()),
+                            () -> true,
                             new WorkspaceRuntime.SessionController() {
                                 public String create() { throw new UnsupportedOperationException("CLI owns Session creation"); }
                                 public void attach(String id) throws Exception {
@@ -597,7 +557,28 @@ public class Main {
                                     executionAgent, mcpServerManager, skillRegistry, "running"));
                             TopLevelExecutionResult proposed;
                             try {
-                                proposed = coordinatorFor.apply(executionAgent).run(execution, token);
+                                var dispatcher = new com.codeagent.runtime.execution.ContinuationExecutionDispatcher(
+                                        executionStore, executionPlanStore, sessionStore, taskRecoveryStore,
+                                        llmClientRef.get(), PromptRepository.createDefault(),
+                                        value -> localPathMentionExpander.expand(mentionExpander.expand(value.submittedInput())),
+                                        () -> {
+                                            PlanExecuteAgent planAgent = createPlanAgent(llmClientRef.get(), executionAgent,
+                                                    new BrokerPlanReviewHandler(interactionBroker, uiEvents::interaction), ui);
+                                            planAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
+                                            planAgent.setSkillRegistry(skillRegistry);
+                                            planAgent.setSkillContextBuffer(executionAgent.getToolRegistry().getSkillContextBuffer());
+                                            return planAgent;
+                                        });
+                                proposed = dispatcher.run(workerRuntime.get(), execution, token, context);
+                            } catch (com.codeagent.runtime.execution.RecoveryPreparationDeferredException deferred) {
+                                executionAgent.getToolRegistry().getSnapshotService().drain();
+                                uiEvents.message("⚠️ 恢复准备未完成，原任务仍在等待：" + deferred.getMessage());
+                                throw deferred;
+                            } catch (com.codeagent.agent.TaskRecoveryPreparationException
+                                     | com.codeagent.model.recovery.RecoveryContextBudgetExceededException preparation) {
+                                executionAgent.getToolRegistry().getSnapshotService().drain();
+                                throw new com.codeagent.runtime.execution.RecoveryPreparationDeferredException(
+                                        "恢复上下文准备失败，原任务保留等待状态", preparation);
                             } catch (InterruptedException interrupted) {
                                 throw interrupted;
                             } catch (CancellationException canceled) {
@@ -622,7 +603,7 @@ public class Main {
                                 executionStore.commitRoutingDecision(
                                         execution.claim(), fallbackMode, fallbackSource);
                             }
-                            RuntimeExecution completedExecution = executionFinalizer.finish(
+                            RuntimeExecution completedExecution = routed.terminal() ? routed : executionFinalizer.finish(
                                     execution.claim(), proposed, session);
                             interactionBroker.cancelExecution(
                                     execution.id(), "Execution 已结束");
@@ -634,6 +615,7 @@ public class Main {
                         if (automaticIndex != null) automaticIndex.close();
                         hitlToolRegistry.closeWorkspaceResources(); mcpServerManager.close();
                     });
+                    workerRuntime.set(runtime);
                     runtime.setAfterExecution(() -> {
                         SessionStore.SessionHandle selected = activeSession.get();
                         if (selected != null) {
@@ -654,6 +636,8 @@ public class Main {
                 });
                 if (activeSession.get() != null) executionHost.attachSession(
                         registeredWorkspace.key(), activeSession.get().sessionId());
+                // Reconciliation may load old contexts; it never selects the UI Session.
+                activeAgent.get().activateSharedToolContext();
                 executionHost.start();
             } catch (Exception failure) {
                 try { executionHost.close(); } catch (Exception closeFailure) { failure.addSuppressed(closeFailure); }
@@ -662,6 +646,28 @@ public class Main {
             }
             WorkspaceAwareExecutionScheduler executionScheduler = executionHost.scheduler();
             RuntimeExecutionQueue executionQueue = new RuntimeExecutionQueue(executionStore, executionHost, registeredWorkspace);
+            SessionResumeService resumeDirectory = sessionStore == null ? null : new SessionResumeService(sessionStore,
+                    (id, scope) -> {
+                        try {
+                            int waiting = (int) executionStore.listRecoveryState(scope, id).stream()
+                                    .filter(RuntimeExecution::awaitingInput).count();
+                            boolean plan = executionPlanStore.findActiveInfo(scope, id).isPresent();
+                            return new SessionResumeService.RecoverySummary(waiting, plan);
+                        } catch (Exception failure) { throw new IOException("恢复摘要不可用", failure); }
+                    });
+            SessionResumeController sessionController = sessionStore == null ? null : new SessionResumeController(
+                    sessionStore, workspace, resumeDirectory, sessionContexts, sharedRuntimeLock, activeSession, activeAgent,
+                    executionStore::hasActiveOrReadyExecution,
+                    id -> interactionBroker.pending().map(request -> id.equals(request.sessionId())).orElse(false),
+                    id -> executionHost.attachSession(registeredWorkspace.key(), id),
+                    () -> new SessionStore.SessionCreateRequest(workspace,
+                            llmClientRef.get().getProviderName(), llmClientRef.get().getModelName(), null, "react", "agent"));
+            TerminalSessionResumeUi resumeUi = sessionController == null ? null
+                    : new TerminalSessionResumeUi(sessionController, uiEvents::message);
+            if (sessionController != null) {
+                try { uiEvents.message(sessionController.startupSummary()); }
+                catch (IOException failure) { uiEvents.message("历史会话摘要暂不可用；启动保持空闲。"); }
+            }
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 closeExecutionHostQuietly(executionHost);
                 interactionBroker.close();
@@ -684,10 +690,12 @@ public class Main {
             while (true) {
                 refreshTerminalColumns(terminal);
                 PromptInput promptInput;
-                try {
+                try (SessionBrowsingInput browsingInput = resumeUi != null && resumeUi.pending()
+                        ? sessionBrowsingInput(lineReader) : null) {
                     promptInput = readPromptInput(terminal, lineReader, renderer,
-                            nextTaskOverride != null, spaciousPrompt);
+                            nextTaskOverride, spaciousPrompt);
                 } catch (UserInterruptException e) {
+                    if (resumeUi != null && resumeUi.pending()) resumeUi.cancel();
                     continue;  // Ctrl+C 跳过
                 } catch (EndOfFileException e) {
                     break;  // Ctrl+D 退出
@@ -697,6 +705,7 @@ public class Main {
                 }
 
                 if (promptInput.canceled()) {
+                    if (resumeUi != null && resumeUi.pending()) { resumeUi.cancel(); continue; }
                     if (nextTaskOverride != null) {
                         nextTaskOverride = null;
                         ui.println("↩️ 已取消待执行的模式覆盖，恢复自动路由。\n");
@@ -711,7 +720,10 @@ public class Main {
                 CliCommandParser.ParsedCommand command = CliCommandParser.parse(input);
                 if (command.type() == CliCommandParser.CommandType.NONE) {
                     InteractionInputRouter.Result interactionResult =
-                            InteractionInputRouter.route(interactionBroker, input);
+                            routePendingInput(interactionBroker,
+                                    () -> resumeUi != null && resumeUi.pending(),
+                                    () -> { if (resumeUi != null) resumeUi.cancel(); },
+                                    text -> { if (resumeUi != null) resumeUi.accept(text); }, input);
                     if (interactionResult == InteractionInputRouter.Result.CONSUMED) {
                         continue;
                     }
@@ -719,6 +731,10 @@ public class Main {
                         uiEvents.message("❌ 当前输入不是有效的交互选项，请按提示重新输入");
                         continue;
                     }
+                }
+                if (resumeUi != null && resumeUi.pending()) {
+                    resumeUi.accept(input);
+                    continue;
                 }
                 if (input.isEmpty()) {
                     continue;
@@ -733,22 +749,11 @@ public class Main {
                 boolean sessionBusy = false;
                 if (currentSession != null) {
                     try {
-                        sessionBusy = executionQueue.hasNonTerminal(currentSession.sessionId());
+                        sessionBusy = executionQueue.hasActiveOrReadyExecution(currentSession.sessionId());
                     } catch (Exception e) {
                         uiEvents.message("❌ 无法读取执行状态: " + e.getMessage());
                         continue;
                     }
-                }
-                boolean legacyPlanActive = currentSession != null
-                        && hasLegacyActivePlan(
-                                executionPlanStore, workspace, currentSession.sessionId());
-                if (legacyPlanActive
-                        && command.type() != CliCommandParser.CommandType.PLAN_RESUME
-                        && command.type() != CliCommandParser.CommandType.PLAN_ABANDON
-                        && command.type() != CliCommandParser.CommandType.EXIT
-                        && command.type() != CliCommandParser.CommandType.SESSIONS) {
-                    uiEvents.message("⏸️ 当前 Session 存在未绑定 Execution 的旧版活动 Plan；请使用 /plan resume 或 /plan abandon");
-                    continue;
                 }
                 if (sessionBusy && !ExecutionControlPolicy.allowedWhileBusy(command.type())) {
                     uiEvents.message("⏳ 当前 Session 仍有排队或运行中的 Execution，暂不能执行该命令");
@@ -844,102 +849,25 @@ public class Main {
                         continue;
                     }
                     case SESSIONS -> {
-                        if (sessionStore == null) {
-                            ui.println("❌ 可恢复会话存储不可用\n");
-                            continue;
-                        }
-                        List<SessionSummary> sessions = sessionStore.list(workspace, 20);
-                        if (sessions.isEmpty()) {
-                            ui.println("📭 当前项目没有持久化会话\n");
-                        } else {
-                            ui.println("持久化会话：");
-                            for (SessionSummary summary : sessions) {
-                                String current = activeSession.get() != null
-                                        && activeSession.get().sessionId().equals(summary.sessionId()) ? " *" : "";
-                                ui.printf("- %s%s · %s · seq %,d%n", summary.sessionId(), current,
-                                        summary.closed() ? "closed" : "open", summary.lastEventSequence());
-                            }
-                            ui.println();
-                        }
+                        if (resumeUi == null) uiEvents.message("可恢复会话存储不可用");
+                        else resumeUi.list();
                         continue;
                     }
                     case RESUME_SESSION -> {
-                        if (sessionStore == null || command.payload() == null || command.payload().isBlank()) {
-                            ui.println("❌ 用法: /resume <session-id>\n");
-                            continue;
-                        }
-                        try {
-                            String targetSessionId = "last".equalsIgnoreCase(command.payload())
-                                    ? sessionStore.latest(workspace)
-                                            .orElseThrow(() -> new IOException("当前项目没有持久化会话"))
-                                            .sessionId()
-                                    : command.payload();
-                            if (hasNonTerminalQuietly(executionStore, targetSessionId)) {
-                                throw new IllegalStateException("目标会话仍有排队或运行中的任务");
-                            }
-                            String previousSessionId = activeSession.get() == null
-                                    ? null : activeSession.get().sessionId();
-                            try (SessionExecutionContextRegistry.Lease<SessionExecutionContext> lease =
-                                         sessionContexts.acquire(targetSessionId)) {
-                                SessionExecutionContext context = lease.context();
-                                context.activateSharedBindings();
-                                activeAgent.set(context.agent());
-                                activeSession.set(context.session());
-                            }
-                            if (previousSessionId != null
-                                    && !previousSessionId.equals(targetSessionId)) {
-                                evictSessionContextQuietly(
-                                        sessionContexts, previousSessionId, targetSessionId);
-                            }
-                            sessionIdCandidates.set(sessionIds(sessionStore, workspace));
-                            ui.println("✅ 已恢复会话 " + targetSessionId);
-                            String planNotice = activePlanNotice(workspace, activeSession.get());
-                            if (!planNotice.isBlank()) {
-                                ui.println(planNotice);
-                            }
-                            ui.println();
-                        } catch (Exception e) {
-                            ui.println("❌ 恢复会话失败，当前会话保持不变: " + e.getMessage() + "\n");
-                        }
+                        if (resumeUi == null) uiEvents.message("可恢复会话存储不可用");
+                        else resumeUi.open(command.payload());
+                        sessionIdCandidates.set(sessionIds(sessionStore, workspace));
+                        renderer.updateStatus(statusInfo(activeAgent.get(), mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
                     case NEW_SESSION -> {
-                        if (sessionStore == null) {
-                            ui.println("❌ 可恢复会话存储不可用\n");
-                            continue;
-                        }
-                        String createdSessionId = null;
-                        try {
-                            SessionStore.SessionHandle created = sessionStore.create(
-                                    new SessionStore.SessionCreateRequest(
-                                    workspace, llmClient.getProviderName(), llmClient.getModelName(),
-                                    null, "react", "agent"));
-                            String targetSessionId = created.sessionId();
-                            createdSessionId = targetSessionId;
-                            closeSessionQuietly(created);
-                            SessionStore.SessionHandle previous = activeSession.get();
-                            String previousSessionId = previous == null ? null : previous.sessionId();
-                            try (SessionExecutionContextRegistry.Lease<SessionExecutionContext> lease =
-                                         sessionContexts.acquire(targetSessionId)) {
-                                SessionExecutionContext context = lease.context();
-                                context.activateSharedBindings();
-                                activeAgent.set(context.agent());
-                                activeSession.set(context.session());
-                            }
-                            if (previous != null) {
-                                markSessionClosedQuietly(previous, "new-session");
-                            }
-                            if (previousSessionId != null) {
-                                evictSessionContextQuietly(
-                                        sessionContexts, previousSessionId, targetSessionId);
-                            }
+                        if (sessionController == null) uiEvents.message("可恢复会话存储不可用");
+                        else try {
+                            var created = sessionController.newSession();
+                            uiEvents.message("已创建新会话 " + created.sessionId());
                             sessionIdCandidates.set(sessionIds(sessionStore, workspace));
-                            ui.println("✅ 已创建新会话 " + targetSessionId + "\n");
-                        } catch (Exception e) {
-                            closeAbandonedSessionQuietly(
-                                    sessionStore, workspace, createdSessionId, "new-session-failed");
-                            ui.println("❌ 创建新会话失败，当前会话保持不变: " + e.getMessage() + "\n");
-                        }
+                            renderer.updateStatus(statusInfo(activeAgent.get(), mcpServerManager, skillRegistry, "idle"));
+                        } catch (Exception failure) { uiEvents.message("创建新会话失败，当前会话保持不变"); }
                         continue;
                     }
                     case HISTORY_CLEAR -> {
@@ -1050,16 +978,13 @@ public class Main {
                                 continue;
                             }
                             PlanStateStore.StoredPlanInfo plan = active.orElseThrow();
-                            String executionId = plan.executionId() == null
-                                    ? "legacy-plan-" + plan.planId()
-                                    : plan.executionId();
-                            RuntimeExecution adopted = executionQueue.adoptLegacyPlan(
-                                    executionId,
-                                    session.sessionId(),
-                                    plan.policyInput().isBlank() ? plan.goal() : plan.policyInput());
-                            executionPlanStore.bindExecution(plan.planId(), executionId);
+                            if (plan.executionId() == null) {
+                                ui.println("⚠️ 此旧计划没有绑定原 Execution，暂不能安全继续。\n");
+                                continue;
+                            }
+                            RuntimeExecution control = executionQueue.submit(session.sessionId(), "/plan resume", null);
                             executionScheduler.signalWork();
-                            uiEvents.queued(adopted);
+                            uiEvents.queued(control);
                         } catch (Exception e) {
                             ui.println("❌ 恢复计划入队失败: " + e.getMessage() + "\n");
                         }
@@ -1067,14 +992,22 @@ public class Main {
                     }
                     case PLAN_ABANDON -> {
                         nextTaskOverride = null;
-                        PlanExecuteAgent planAgent = createPlanAgent(
-                                llmClient, currentAgent, terminal, lineReader, ui);
-                        String response = planAgent.abandonActivePlan();
-                        executionScheduler.signalWork();
-                        if (response != null && !response.isBlank()) {
-                            ui.println(response);
-                            ui.println();
-                        }
+                        sharedRuntimeLock.lock();
+                        try {
+                            if(currentSession==null){ui.println("ℹ️ 当前没有未完成 Plan。");continue;}
+                            var stored=executionPlanStore.findActiveRecord(workspace,currentSession.sessionId());
+                            String owner=stored.map(PlanStateStore.StoredPlanInfo::executionId).orElse(null);
+                            String response;
+                            try(var lease=sessionContexts.acquire(currentSession.sessionId());
+                                var identity=owner==null?null:com.codeagent.runtime.interaction.ExecutionInteractionContext.install(owner,currentSession.sessionId())) {
+                                PlanExecuteAgent planAgent=createPlanAgent(llmClientRef.get(),lease.context().agent(),terminal,lineReader,ui);
+                                planAgent.setRuntimeExecutionId(owner);
+                                response=planAgent.abandonActivePlan();
+                            }
+                            if(owner!=null&&response.startsWith("✅"))executionQueue.cancel(owner);
+                            if(response!=null&&!response.isBlank())ui.println(response);
+                        } catch(Exception failure) {ui.println("❌ 放弃 Plan 失败: "+failure.getMessage());}
+                        finally {sharedRuntimeLock.unlock();}
                         continue;
                     }
                     case SWITCH_PLAN -> {
@@ -1397,7 +1330,14 @@ public class Main {
                     case SWITCH_REACT -> ExecutionMode.REACT;
                     default -> nextTaskOverride;
                 };
-                SessionStore.SessionHandle session = activeSession.get();
+                SessionStore.SessionHandle session;
+                try {
+                    session = sessionController == null ? null : sessionController.ensureSession();
+                    sessionIdCandidates.set(sessionIds(sessionStore, workspace));
+                } catch (Exception failure) {
+                    uiEvents.message("创建任务会话失败，任务未提交");
+                    continue;
+                }
                 if (session == null) {
                     uiEvents.message("❌ 当前没有可持久化的 Session，无法提交任务");
                     continue;
@@ -1450,15 +1390,35 @@ public class Main {
     private static List<String> sessionIds(SessionStore store, Path workspace) {
         if (store == null) return List.of();
         try {
-            return store.list(workspace, 50).stream().map(SessionSummary::sessionId).toList();
+            return new SessionResumeService(store).list(workspace, 0, 50, "").stream()
+                    .map(entry -> entry.summary().sessionId()).toList();
         } catch (IOException e) {
             return List.of();
         }
     }
 
+    static SessionStore.SessionHandle openStartupSession(SessionStore store,
+            SessionStore.SessionCreateRequest request, boolean lanterna) throws IOException {
+        if (!lanterna) return null;
+        String legacySetting = firstNonBlank(System.getProperty("codeagent.session.resume"),
+                ConfigurationValues.get(null, "CODEAGENT_SESSION_RESUME", null));
+        var latest = legacySetting == null || !"off".equalsIgnoreCase(legacySetting.strip())
+                ? store.latestUnclosed(request.workspace()) : Optional.<com.codeagent.history.SessionSummary>empty();
+        return latest.isPresent() ? store.resumeWritable(latest.get().sessionId(), request.workspace()) : store.create(request);
+    }
+
+    static WorkspaceIdentity registerIdleWorkspace(RuntimeExecutionHost host, Path workspace,
+            WorkspaceRuntimeFactory factory) throws Exception {
+        return host.registerWorkspace(workspace, factory, RecoveryPolicy.WAIT_FOR_USER);
+    }
+
+    static String automaticResumeDeprecationNotice(String property, String environment) {
+        return firstNonBlank(property, environment) == null ? ""
+                : "session.resume / CODEAGENT_SESSION_RESUME 已弃用；启动等待用户输入，请使用 /resume。";
+    }
+
     static boolean isAutomaticSessionResumeEnabled(String propertyValue, String environmentValue) {
-        String configured = firstNonBlank(propertyValue, environmentValue);
-        return configured == null || !"off".equalsIgnoreCase(configured.trim());
+        return false;
     }
 
     static String activePlanNotice(Path workspace, SessionStore.SessionHandle session) {
@@ -1625,6 +1585,20 @@ public class Main {
         planAgent.setConversationLedger(reactAgent.getConversationLedger());
         planAgent.setParentConversationContext(reactAgent.getParentConversationContext());
         return planAgent;
+    }
+
+    static InteractionInputRouter.Result routePendingInput(
+            InteractionBroker broker, java.util.function.BooleanSupplier browsing,
+            Runnable cancelBrowsing, java.util.function.Consumer<String> browse, String input) {
+        if (broker.pending().isPresent()) {
+            if (browsing.getAsBoolean()) cancelBrowsing.run();
+            return InteractionInputRouter.route(broker, input);
+        }
+        if (browsing.getAsBoolean()) {
+            browse.accept(input);
+            return InteractionInputRouter.Result.CONSUMED;
+        }
+        return InteractionInputRouter.Result.NO_PENDING;
     }
 
     static RoutingDecision selectExecutionMode(
@@ -1874,10 +1848,26 @@ public class Main {
         return classifyEscapeSequence(escTail) == EscapeSequenceType.STANDALONE_ESC;
     }
 
-    private static PromptInput readPromptInput(Terminal terminal,
+    interface SessionBrowsingInput extends AutoCloseable { @Override void close(); }
+
+    static SessionBrowsingInput sessionBrowsingInput(LineReader reader) {
+        Object history = reader.getVariable(LineReader.DISABLE_HISTORY);
+        Object completion = reader.getVariable(LineReader.DISABLE_COMPLETION);
+        boolean expansion = reader.isSet(LineReader.Option.DISABLE_EVENT_EXPANSION);
+        reader.setVariable(LineReader.DISABLE_HISTORY, true);
+        reader.setVariable(LineReader.DISABLE_COMPLETION, true);
+        reader.setOpt(LineReader.Option.DISABLE_EVENT_EXPANSION);
+        return () -> {
+            reader.setVariable(LineReader.DISABLE_HISTORY, history);
+            reader.setVariable(LineReader.DISABLE_COMPLETION, completion);
+            reader.option(LineReader.Option.DISABLE_EVENT_EXPANSION, expansion);
+        };
+    }
+
+    static PromptInput readPromptInput(Terminal terminal,
                                                LineReader lineReader,
                                                Renderer renderer,
-                                               boolean allowEscCancel,
+                                               ExecutionMode nextTaskOverride,
                                                boolean spaciousPrompt)
             throws UserInterruptException, EndOfFileException {
         if (spaciousPrompt) {
@@ -1887,7 +1877,7 @@ public class Main {
         try {
             String prompt = renderer.inputPrompt();
             String rightPrompt = renderer.inputRightPrompt();
-            if (!allowEscCancel) {
+            if (nextTaskOverride == null) {
                 return PromptInput.submitted(lineReader.readLine(prompt, rightPrompt, SecretCommandGuard.commandMask(), null));
             }
 
@@ -2242,10 +2232,10 @@ public class Main {
                 new SlashCommandHint("/clear", "/clear", "清空当前对话历史"),
                 new SlashCommandHint("/compact", "/compact", "手动压缩当前对话历史"),
                 new SlashCommandHint("/sessions", "/sessions", "列出当前项目的持久化会话"),
-                new SlashCommandHint("/resume ", "/resume <session-id>", "恢复指定会话"),
+                new SlashCommandHint("/resume", "/resume [last|<session-id>]", "选择会话并浏览历史（不继续任务）"),
                 new SlashCommandHint("/plan resume", "/plan resume", "继续当前 Session 的未完成 Plan"),
                 new SlashCommandHint("/plan abandon", "/plan abandon", "放弃当前 Session 的未完成 Plan"),
-                new SlashCommandHint("/new", "/new", "关闭当前会话并创建新会话"),
+                new SlashCommandHint("/new", "/new", "创建新会话（保留其他会话的等待任务）"),
                 new SlashCommandHint("/init", "/init", "生成项目级记忆 CODEAGENT.md"),
                 new SlashCommandHint("/init --force", "/init --force", "重写项目级记忆 CODEAGENT.md"),
                 new SlashCommandHint("/history clear", "/history clear", "清空本机输入历史"),

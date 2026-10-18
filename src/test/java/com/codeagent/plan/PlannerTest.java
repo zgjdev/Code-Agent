@@ -17,6 +17,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlannerTest {
 
+    @Test void optionalRecoveryObservationReachesActualPlannerRequestAndPreventsSimpleShortcut() throws Exception {
+        StubGLMClient client = new StubGLMClient("{\"summary\":\"state-aware plan\",\"tasks\":[{\"id\":\"one\",\"description\":\"inspect directory\",\"type\":\"COMMAND\",\"dependencies\":[]}]}");
+        var context = new com.codeagent.model.recovery.FormattedRecoveryContext("{\"source\":\"runtime_recovery_context\",\"authorization\":\"none\"}", "a".repeat(64),12,
+                0,0,0,0,0,0,com.codeagent.model.recovery.RecoveryCompleteness.COMPLETE);
+        var planner = new Planner(client);
+        planner.createPlan(new Planner.PlannerRequest("列出当前目录的文件", "", context));
+        assertEquals(1, client.calls);
+        assertTrue(client.lastUserPrompt.contains(context.content()));
+        assertEquals(1, occurrences(client.lastUserPrompt,"列出当前目录的文件"));
+        org.junit.jupiter.api.Assertions.assertFalse(client.lastSystemPrompt.contains(context.content()));
+    }
+
     @Test
     void createsMinimalPlanForSimpleGoalWithoutCallingLlm() throws Exception {
         Planner planner = new Planner(new FailingGLMClient());

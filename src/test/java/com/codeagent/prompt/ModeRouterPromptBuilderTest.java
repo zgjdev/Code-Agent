@@ -21,6 +21,18 @@ class ModeRouterPromptBuilderTest {
     Path tempDir;
 
     @Test
+    void keepsOptionalRuntimeObservationSeparateFromHistoryAndCurrentInput() throws Exception {
+        var context = new com.codeagent.model.recovery.FormattedRecoveryContext("{\"source\":\"runtime_recovery_context\"}", "a".repeat(64), 12,
+                0,0,0,0,0,0, com.codeagent.model.recovery.RecoveryCompleteness.COMPLETE);
+        var messages = builder().build(List.of(), "current once", context);
+        var payload = JSON.readTree(messages.get(1).content());
+        assertEquals("current once", payload.path("submittedInput").asText());
+        assertEquals("runtime_recovery_context", payload.path("runtimeRecoveryContext").path("source").asText());
+        assertFalse(payload.path("conversationContext").asText().contains("runtime_recovery_context"));
+        assertFalse(messages.get(0).content().contains(context.content()));
+    }
+
+    @Test
     void buildsExactlyOneSystemAndOneJsonUserMessage() throws Exception {
         ModeRouterPromptBuilder builder = builder();
 

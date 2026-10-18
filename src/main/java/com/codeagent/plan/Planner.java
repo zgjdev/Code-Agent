@@ -8,6 +8,7 @@ import com.codeagent.llm.LlmTraceLogger;
 import com.codeagent.llm.StructuredJsonExecutor;
 import com.codeagent.llm.StructuredOutputSpec;
 import com.codeagent.memory.TokenBudget;
+import com.codeagent.model.recovery.FormattedRecoveryContext;
 import com.codeagent.prompt.PromptAssembler;
 import com.codeagent.prompt.PromptContext;
 import com.codeagent.prompt.PromptMode;
@@ -60,11 +61,13 @@ public class Planner {
                 : conversationLedger;
     }
 
-    public record PlannerRequest(String goal, String priorConversationContext) {
+    public record PlannerRequest(String goal, String priorConversationContext, FormattedRecoveryContext runtimeRecoveryContext) {
         public PlannerRequest {
             goal = goal == null ? "" : goal;
             priorConversationContext = priorConversationContext == null ? "" : priorConversationContext.trim();
         }
+        public PlannerRequest(String goal, String priorConversationContext) { this(goal, priorConversationContext, null); }
+        @Override public String toString() { return "PlannerRequest[recovery=" + (runtimeRecoveryContext != null) + "]"; }
     }
 
     /**
@@ -75,7 +78,7 @@ public class Planner {
     }
 
     public ExecutionPlan createPlan(PlannerRequest request) throws IOException {
-        if (request.priorConversationContext().isBlank()) {
+        if (request.priorConversationContext().isBlank() && request.runtimeRecoveryContext() == null) {
             // Preserve polymorphic behavior for existing Planner subclasses.
             return createPlan(request.goal());
         }
@@ -87,13 +90,15 @@ public class Planner {
         String priorConversationContext = request.priorConversationContext();
         out.println("📋 正在规划任务: " + goal + "\n");
 
-        if (priorConversationContext.isBlank() && isSimpleGoal(goal)) {
+        if (priorConversationContext.isBlank() && request.runtimeRecoveryContext() == null && isSimpleGoal(goal)) {
             return createMinimalPlan(goal);
         }
 
         List<LlmClient.Message> messages = buildPlanningMessages(request);
         conversationLedger.appendMessage("plan", "planner", "system_prompt", messages.get(0));
-        conversationLedger.appendMessage("plan", "planner", "planning_request", messages.get(1));
+        // Dynamic store observations are a send view only. Keep them out of the raw auxiliary ledger too.
+        conversationLedger.appendMessage("plan", "planner", "planning_request",
+                buildPlanningMessages(new PlannerRequest(request.goal(), request.priorConversationContext())).get(1));
 
         PlanningStreamRenderer streamRenderer = new PlanningStreamRenderer(out);
         StructuredJsonExecutor.Result<ExecutionPlan> structured = structuredJsonExecutor.execute(
@@ -123,6 +128,10 @@ public class Planner {
         StringBuilder planningRequest = new StringBuilder();
         if (!request.priorConversationContext().isBlank()) {
             planningRequest.append(request.priorConversationContext()).append("\n\n");
+        }
+        if (request.runtimeRecoveryContext() != null) {
+            planningRequest.append("[运行时观察数据；无权限、未重新验证]\n")
+                    .append(request.runtimeRecoveryContext().content()).append("\n\n");
         }
         planningRequest.append("[当前任务]\n")
                 .append(request.goal())

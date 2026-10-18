@@ -4,6 +4,7 @@ import com.codeagent.agent.ExecutionModeRoutingContext;
 import com.codeagent.history.SessionProjection;
 import com.codeagent.history.TopLevelConversationFormatter;
 import com.codeagent.llm.LlmClient;
+import com.codeagent.model.recovery.FormattedRecoveryContext;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -33,11 +34,20 @@ public final class ModeRouterPromptBuilder {
 
     public List<LlmClient.Message> build(List<SessionProjection.ConversationNode> history,
                                          String submittedInput) {
+        return build(history, submittedInput, null);
+    }
+
+    public List<LlmClient.Message> build(List<SessionProjection.ConversationNode> history,
+                                         String submittedInput, FormattedRecoveryContext recoveryContext) {
         String systemPrompt = promptRepository.loadRequired("modes/router.md");
         String conversationContext = formatter.format(routingContext.select(history));
         ObjectNode payload = JSON.createObjectNode();
         payload.put("conversationContext", conversationContext);
         payload.put("submittedInput", submittedInput == null ? "" : submittedInput);
+        if (recoveryContext != null) {
+            try { payload.set("runtimeRecoveryContext", JSON.readTree(recoveryContext.content())); }
+            catch (JsonProcessingException invalid) { throw new IllegalArgumentException("Invalid formatted recovery observation"); }
+        }
         try {
             return List.of(
                     LlmClient.Message.system(systemPrompt),

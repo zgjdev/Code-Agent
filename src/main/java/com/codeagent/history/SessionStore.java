@@ -19,6 +19,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.LinkOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
@@ -155,6 +156,124 @@ public final class SessionStore implements AutoCloseable {
         SessionManifest manifest = readManifest(directory);
         List<SessionEvent> events = readEvents(directory.resolve("events.jsonl")).events();
         return new SessionCheckpointStore(directory).loadLatest(manifest, events).projection();
+    }
+
+    public SessionReadSnapshot readParentSnapshot(String sessionId, Path workspace, long lastSequence)
+            throws IOException {
+        return readSnapshot(sessionId, workspace, null, lastSequence);
+    }
+
+    /**
+     * Reads a newline-committed, validated prefix without locks, checkpoints or recovery writes.
+     * Null expectedParentId explicitly requires a parent session; children require their exact parent.
+     * -1 captures the currently available prefix; a fixed watermark must still be fully available.
+     * The manifest is an index and may lag/lead the log; lastSequence is always based on actual bytes.
+     */
+    public SessionReadSnapshot readSnapshot(String sessionId, Path workspace, String expectedParentId,
+                                            long lastSequence) throws IOException {
+        if (lastSequence < -1) throw new IllegalArgumentException("invalid snapshot watermark");
+        String safeId = requireSafeSessionId(sessionId);
+        if (safeId.equals(".") || safeId.equals("..")) throw new IllegalArgumentException("invalid session id");
+        if (expectedParentId != null) requireSafeSessionId(expectedParentId);
+        Path directory = sessionsDirectory.resolve(safeId);
+        Path eventFile = directory.resolve("events.jsonl");
+        SessionManifest manifest;
+        List<SessionEvent> events = new ArrayList<>();
+        try {
+            manifest = readValidatedManifest(safeId, workspace, expectedParentId);
+            byte[] bytes = readSafeFile(eventFile);
+            int committedEnd = lastNewlineOffset(bytes) + 1;
+            int lineStart = 0;
+            for (int index = 0; index < committedEnd; index++) {
+                if (bytes[index] != '\n') continue;
+                if (lastSequence >= 0 && events.size() > lastSequence) break;
+                String line = StandardCharsets.UTF_8.newDecoder()
+                        .decode(ByteBuffer.wrap(bytes, lineStart, index - lineStart)).toString();
+                lineStart = index + 1;
+                if (line.isBlank()) continue;
+                SessionEvent event = JSON.readValue(line, SessionEvent.class);
+                if (event.schemaVersion() < 1 || event.schemaVersion() > SessionEvent.CURRENT_SCHEMA_VERSION) {
+                    throw new CorruptSessionLogException("unsupported event schema in read prefix");
+                }
+                events.add(event);
+            }
+            long actualLast = events.size() - 1L;
+            if (events.isEmpty() || (lastSequence >= 0 && actualLast != lastSequence)) {
+                throw new CorruptSessionLogException("requested session prefix is unavailable");
+            }
+            SessionEvent start = events.get(0);
+            if (!SessionEvent.Types.SESSION_START.equals(start.type()) || start.payload() == null
+                    || !manifest.workspace().equals(start.payload().path("workspace").asText())
+                    || !Objects.equals(expectedParentId,
+                    start.payload().path("parentSessionId").isTextual()
+                            ? start.payload().path("parentSessionId").textValue() : null)) {
+                throw new CorruptSessionLogException("session start identity does not match manifest");
+            }
+            replayer.replay(manifest, events);
+            return new SessionReadSnapshot(manifest, events, actualLast);
+        } catch (WorkspaceMismatchException | CorruptSessionLogException e) {
+            throw e;
+        } catch (IOException | RuntimeException e) {
+            // Parser exceptions may contain entire private lines; never propagate their cause.
+            throw new CorruptSessionLogException("session snapshot cannot be read safely");
+        }
+    }
+
+    /** Metadata only; verifies path/schema/workspace/parent, but does not certify the event log. */
+    public SessionManifest readValidatedManifest(String sessionId, Path workspace, String expectedParentId)
+            throws IOException {
+        String safeId = requireSafeSessionId(sessionId);
+        if (safeId.equals(".") || safeId.equals("..")) throw new IllegalArgumentException("invalid session id");
+        try {
+            SessionManifest manifest = JSON.readValue(
+                    readSafeFile(sessionsDirectory.resolve(safeId).resolve("manifest.json")), SessionManifest.class);
+            if (!safeId.equals(manifest.sessionId()) || manifest.schemaVersion() < 1
+                    || manifest.schemaVersion() > SessionEvent.CURRENT_SCHEMA_VERSION) {
+                throw new CorruptSessionLogException("invalid session manifest identity or schema");
+            }
+            if (!normalizeWorkspace(workspace).toString().equals(manifest.workspace())) {
+                throw new WorkspaceMismatchException("session workspace does not match");
+            }
+            if (!Objects.equals(expectedParentId, manifest.parentSessionId())) {
+                throw new CorruptSessionLogException("session parent identity does not match");
+            }
+            return manifest;
+        } catch (WorkspaceMismatchException | CorruptSessionLogException e) {
+            throw e;
+        } catch (IOException | RuntimeException e) {
+            throw new CorruptSessionLogException("session manifest cannot be read safely");
+        }
+    }
+
+    /** Candidate IDs only; callers validate every manifest and prefix before use. No raw logging. */
+    public List<String> readSessionIds() throws IOException {
+        requireNoLinks(sessionsDirectory);
+        try (var paths = Files.list(sessionsDirectory)) {
+            return paths.filter(p -> Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS))
+                    .map(p -> p.getFileName().toString()).sorted().toList();
+        }
+    }
+
+    private static byte[] readSafeFile(Path file) throws IOException {
+        requireNoLinks(file);
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            long size = channel.size();
+            if (size > Integer.MAX_VALUE) throw new IOException("session file exceeds read capacity");
+            ByteBuffer buffer = ByteBuffer.allocate((int) size);
+            while (buffer.hasRemaining()) {
+                if (channel.read(buffer) < 0) throw new IOException("session file changed during read");
+            }
+            requireNoLinks(file);
+            return buffer.array();
+        }
+    }
+
+    private static void requireNoLinks(Path file) throws IOException {
+        Path absolute = file.toAbsolutePath().normalize();
+        for (Path part = absolute; part != null; part = part.getParent()) {
+            if (Files.isSymbolicLink(part)) throw new IOException("linked session path is forbidden");
+        }
+        if (!absolute.toRealPath().equals(absolute)) throw new IOException("redirected session path is forbidden");
     }
 
     public List<SessionSummary> list(Path workspace, int limit) throws IOException {

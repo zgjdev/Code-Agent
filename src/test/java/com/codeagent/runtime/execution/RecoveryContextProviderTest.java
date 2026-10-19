@@ -15,6 +15,34 @@ class RecoveryContextProviderTest {
     @TempDir
     Path temp;
 
+    @Test void latestAttemptWithoutImportsStillReportsAncestorUnknownsToTheParent() throws Exception {
+        var identity = new WorkspaceIdentityResolver().resolve(temp);
+        try (var sessions = SessionStore.open(temp.resolve("history"));
+             var parent = sessions.create(new SessionStore.SessionCreateRequest(temp, "test", "model", null, "plan", "agent"));
+             var source = parent.createChild("plan", "task:t");
+             var child = parent.createChild("plan", "task:t");
+             var executions = new RuntimeExecutionStore(temp.resolve("tasks.db"))) {
+            executions.enqueue(temp, parent.sessionId(), "goal", null);
+            var running = executions.claimNext(temp).orElseThrow();
+            var plans = new PlanStateStore(temp.resolve("plans.db"));
+            var plan = new ExecutionPlan("plan", "goal");
+            plan.addTask(new Task("t", "description", Task.TaskType.FILE_READ));
+            plan.computeExecutionOrder();
+            plans.savePlan(temp, parent.sessionId(), running.id(), "policy", plan);
+            var attempts = new TaskRecoveryStore(plans.dbPath());
+            var a = attempts.bindAttempt(temp, parent.sessionId(), running.id(), "plan", "t", source.sessionId(), null, running.ownerId(), running.attempt());
+            new TaskRecoveryObserver(attempts, source, a).started(new TaskObservationContext(a, "batch", 0),
+                    new com.codeagent.tool.ToolRegistry.ToolInvocation("call", "execute_command", "{}"));
+            attempts.bindAttempt(temp, parent.sessionId(), running.id(), "plan", "t", child.sessionId(), a.attemptId(), running.ownerId(), running.attempt());
+            var provider = new RecoveryContextProvider(executions, plans, sessions, attempts, (w, p, c) -> {});
+            var view = provider.readRecoveryContext(new RecoveryContextProvider.ReadBoundary(identity, parent.sessionId(), running.claim()));
+            var task = view.plans().get(0).tasks().get(0);
+            assertEquals(1, task.unknowns().size());
+            assertEquals(RecoveryCompleteness.PARTIAL, task.completeness());
+            assertEquals(2, task.sources().stream().filter(r -> "child".equals(r.store())).count());
+        }
+    }
+
     @Test
     void canonicalAncestorPrefixAlsoParticipatesInSnapshotFingerprint() throws Exception {
         var json = new com.fasterxml.jackson.databind.ObjectMapper();

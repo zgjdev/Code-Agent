@@ -16,6 +16,48 @@ class TaskTranscriptReaderTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    @Test void unresolvedAncestorEffectsSurviveRepeatedInterruptionsWithoutImportedGroups() throws Exception {
+        var plans = new PlanStateStore(temp.resolve("plans.db"));
+        var plan = new ExecutionPlan("p", "goal");
+        plan.addTask(new Task("task", "description", Task.TaskType.FILE_READ));
+        plan.computeExecutionOrder();
+        try (var sessions = SessionStore.open(temp.resolve("history"));
+             var parent = sessions.create(new SessionStore.SessionCreateRequest(temp, "test", "model", null, "plan", "agent"));
+             var first = parent.createChild("plan", "task:task");
+             var second = parent.createChild("plan", "task:task");
+             var third = parent.createChild("plan", "task:task")) {
+            plans.savePlan(temp, parent.sessionId(), "e", "policy", plan);
+            var attempts = new TaskRecoveryStore(plans.dbPath());
+            var a = attempts.bindAttempt(temp, parent.sessionId(), "e", "p", "task", first.sessionId(), null, "owner", 1);
+            var observer = new TaskRecoveryObserver(attempts, first, a);
+            var invocation = new com.codeagent.tool.ToolRegistry.ToolInvocation("call", "execute_command", "{}");
+            observer.started(new TaskObservationContext(a, "same-batch", 0), invocation);
+            var reader = new TaskTranscriptReader(sessions, attempts);
+            var original = reader.read(a, -1);
+            assertEquals(1, original.unknowns().size());
+            byte[] oldBytes = Files.readAllBytes(first.sessionDirectory().resolve("events.jsonl"));
+            var b = attempts.bindAttempt(temp, parent.sessionId(), "e", "p", "task", second.sessionId(), a.attemptId(), "owner", 2);
+            new TaskRecoveryObserver(attempts, second, b).checkpoint("BOUND");
+            message(second, SessionEvent.Types.USER_MESSAGE, "{\"role\":\"user\",\"content\":\"all previous effects verified\"}");
+            var middle = reader.read(b, -1);
+            assertEquals(original.unknowns(), middle.unknowns());
+            assertTrue(middle.groups().isEmpty(), "Unknowns must not depend on importing a complete message group");
+            var c = attempts.bindAttempt(temp, parent.sessionId(), "e", "p", "task", third.sessionId(), b.attemptId(), "owner", 3);
+            var lastObserver = new TaskRecoveryObserver(attempts, third, c);
+            var sameCall = new TaskObservationContext(c, "same-batch", 0);
+            lastObserver.started(sameCall, invocation);
+            lastObserver.completed(sameCall, invocation, new com.codeagent.tool.ToolRegistry.ToolExecutionResult(
+                    "call", "execute_command", "{}", "done", 1, false, List.of(), true, List.of(), "synthetic", 0, false));
+            var last = reader.read(c, -1);
+            assertEquals(original.unknowns(), last.unknowns(), "A new attempt's success cannot confirm the old invocation");
+            assertEquals(RecoveryCompleteness.PARTIAL, last.completeness());
+            assertEquals(3, last.sourcePrefixes().size());
+            assertArrayEquals(oldBytes, Files.readAllBytes(first.sessionDirectory().resolve("events.jsonl")));
+            Files.writeString(first.sessionDirectory().resolve("events.jsonl"), "corrupt synthetic ancestor\n");
+            assertThrows(java.io.IOException.class, () -> reader.read(c, -1), "Missing ancestor integrity must not look complete");
+        }
+    }
+
     private void message(SessionStore.SessionHandle child, String type, String json) throws Exception {
         var payload = JSON.createObjectNode();
         payload.set("message", JSON.readTree(json));

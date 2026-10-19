@@ -83,6 +83,28 @@ public final class TaskTranscriptReader {
                         unknowns.removeIf(u -> call.equals(u.callId()));
                 }
             }
+            // Unknown effects belong to the source attempt, not to the subset of message groups
+            // imported into this child. Merge after local outcomes so a reused call key in the
+            // new attempt cannot accidentally confirm an ancestor's invocation.
+            boolean ancestorPartial = false;
+            if (source.sourceAttemptId() != null) {
+                var prior = attempts.findAttempt(source.sourceAttemptId())
+                        .orElseThrow(() -> new IOException("Recovery ancestor missing"));
+                if (!source.workspace().equals(prior.workspace()) || !source.parentSessionId().equals(prior.parentSessionId())
+                        || !source.executionId().equals(prior.executionId()) || !source.planId().equals(prior.planId())
+                        || !source.taskId().equals(prior.taskId()))
+                    throw new IOException("Recovery ancestor ownership mismatch");
+                var ancestor = fullSources.get(prior.attemptId());
+                if (ancestor == null) {
+                    ancestor = read(prior, -1, new HashSet<>(stack), fullSources);
+                    fullSources.put(prior.attemptId(), ancestor);
+                }
+                unknowns.addAll(ancestor.unknowns());
+                warnings.addAll(ancestor.warnings());
+                ancestorPartial = ancestor.completeness() != RecoveryCompleteness.COMPLETE;
+                for (var prefix : ancestor.sourcePrefixes())
+                    prefixes.put(prefix.attemptId() + ":" + prefix.recordId(), prefix);
+            }
             List<SessionEvent> pending = new ArrayList<>();
             Set<String> calls = new LinkedHashSet<>();
             Set<String> results = new HashSet<>();
@@ -165,7 +187,8 @@ public final class TaskTranscriptReader {
                 unknowns.add(unknown(source, calls, results));
             if (filtered > 0)
                 warnings.add(new RecoveryWarning(RecoveryWarning.Code.SOURCE_FILTERED, source.taskId(), filtered));
-            var completeness = filtered > 0 || !unknowns.isEmpty() ? RecoveryCompleteness.PARTIAL : RecoveryCompleteness.COMPLETE;
+            var completeness = filtered > 0 || ancestorPartial || !unknowns.isEmpty()
+                    ? RecoveryCompleteness.PARTIAL : RecoveryCompleteness.COMPLETE;
             return new TaskTranscript(source.attemptId(), snapshot.lastSequence(), completeness, groups,
                     List.copyOf(facts.values()), unknowns, warnings, List.copyOf(prefixes.values()));
         } catch (SQLException | RuntimeException e) {

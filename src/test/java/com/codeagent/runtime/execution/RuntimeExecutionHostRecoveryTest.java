@@ -179,6 +179,17 @@ class RuntimeExecutionHostRecoveryTest {
                     queued = store.enqueue(root, queuedSession.sessionId(), "old queued", ExecutionMode.REACT);
                     running = store.enqueue(root, runningSession.sessionId(), "old running", ExecutionMode.PLAN);
                 }
+                // Creation order is part of this fixture. A real clock can return the same
+                // timestamp for both rows, leaving their order to random execution IDs.
+                try (var connection = DriverManager.getConnection("jdbc:sqlite:" + temporary.resolve("execution.db"));
+                     var update = connection.prepareStatement("UPDATE runtime_executions SET created_at=? WHERE id=?")) {
+                    update.setString(1, "2026-01-01T00:00:00.000Z");
+                    update.setString(2, runningCreatedFirst ? running.id() : queued.id());
+                    assertEquals(1, update.executeUpdate());
+                    update.setString(1, "2026-01-01T00:00:00.001Z");
+                    update.setString(2, runningCreatedFirst ? queued.id() : running.id());
+                    assertEquals(1, update.executeUpdate());
+                }
                 assertEquals(runningCreatedFirst ? running.id() : queued.id(),
                         store.workspaceExecutions(previousOwner.identity().key()).get(0).id());
                 queued = store.claimCandidate(previousOwner, queued.id()).orElseThrow();

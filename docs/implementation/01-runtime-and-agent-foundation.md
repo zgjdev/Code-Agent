@@ -103,6 +103,8 @@ Windows 全局命令由 `scripts/install-codeagent.ps1` 安装到统一根的 `b
 
 执行到边界中断不保证外部副作用exactly-once。恢复时旧RUNNING/REVIEWING节点转为INTERRUPTED，从Task边界继续；EOF/shutdown停止进程内工作，保留非终态记录，不让任务脱离进程继续运行。
 
+子 Task 的未知副作用沿精确 sourceAttemptId 链传递，与是否导入完整 assistant/tool 消息组无关。TaskTranscriptReader 只读验证每个祖先的 workspace/parent/execution/plan/task、日志与 typed 来源，合并 unknowns、警告和来源水位；祖先未确认时保持 PARTIAL。新 attempt 的成功工具结果和普通文本声明均不能核销旧 attempt 的未知调用；祖先记录不可用时失败关闭，不把“未读到”当作“没有”。顶层 RecoveryContextProvider 使用同一视图，因此也能报告多次中断前的未知副作用。
+
 ## 5. 验收清单与源码定位
 
 - 请求从提交、路由、工具执行到最终回答都有确定身份与状态。

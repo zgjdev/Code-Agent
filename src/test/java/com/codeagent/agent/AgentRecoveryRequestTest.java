@@ -16,6 +16,48 @@ import static org.junit.jupiter.api.Assertions.*;
 class AgentRecoveryRequestTest {
     @TempDir Path dir;
 
+    @Test void persistedCurrentInputStillReceivesMemoryAndSkillAcrossToolRequests() throws Exception {
+        org.slf4j.LoggerFactory.getLogger(Agent.class);
+        String priorHome = System.getProperty("codeagent.home");
+        System.setProperty("codeagent.home", dir.resolve("memory-home").toString());
+        try (var store = SessionStore.open(dir.resolve("history")); var s = create(store)) {
+            var call = new LlmClient.ToolCall("read", new LlmClient.ToolCall.Function("list_dir", "{\"path\":\".\"}"));
+            var client = new Client(List.of(new LlmClient.ChatResponse("assistant", "checking", List.of(call), 10, 2), response("done")));
+            var agent = agent(client);
+            agent.attachSession(s);
+            try {
+                agent.getMemoryManager().setProjectPath(dir.toString());
+                String fact = "RESUME_MEMORY_CONVENTION use constructor injection";
+                agent.getMemoryManager().storeFactWithResult(fact, "project", "remember " + fact);
+                assertTrue(agent.getMemoryManager().buildContextForQuery(fact, 4000).contains(fact));
+                var skills = new com.codeagent.skill.SkillContextBuffer();
+                skills.push("resume-regression", "RESUME_SKILL_BODY inspect before editing");
+                agent.setSkillContextBuffer(skills);
+                RecoveryRequestAugmenterTest.start(s, "current", 1);
+                var input = LlmClient.Message.user(fact);
+                long seq = agent.getParentConversationContext().appendExecutionMessage("current", input, fact, "agent", "agent").sequence();
+                var durable = s.readAll().stream().filter(e -> e.sequence() == seq).findFirst().orElseThrow();
+                assertEquals(com.codeagent.runtime.execution.ExecutionOutcome.SUCCEEDED,
+                        agent.runExecution(fact, fact, context(s, "current", "current", seq, false, "a")).outcome());
+                assertEquals(2, client.messages.size());
+                for (var sent : client.messages) {
+                    var enriched = sent.stream().filter(m -> "user".equals(m.role()) && m.content() != null
+                            && m.content().contains("RESUME_SKILL_BODY")).toList();
+                    assertEquals(1, enriched.size(), "Skill must reach each real request exactly once");
+                    assertTrue(enriched.get(0).content().contains("## 相关长期记忆"));
+                }
+                assertTrue(skills.isEmpty());
+                assertEquals(durable, s.readAll().stream().filter(e -> e.sequence() == seq).findFirst().orElseThrow());
+                assertEquals(1, s.readAll().stream().filter(e -> SessionEvent.Types.USER_MESSAGE.equals(e.type())
+                        && e.payload().has("conversation")).count());
+                assertEquals(agent.getConversationHistory(), s.projection().messages());
+                assertSnapshotMatches(s, client);
+            } finally { agent.getMemoryManager().close(); }
+        } finally {
+            if (priorHome == null) System.clearProperty("codeagent.home"); else System.setProperty("codeagent.home", priorHome);
+        }
+    }
+
     @Test void compactedCurrentInputIsDeductedBeforeRecoverySummaryBudget() throws Exception {
         try(var store=SessionStore.open(dir.resolve("history"));var s=create(store)) {
             var client=new Client(List.of(response("must not send"))) {

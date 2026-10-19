@@ -11,6 +11,15 @@ public final class RecoveryRequestAugmenter {
     private static final ObjectMapper JSON = new ObjectMapper();
     public static final String CONTROL_ACTOR = "continuation-control";
     public static final String CONTROL_SOURCE = "continuation-control";
+    private final String inputPrefix;
+    private final String inputSuffix;
+
+    public RecoveryRequestAugmenter() { this("", ""); }
+
+    RecoveryRequestAugmenter(String inputPrefix, String inputSuffix) {
+        this.inputPrefix = Objects.requireNonNull(inputPrefix);
+        this.inputSuffix = Objects.requireNonNull(inputSuffix);
+    }
 
     public List<LlmClient.Message> augmentRequest(List<LlmClient.Message> baseMessages,
             FormattedRecoveryContext context, RequestAssemblyBoundary boundary, SessionStore.SessionHandle session) {
@@ -64,10 +73,12 @@ public final class RecoveryRequestAugmenter {
                 if (lateGoal != null) copy.add(lateGoal);
                 if (context != null) copy.add(LlmClient.Message.user(context.content()));
                 inserted = true;
+                copy.add(enrichInput(baseMessages.get(i)));
+                continue;
             } else if (!inserted && !userOnSurface && executionSuffix.contains(node.sequence())) {
                 if (lateGoal != null) copy.add(lateGoal);
                 if (context != null) copy.add(LlmClient.Message.user(context.content()));
-                copy.add(rematerialize(user));
+                copy.add(enrichInput(rematerialize(user)));
                 inserted = true;
             }
             copy.add(baseMessages.get(i));
@@ -75,9 +86,20 @@ public final class RecoveryRequestAugmenter {
         if (!inserted) {
             if (lateGoal != null) copy.add(lateGoal);
             if (context != null) copy.add(LlmClient.Message.user(context.content()));
-            copy.add(rematerialize(user));
+            copy.add(enrichInput(rematerialize(user)));
         }
         return List.copyOf(copy);
+    }
+
+    private LlmClient.Message enrichInput(LlmClient.Message input) {
+        if (inputPrefix.isEmpty() && inputSuffix.isEmpty()) return input;
+        if (!input.hasContentParts())
+            return LlmClient.Message.user(inputPrefix + Objects.toString(input.content(), "") + inputSuffix);
+        var parts = new ArrayList<LlmClient.ContentPart>();
+        if (!inputPrefix.isEmpty()) parts.add(LlmClient.ContentPart.text(inputPrefix));
+        parts.addAll(input.contentParts());
+        if (!inputSuffix.isEmpty()) parts.add(LlmClient.ContentPart.text(inputSuffix));
+        return LlmClient.Message.user(parts);
     }
 
     /** Raw sequence establishes causality, while activeSurface establishes projected order.

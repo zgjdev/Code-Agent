@@ -1,5 +1,7 @@
 # 会话选择、历史回显与用户驱动的任务继续
 
+当前状态：原设计已在 `feat/session-resume-continuation` 实施；第 1.1 节中的“仅设计”是最初任务的历史范围。当前交付与审查修复以本文末尾实施记录为准。
+
 ## 1. 背景、目标与非目标
 
 ### 1.1 需求与本次交付范围
@@ -778,3 +780,38 @@ Follow-up package：`mvn package -DskipTests`，core-picker-input-package.log，
 - root 使用隔离临时 workspace、CODEAGENT_HOME、合成凭据和 localhost 模型服务实际运行该 JAR：启动显示空闲；/resume→1+单次 Enter 显示已有 USER/ASSISTANT；提交 /react verify current run 实际完成并保存 LOCAL_CORE_OK；再次启动 /resume→1 显示两轮真实顶层历史，/exit 退出码0。最后正常 PTY 设置 TERM=xterm / org.jline.terminal.type=xterm 以匹配该虚拟终端能力，无任务/退出异常。终端工具编码将中文显示成替换字符，不影响历史文件和断言的 UTF-8 内容。
 - 初始重定向/dumb 终端验证不算通过：曾复现选择器旧预读吞 Enter，已局部修复；dumb 模式另有既存 JLine Mask Thread 在 terminal 关闭后输出异常的现象，遵照用户不扩展无关问题的要求未做额外终端框架修改。正常 xterm PTY 的最后选择、历史和退出已通过；不能将所有 dumb 环境都宣称无诊断。
 - 最终 git diff --check 通过，功能分支 feat/session-resume-continuation；本次没有提交、推送或创建 PR。所有产品变更保留未提交，temp smoke 服务与测试进程已停止；未使用真实密钥或用户会话。
+
+### 审查修复：三个 P1 与普通请求分类边界（2026-10-19）
+
+#### 范围、证据与设计评审
+
+本次用户明确授权在当前功能分支继续修改，每个问题单独本地提交；不推送。基线 `6ed4052`，工作树干净，同名 upstream。非目标：200 条工具事实上限、子任务消息组新旧优先级、历史目录分页性能、legacy Plan adoption，不在本轮修改。
+
+源码证据：ContinuationExecutionDispatcher.run 提前 appendExecutionMessage；Agent.runExecutionInternal 消费 Skill/Memory 后因当前 user 已持久化跳过 append；Dispatcher.budget 扣完整 providerMessages，而 ContinuationIntentRouter.route 只发送顶层历史；Router 把预算异常当 CLARIFY；TaskTranscriptReader.read 只初始化当前 checkpoint.unknowns，祖先只在 recovery_import 分支读取；Dispatcher 对所有新输入无条件 classify。审查探针已复现以上行为，修复仍先加入正式回归测试并验证失败。
+
+候选方案评审：重新安排持久化时序会扩大 E1/E2 边界修改；改写已有 user 违反 append-only；因此记忆/Skill 采用当前 input sequence 定位的发送副本补充。分类预算若继续扣完整父上下文，即使提高固定上限也不能解决根因，因此按真正发送的有界分类请求扣预算。未知副作用采用精确 sourceAttemptId 递归读取并合并，不扫描同名 Task 或解释普通文本为确认；不创建新 schema。普通请求先在现有物理 lease 内查询 held rows，仅有恢复候选才走意图分类；已提交 STATUS/CONTINUE/CLARIFY 和已有 continuation ticket 必须沿用原契约，不能用快路径绕过。
+
+```mermaid
+flowchart TD
+    A[当前 claim + mutationGate + Session lease] --> B{有等待任务或已提交恢复语义?}
+    B -- 否 --> C[原 coordinator: 显式模式或 Mode Router]
+    B -- 是 --> D[有界分类历史 + 实际请求预算]
+    D --> E[原 admission 与 E2/E1 放行]
+    C --> F[Agent 发送副本注入当前 Skill/Memory]
+    E --> F
+    E --> G[Task 精确来源链]
+    G --> H[保留祖先未知副作用及来源水位]
+```
+
+保持权限原文、claim、generation、执行/账本身份、工具链与锁顺序不变。额外记忆和 Skill 不是授权来源；图片 parts 保留。祖先缺失、循环、跨任务来源继续失败关闭，不把 unknowns 当当前证据；恢复读取不写旧 child。纯发送副本字段在 run finally 清理，不进入历史压缩候选。预算不足显式返回恢复准备失败，不伪装成澄清；允许用户压缩后再次继续。不迁移数据库，回滚对应提交即可。
+
+#### 有依赖顺序的实现任务和验收
+
+- [ ] R1 / 单独提交：Agent、RecoveryRequestAugmenter 在真实 snapshot/chat 发送副本中给当前 input 补充一次 Skill/Memory，包含多工具轮/图片/压缩重建；不重复 user、不改历史或权限原文。先写 AgentRecoveryRequestTest、ContinuationExecutionDispatcherTest 的持久 user 注入回归；运行 `mvn test -DskipTests=false -Dtest=AgentRecoveryRequestTest,RecoveryRequestAugmenterTest,ContinuationExecutionDispatcherTest`。同步实现文档03。
+- [ ] R2 / 单独提交：ContinuationExecutionDispatcher 在读完整跨库快照前根据精确本会话 held task 和已提交语义选择普通快路径。普通显式 ReAct/Plan、普通自动 Mode Router 都不调用恢复分类器；有 held 时仍分类，STATUS 禁工具、继续必须 E2 END。先写 dispatcher 的无候选/排队/已有恢复语义测试，运行 `mvn test -DskipTests=false -Dtest=ContinuationExecutionDispatcherTest,ContinuationAdmissionServiceTest,TopLevelExecutionCoordinatorTest`。同步实现文档01和README。
+- [ ] R3 / 单独提交：ContinuationIntentRouter 按真正发送的 system/current input/有界历史算可用预算；Dispatcher 不以完整 provider 历史挤占路由摘要；超过预算显式抛准备异常，不落 CLARIFY。先写长历史且有 held 的实际 dispatcher/Router测试，断言分类与实际回答发生、原任务仍等待；不足放入当前输入时无模型/无伪澄清。运行 `mvn test -DskipTests=false -Dtest=ContinuationIntentRouterTest,ContinuationExecutionDispatcherTest,RecoveryContextFormatterTest,AgentRecoveryRequestTest`。同步实现文档01。
+- [ ] R4 / 单独提交：TaskTranscriptReader 无论是否导入完整消息组，都读取/验证直接祖先，合并未确认 unknowns 和其来源水位，跨多次中断保持 PARTIAL；当前 attempt 的成功调用不能抹掉祖先未知调用。先写 TaskTranscriptReaderTest 的 A→B→C、多源、缺失/循环与旧日志不变回归；运行 `mvn test -DskipTests=false -Dtest=TaskTranscriptReaderTest,TaskRecoveryStoreTest,RecoveryContextProviderTest,PlanExecuteRecoveryTest`。同步实现文档01。
+
+每项红测后实现，绿测后审查 diff 并核对 branch/status/upstream 才提交。最终运行 `mvn test -Pquick`、`git diff --check`，记录真实结果。测试使用 TempDir/隔离 codeagent.home，不调用外部模型或远程 embedding。每次提交只含该问题的代码、回归和关联文档；不包含 target 探针/日志。设计检查已确认上述四项均对应既有缺陷，不引入新命令、配置、权限或并发模型。
+
+R1 实施与验证：Agent 将一次性 Skill prefix 与检索 Memory suffix 保存在本轮临时字段；RecoveryRequestAugmenter 仅在精确 input sequence 的发送副本中加入补充，估算、snapshot 与 chat 共用同一组装路径。never-started E1 目标仍是背景，补充落在 E2；finally 清理。先行正式测试 r1-red2.log：1 test/1 assertion failure（Skill 未送达）；首轮 r1-red.log 的图片夹具序列化错误不是产品红测，已缩小为纯文本正式回归，图片保留由既有真实重物化夹具补充验证。`mvn test -DskipTests=false -Dtest=AgentRecoveryRequestTest,RecoveryRequestAugmenterTest,ContinuationExecutionDispatcherTest`：21 tests/0 failures/errors/skipped，exit 0（r1-green.log）。独立只读复核无阻断，git diff --check 通过。

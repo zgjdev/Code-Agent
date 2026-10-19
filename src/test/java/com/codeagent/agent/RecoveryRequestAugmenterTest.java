@@ -52,6 +52,13 @@ class RecoveryRequestAugmenterTest {
             s.append(new SessionEventDraft(SessionEvent.Types.SURFACE_CLEAR,"react","agent","agent",false,SessionEvent.SurfaceOperation.clear(),JSON.createObjectNode()));
             var result=new RecoveryRequestAugmenter().augmentRequest(s.projection().messages(),formatted(),new RequestAssemblyBoundary("original","control",seq),s);
             assertEquals(current,result.get(result.size()-1));assertEquals(1,result.get(result.size()-1).imagePartCount());
+            var enriched = new RecoveryRequestAugmenter("skill-prefix\n", "\nmemory-suffix")
+                    .augmentRequest(s.projection().messages(), formatted(), new RequestAssemblyBoundary("original", "control", seq), s);
+            var actual = enriched.get(enriched.size() - 1);
+            assertEquals(1, actual.imagePartCount());
+            assertTrue(actual.content().contains("skill-prefix"));
+            assertTrue(actual.content().contains("memory-suffix"));
+            assertEquals(current.contentParts().get(1), actual.contentParts().get(2));
         }
     }
 

@@ -82,6 +82,8 @@ public class Agent {
     private long observedCompactionGeneration;
     private RecoveryRequestContext recoveryRequestContext;
     private String recoveryRequestFingerprint;
+    private String recoveryInputPrefix = "";
+    private String recoveryInputSuffix = "";
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry());
@@ -248,6 +250,8 @@ public class Agent {
             return runExecutionInternal(userInput, submittedUserInput);
         } finally {
             recoveryRequestContext = null;
+            recoveryInputPrefix = "";
+            recoveryInputSuffix = "";
             if (recovery != null) {
                 recoveryRequestFingerprint = null;
                 contextTokenTracker.invalidate(InvalidationReason.RECOVERY_CONTEXT_CHANGED);
@@ -274,9 +278,14 @@ public class Agent {
             refreshSystemPrompt();
 
             // 添加用户输入到历史（如有 skill body 注入，前置到原文之前；长期记忆追加到同一消息末尾）
-            String userMessageContent = prependSkillBodies(userInput);
-            if (!memoryContext.isEmpty()) {
-                userMessageContent = userMessageContent + "\n\n" + memoryContext;
+            String skillPrefix = prependSkillBodies("");
+            String memorySuffix = memoryContext.isEmpty() ? "" : "\n\n" + memoryContext;
+            String userMessageContent = skillPrefix + userInput + memorySuffix;
+            if (recoveryRequestContext != null) {
+                recoveryInputPrefix = skillPrefix;
+                recoveryInputSuffix = memorySuffix;
+                // A never-started original goal is background; enrich only this round's exact input.
+                userMessageContent = userInput;
             }
             if (!currentExecutionUserAlreadyPersisted()) {
                 LlmClient.Message backgroundOrCurrent = recoveryRequestContext != null
@@ -903,7 +912,7 @@ public class Agent {
         if (recoveryRequestContext == null) return List.copyOf(conversationHistory);
         var snapshot = recoveryRequestContext.snapshot();
         var boundary = recoveryRequestContext.boundary();
-        var augmenter = new RecoveryRequestAugmenter();
+        var augmenter = new RecoveryRequestAugmenter(recoveryInputPrefix, recoveryInputSuffix);
         var sendBase = augmenter.requestBaseMessages(conversationHistory, boundary, parentConversationContext.sessionHandle());
         var baseSnapshot = requestSnapshotFactory.capture(llmClient, sendBase, tools, historyVersion);
         // Ordinary providers have no configured output cap. Reuse the existing context policy's

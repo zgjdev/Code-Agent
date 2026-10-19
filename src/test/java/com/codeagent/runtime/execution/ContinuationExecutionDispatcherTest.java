@@ -17,6 +17,71 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ContinuationExecutionDispatcherTest {
     @TempDir Path temp;
+    @Test void ordinaryExplicitAndAutomaticRequestsDoNotDependOnRecoveryClassifier() throws Exception {
+        try (var f = new Fixture()) {
+            f.client.response = "classifier unavailable";
+            var skills = new SkillContextBuffer();
+            skills.push("ordinary", "ORDINARY_SKILL_MUST_REACH_MODEL");
+            f.agent.setSkillContextBuffer(skills);
+            var explicit = f.claim("inspect the current source", ExecutionMode.REACT);
+            var queued = f.store.enqueue(temp, f.session.sessionId(), "another ready task", null);
+            f.run(explicit);
+            assertEquals(0, f.client.classifications);
+            assertEquals(1, f.client.answers);
+            assertEquals(RequestSemantics.NEW_REQUEST, f.store.find(explicit.id()).orElseThrow().requestSemantics());
+            assertTrue(f.client.answer.stream().anyMatch(m -> m.content() != null && m.content().contains("ORDINARY_SKILL_MUST_REACH_MODEL")));
+            var automatic = f.store.claimCandidate(f.owner, queued.id()).orElseThrow();
+            f.run(automatic);
+            assertEquals(0, f.client.classifications);
+            assertEquals(1, f.client.modeRoutes);
+            assertEquals(2, f.client.answers);
+            assertEquals(ExecutionOutcome.SUCCEEDED, f.store.find(automatic.id()).orElseThrow().outcome());
+        }
+    }
+
+    @Test void ordinaryExplicitPlanReachesPlanAdapterWithoutRecoveryClassifier() throws Exception {
+        try (var f = new Fixture()) {
+            f.plan = new PlanExecuteAgent(f.client, f.tools, null, (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute()) {
+                @Override public AgentExecutionResult runOrResumeExecution(String input, String submitted) {
+                    assertEquals("new plan task", input);
+                    return AgentExecutionResult.succeeded("new plan finished");
+                }
+            };
+            var e = f.claim("new plan task", ExecutionMode.PLAN);
+            f.run(e);
+            assertEquals(0, f.client.classifications);
+            assertEquals(ExecutionMode.PLAN, f.store.find(e.id()).orElseThrow().selectedMode());
+            assertEquals("new plan finished", f.store.find(e.id()).orElseThrow().result());
+        }
+    }
+
+    @Test void waitingTaskInAnotherSessionDoesNotChangeOrdinaryDispatch() throws Exception {
+        try (var f = new Fixture(); var other = f.sessions.create(new SessionStore.SessionCreateRequest(
+                temp, "test", "test", null, "react", "agent"))) {
+            var old = f.store.enqueue(temp, other.sessionId(), "foreign-session goal", null);
+            f.store.freezeForUser(f.owner);
+            var current = f.claim("independent current-session task", ExecutionMode.REACT);
+            f.run(current);
+            assertEquals(0, f.client.classifications);
+            assertEquals(1, f.client.answers);
+            assertTrue(f.store.find(old.id()).orElseThrow().awaitingInput());
+        }
+    }
+
+    @Test void noHeldTasksCannotEraseCommittedStatusOrUnclassifiedHistoricalInput() throws Exception {
+        try (var f = new Fixture()) {
+            var status = f.claim("what was recorded?", null);
+            f.store.commitRequestSemantics(status.claim(), RequestSemantics.STATUS_QUESTION);
+            f.run(f.store.find(status.id()).orElseThrow());
+            assertTrue(f.client.lastTools.isEmpty());
+            assertEquals(RequestSemantics.STATUS_QUESTION, f.store.find(status.id()).orElseThrow().requestSemantics());
+            var old = f.claim("old persisted user", ExecutionMode.REACT);
+            new ExecutionFinalizer(f.store).ensureStarted(old, f.session);
+            f.agent.getParentConversationContext().appendExecutionMessage(old.id(), LlmClient.Message.user(old.submittedInput()), old.submittedInput(), "agent", "agent");
+            assertThrows(RecoveryPreparationDeferredException.class, () -> f.run(old));
+            assertEquals(0, f.client.classifications);
+        }
+    }
     @Test void statusAndNewRequestUseRealFreshContextAndLeaveOriginalHeld() throws Exception {
         try (var f = new Fixture()) {
             var old = f.store.enqueue(temp, f.session.sessionId(), "original work", null);
@@ -115,10 +180,17 @@ class ContinuationExecutionDispatcherTest {
         public void close() throws Exception { lease.close();runtime.mutationGate().unlock();runtime.close();owner.close();sessions.close();store.close();tools.closeWorkspaceResources();System.clearProperty("codeagent.snapshot.enabled"); }
     }
     static class Client implements LlmClient {
-        String response; int answers; List<Message> answer=List.of(); List<Tool> lastTools=List.of();
+        String response; int answers, classifications, modeRoutes; List<Message> answer=List.of(); List<Tool> lastTools=List.of();
         public String getProviderName(){return "test";} public String getModelName(){return "test";}
         public ChatResponse chat(List<Message> m,List<Tool> t){
-            if(m.get(0).content().contains("continuation_intent") || m.get(0).content().contains("NEW_TURN")) return new ChatResponse("assistant",response,null,null,1,1,0);
+            if(m.get(0).content().contains("continuation_intent") || m.get(0).content().contains("NEW_TURN")) {
+                classifications++;
+                return new ChatResponse("assistant",response,null,null,1,1,0);
+            }
+            if (m.get(0).content().contains("执行模式路由器")) {
+                modeRoutes++;
+                return new ChatResponse("assistant", "{\"mode\":\"react\"}", null, null, 1, 1, 0);
+            }
             answers++;answer=List.copyOf(m);lastTools=t==null?List.of():List.copyOf(t);
             return new ChatResponse("assistant","waiting work described",null,null,1,1,0);
         }

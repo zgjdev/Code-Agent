@@ -40,6 +40,17 @@ public final class ContinuationExecutionDispatcher {
         var boundary=new RecoveryContextProvider.ReadBoundary(runtime.identity(),context.sessionId(),execution.claim());
         var finalizer=new ExecutionFinalizer(store);
         finalizer.ensureStarted(execution,context.session());
+        var currentExecution = store.find(execution.id()).orElseThrow();
+        var envelope = context.session().projection().executionEnvelopes().get(execution.id());
+        boolean freshInput = envelope != null && envelope.userSequence() == null && envelope.assistantSequence() == null;
+        boolean ordinaryContract = freshInput && (currentExecution.requestSemantics() == RequestSemantics.NEW_REQUEST
+                || currentExecution.requestSemantics() == null);
+        if (currentExecution.continuationRequestId() == null && ordinaryContract
+                && !"/plan resume".equals(currentExecution.submittedInput())
+                && !store.hasAwaitingTask(runtime.identity().canonicalRoot(), context.sessionId())) {
+            currentExecution = store.commitRequestSemantics(execution.claim(), RequestSemantics.NEW_REQUEST);
+            return runOrdinary(currentExecution, token, context);
+        }
         var snapshot=provider.readRecoveryContext(boundary);
         var agent=context.agent();
         var budget=budget(agent);
@@ -90,16 +101,34 @@ public final class ContinuationExecutionDispatcher {
                     return result(agent.runExecution(resolved,policy,recovery));
                 },
                 (e,resolved,t)->{
-                    var plan=Objects.requireNonNull(planFactory.get());
-                    plan.setRuntimeExecutionId(e.id());
-                    plan.setTaskRecoveryIdentity(new TaskExecutionIdentity(e.id(),e.sessionId(),e.claim().ownerId(),e.attempt()));
-                    plan.setTaskRecoveryStore(attempts);
-                    plan.setTaskTranscriptReader(new TaskTranscriptReader(sessions,attempts));
+                    var plan = preparePlan(e);
                     plan.setRecoveryContextSupplier(()->continued==null?currentContext(provider.readRecoveryContext(boundary),context,e)
                             :admission.continuationInvocation(scope,provider.readRecoveryContext(boundary)).recoveryContext());
                     return result(continued==null?plan.runOrResumeExecution(resolved,policy):plan.runContinuation(continued));
                 });
         return coordinator.run(store.find(execution.id()).orElseThrow(),token);
+    }
+
+    private TopLevelExecutionResult runOrdinary(RuntimeExecution execution, CancellationToken token,
+            SessionExecutionContext context) throws Exception {
+        var agent = context.agent();
+        var coordinator = new TopLevelExecutionCoordinator(store, resolver,
+                (input, history) -> new ExecutionModeRouter(client, new ModeRouterPromptBuilder(prompts)).route(input, history),
+                id -> agent.getParentConversationContext().conversationNodes(),
+                (mode, input, action) -> agent.getToolRegistry().getSnapshotService()
+                        .runTurnAndDrain(mode.name().toLowerCase(java.util.Locale.ROOT), input, action::run),
+                (e, resolved, t) -> result(agent.runExecution(resolved, e.submittedInput())),
+                (e, resolved, t) -> result(preparePlan(e).runOrResumeExecution(resolved, e.submittedInput())));
+        return coordinator.run(execution, token);
+    }
+
+    private PlanExecuteAgent preparePlan(RuntimeExecution execution) {
+        var plan = Objects.requireNonNull(planFactory.get());
+        plan.setRuntimeExecutionId(execution.id());
+        plan.setTaskRecoveryIdentity(new TaskExecutionIdentity(execution.id(), execution.sessionId(), execution.claim().ownerId(), execution.attempt()));
+        plan.setTaskRecoveryStore(attempts);
+        plan.setTaskTranscriptReader(new TaskTranscriptReader(sessions, attempts));
+        return plan;
     }
 
     private RecoveryContextBudget budget(Agent agent) {

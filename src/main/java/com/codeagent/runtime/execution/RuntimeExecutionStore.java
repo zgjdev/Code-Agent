@@ -245,6 +245,20 @@ public final class RuntimeExecutionStore implements AutoCloseable {
         return List.copyOf(result);
     }
 
+    public synchronized boolean hasAwaitingTask(Path workspace, String sessionId) throws SQLException {
+        requireText(sessionId, "sessionId");
+        WorkspaceKey key = resolveWorkspace(workspace).key();
+        try (var query = connection.prepareStatement("""
+                SELECT 1 FROM runtime_executions WHERE workspace_key=? AND session_id=?
+                  AND legacy_unbound=0 AND status='enqueued' AND dispatch_state='awaiting_input'
+                  AND request_kind='task' LIMIT 1
+                """)) {
+            query.setString(1, key.value());
+            query.setString(2, sessionId);
+            try (var rows = query.executeQuery()) { return rows.next(); }
+        }
+    }
+
     public synchronized boolean hasActiveOrReadyExecution(String sessionId) throws SQLException {
         requireText(sessionId, "sessionId");
         try (var statement = connection.prepareStatement("""

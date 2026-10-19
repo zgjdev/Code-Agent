@@ -21,6 +21,7 @@ public final class WorkspaceRuntime implements AutoCloseable {
     private final AutoCloseable resources;
     private Runnable afterExecution = () -> { };
     private Runnable beforeClose = () -> { };
+    private volatile ContinuationCapability continuationCapability;
 
     public WorkspaceRuntime(WorkspaceIdentity identity,
             SessionExecutionContextRegistry<SessionExecutionContext> contexts,
@@ -42,6 +43,16 @@ public final class WorkspaceRuntime implements AutoCloseable {
     public ReentrantLock mutationGate() { return mutationGate; }
     public Set<String> sharedResourceKeys() { return sharedResources; }
     public boolean claimAllowed() { return claimAllowed.getAsBoolean(); }
+    synchronized void bindContinuationCapability(ContinuationCapability capability) {
+        if (continuationCapability != null) throw new IllegalStateException("Continuation capability already bound");
+        continuationCapability = Objects.requireNonNull(capability);
+    }
+    public ContinuationCapability continuationCapability() {
+        var value = continuationCapability;
+        if (value == null) throw new IllegalStateException("Runtime has no Host continuation capability");
+        return value;
+    }
+    void stopContinuationAdmission() { if (continuationCapability != null) continuationCapability.disable(); }
     public void setAfterExecution(Runnable callback) { afterExecution = Objects.requireNonNull(callback); }
     public void setBeforeClose(Runnable callback) { beforeClose = Objects.requireNonNull(callback); }
     void afterExecution() { afterExecution.run(); }
@@ -50,14 +61,22 @@ public final class WorkspaceRuntime implements AutoCloseable {
     public TopLevelExecutionResult run(RuntimeExecution execution, CancellationToken token,
                                        SessionExecutionContext context) throws Exception {
         context.activateSharedBindings();
-        return runner.run(execution, token, context);
+        try { return runner.run(execution, token, context); }
+        catch (RecoveryPreparationDeferredException deferred) {
+            // The runner's typed contract includes physical writer/child drain. Preserve the
+            // Session envelope and retain all ownership until the scheduler's finally exits.
+            var capability = continuationCapability();
+            capability.deferBeforeEffects(capability.requireRunningScope(execution.claim(), context), deferred);
+            throw deferred;
+        }
     }
     public void reconcile(RuntimeExecutionStore store, WorkspaceOwnerLease owner) throws Exception {
         mutationGate.lockInterruptibly();
         try {
             for (RuntimeExecution execution : store.workspaceExecutions(identity.key())) {
-                // Queued requests without a start boundary require no writable context during startup.
-                if (execution.status() == ExecutionStatus.ENQUEUED) continue;
+                // Never-started queued requests need no writable context. A prior attempt can already
+                // have a durable END even if shutdown moved its database row back to enqueued.
+                if (execution.status() == ExecutionStatus.ENQUEUED && execution.attempt() == 0) continue;
                 try (var lease = contexts.acquire(execution.sessionId())) {
                     SessionStore.SessionHandle session = lease.context().session();
                     if (execution.terminal()) {
@@ -66,16 +85,11 @@ public final class WorkspaceRuntime implements AutoCloseable {
                     }
                     var envelope = session.projection().executionEnvelopes().get(execution.id());
                     if (envelope == null || !envelope.ended()) continue;
-                    RuntimeExecution recovered = store.claimForReconciliation(owner, execution.id());
-                    if (recovered.selectedMode() == null) {
-                        recovered = store.commitRoutingDecision(recovered.claim(),
-                                com.codeagent.agent.ExecutionMode.valueOf(envelope.selectedMode().toUpperCase(java.util.Locale.ROOT)),
-                                recovered.explicitMode() == null ? com.codeagent.agent.RoutingSource.AUTO_FALLBACK
-                                        : com.codeagent.agent.RoutingSource.EXPLICIT);
-                    }
-                    // The durable end envelope is authoritative in the cross-store crash window.
-                    store.completeReconciliation(owner, recovered.claim(), ExecutionOutcome.fromDatabase(envelope.outcome()),
-                            recovered.result(), recovered.error());
+                    if (!session.sessionId().equals(execution.sessionId()))
+                        throw new IllegalStateException("Recovery Session mismatch");
+                    // Validate the whole durable END and fence the old claim in one transaction;
+                    // another Session can still own the workspace's stale running slot here.
+                    store.completeReconciliation(owner, execution, envelope);
                 }
             }
         } finally { mutationGate.unlock(); }

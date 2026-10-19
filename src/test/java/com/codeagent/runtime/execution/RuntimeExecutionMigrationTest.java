@@ -98,7 +98,7 @@ class RuntimeExecutionMigrationTest {
         insertV1Execution(database, "exec_1", workspace.toString(), "session-a", 0, "enqueued");
 
         try (RuntimeExecutionStore ignored = new RuntimeExecutionStore(database)) {
-            // First open upgrades v1 to v2.
+            // First open upgrades v1 to v3.
         }
         try (RuntimeExecutionStore ignored = new RuntimeExecutionStore(database);
              var connection = DriverManager.getConnection("jdbc:sqlite:" + database);
@@ -121,9 +121,14 @@ class RuntimeExecutionMigrationTest {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + database);
              var statement = connection.createStatement();
              var rows = statement.executeQuery("PRAGMA foreign_key_list(runtime_executions)")) {
-            assertTrue(rows.next());
-            assertEquals("runtime_workspaces", rows.getString("table"));
-            assertEquals("workspace_key", rows.getString("from"));
+            boolean foundWorkspace = false;
+            while (rows.next()) {
+                if ("workspace_key".equals(rows.getString("from"))) {
+                    assertEquals("runtime_workspaces", rows.getString("table"));
+                    foundWorkspace = true;
+                }
+            }
+            assertTrue(foundWorkspace);
         }
     }
 

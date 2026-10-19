@@ -25,6 +25,21 @@ class ExecutionModeRouterTest {
     @TempDir
     Path tempDir;
 
+    @Test void optionalRecoveryContextReachesActualToolFreeRouterAlongsideHistory() throws Exception {
+        var context=new com.codeagent.model.recovery.FormattedRecoveryContext("{\"source\":\"runtime_recovery_context\",\"authorization\":\"none\"}","a".repeat(64),12,
+                0,0,0,0,0,0,com.codeagent.model.recovery.RecoveryCompleteness.COMPLETE);
+        var client=new StubClient(response("{\"mode\":\"react\"}"));
+        var history=new com.codeagent.history.SessionProjection.ConversationNode(1,"turn",null,"react",LlmClient.Message.assistant("prior progress"),
+                com.codeagent.history.SessionProjection.ConversationKind.ASSISTANT);
+        assertEquals(ExecutionMode.REACT,router(client).route("current input",List.of(history),context).mode());
+        var payload=new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.messages.get(1).content());
+        assertEquals("current input",payload.path("submittedInput").asText());
+        assertEquals("runtime_recovery_context",payload.path("runtimeRecoveryContext").path("source").asText());
+        assertEquals(true,payload.path("conversationContext").asText().contains("prior progress"));
+        assertFalse(payload.path("conversationContext").asText().contains("runtime_recovery_context"));
+        assertNull(client.tools);assertEquals(1,client.calls);
+    }
+
     @Test
     void acceptsStrictReactAndPlanResponsesWithoutTools() {
         StubClient reactClient = new StubClient(response("{\"mode\":\"react\"}"));
@@ -138,6 +153,7 @@ class ExecutionModeRouterTest {
     private static class StubClient implements LlmClient {
         private final ResponseSupplier supplier;
         private List<Tool> tools;
+        private List<Message> messages;
         private int calls;
 
         private StubClient(LlmClient.ChatResponse response) {
@@ -156,6 +172,7 @@ class ExecutionModeRouterTest {
         public ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException {
             calls++;
             this.tools = tools;
+            this.messages = List.copyOf(messages);
             return supplier.get();
         }
 

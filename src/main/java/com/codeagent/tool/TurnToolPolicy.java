@@ -317,6 +317,11 @@ public final class TurnToolPolicy {
     public List<ToolExecutionResult> execute(ToolRegistry registry,
                                              List<ToolInvocation> invocations,
                                              ToolExposure exposure) {
+        return execute(registry,invocations,exposure,null,null);
+    }
+
+    public List<ToolExecutionResult> execute(ToolRegistry registry,List<ToolInvocation> invocations,
+            ToolExposure exposure,com.codeagent.model.recovery.TaskObservationContext context,TaskToolObserver observer) {
         Objects.requireNonNull(registry, "registry");
         if (invocations == null || invocations.isEmpty()) {
             return List.of();
@@ -330,7 +335,9 @@ public final class TurnToolPolicy {
             ToolInvocation invocation = invocations.get(i);
             Decision decision = authorize(invocation, effectiveExposure);
             if (decision.allowed()) {
-                allowed.add(invocation);
+                allowed.add(context==null?invocation:new ToolInvocation(invocation.id(),invocation.name(),invocation.argumentsJson(),
+                        new TaskToolObservation(new com.codeagent.model.recovery.TaskObservationContext(
+                                context.binding(),context.batchId(),i),Objects.requireNonNull(observer))));
                 allowedIndexes.add(i);
             } else {
                 merged.set(i, blockedResult(invocation, decision));

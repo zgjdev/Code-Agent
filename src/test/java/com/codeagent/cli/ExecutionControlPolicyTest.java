@@ -7,6 +7,11 @@ import java.util.Arrays;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ExecutionControlPolicyTest {
+    @Test void resumeBrowsingIsAllowedWhileBusyAndAttachUsesControllerGate() {
+        assertTrue(ExecutionControlPolicy.allowedWhileBusy(CliCommandParser.CommandType.RESUME_SESSION));
+        assertEquals(ExecutionControlPolicy.Category.READ_ONLY,
+                ExecutionControlPolicy.classify(CliCommandParser.CommandType.RESUME_SESSION));
+    }
 
     @Test
     void pendingInteractionBlocksNewTasksButAllowsControl() {

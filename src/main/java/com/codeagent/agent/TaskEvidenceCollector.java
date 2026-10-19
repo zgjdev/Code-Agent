@@ -54,7 +54,8 @@ public final class TaskEvidenceCollector {
             if (invocation == null || result == null) {
                 continue;
             }
-            EvidenceStatus status = result.successful() ? EvidenceStatus.PASSED : EvidenceStatus.FAILED;
+            EvidenceStatus status = result.observationUnknown() ? EvidenceStatus.MISSING
+                    : result.successful() ? EvidenceStatus.PASSED : EvidenceStatus.FAILED;
             if ("execute_command".equals(invocation.name())) {
                 String command = result.executedCommand() != null ? result.executedCommand()
                         : jsonText(invocation.argumentsJson(), "command");

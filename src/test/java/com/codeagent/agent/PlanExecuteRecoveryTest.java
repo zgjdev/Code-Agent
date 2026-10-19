@@ -37,6 +37,207 @@ class PlanExecuteRecoveryTest {
     Path tempDir;
 
     @Test
+    void boundResumeImportsOnlyInterruptedTaskAndAppliesCurrentConstraintToPendingSuccessor() throws Exception {
+        var registry=new ToolRegistry(); registry.setProjectPath(tempDir.toString());
+        var client=new RecordingClient();
+        try(var sessions=SessionStore.open(tempDir.resolve("bound-history"));
+            var parent=sessions.create(new SessionStore.SessionCreateRequest(tempDir,"test","test",null,"plan","agent"))) {
+            var plans=new PlanStateStore(tempDir.resolve("bound.db"));
+            parent.append(new SessionEventDraft(SessionEvent.Types.EXECUTION_START,"runtime","execution-coordinator","runtime-execution",false,
+                    SessionEvent.SurfaceOperation.none(),JSON.createObjectNode().put("executionId","original-execution").put("ordinal",1)));
+            var attempts=new com.codeagent.plan.TaskRecoveryStore(plans.dbPath());
+            var plan=new ExecutionPlan("bound-plan","original goal");
+            var done=new Task("done","already completed",Task.TaskType.ANALYSIS); done.markCompleted("previous result");
+            var interrupted=new Task("interrupted","inspect first",Task.TaskType.ANALYSIS); interrupted.markStarted();
+            var pending=new Task("pending","inspect second",Task.TaskType.ANALYSIS); pending.addDependency("interrupted");
+            plan.addTask(done);plan.addTask(interrupted);plan.addTask(pending);assertTrue(plan.computeExecutionOrder());plan.markStarted();
+            plans.savePlan(tempDir,parent.sessionId(),"original-execution","old authorization",plan);
+            String oldChildId;
+            com.codeagent.model.recovery.TaskAttemptBinding source;
+            try(var child=parent.createChild("plan","task:interrupted")) {
+                oldChildId=child.sessionId();
+                source=attempts.bindAttempt(tempDir,parent.sessionId(),"original-execution",plan.getId(),"interrupted",child.sessionId(),null,"old-owner",1);
+                var p=JSON.createObjectNode();p.set("message",JSON.valueToTree(LlmClient.Message.assistant("historical observation about first task",
+                        List.of(new LlmClient.ToolCall("old-read",new LlmClient.ToolCall.Function("list_dir","{\"path\":\".\"}"))))));
+                child.append(new SessionEventDraft(SessionEvent.Types.ASSISTANT_MESSAGE,"plan","task:interrupted","llm_response",false,SessionEvent.SurfaceOperation.append(),p));
+                var observed=JSON.createObjectNode().put("invocationId","old-read");observed.set("message",JSON.valueToTree(LlmClient.Message.tool("old-read","historical directory observation")));
+                child.append(new SessionEventDraft(SessionEvent.Types.TOOL_RESULT,"plan","task:interrupted","tool_execution",false,SessionEvent.SurfaceOperation.append(),observed));
+            }
+            var agent=new PlanExecuteAgent(client,registry,new FailingIfCalledPlanner(client),null,
+                    (goal,p)->PlanExecuteAgent.PlanReviewDecision.execute(),new PrintStream(new ByteArrayOutputStream()),PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(plans);agent.setParentConversationContext(parentContext(parent));
+            agent.setTaskRecoveryStore(attempts);agent.setTaskTranscriptReader(new com.codeagent.history.TaskTranscriptReader(sessions,attempts));
+            agent.setTaskRecoveryIdentity(new com.codeagent.model.recovery.TaskExecutionIdentity("original-execution",parent.sessionId(),"current-owner",2));
+            var result=agent.resumeBoundPlanExecution(plan.getId(),"original-execution","continue; ONLY_INSPECT_CURRENT",null);
+            assertEquals(com.codeagent.runtime.execution.ExecutionOutcome.SUCCEEDED,result.outcome(),result.displayResult());
+            assertEquals(2,client.snapshots.size());
+            assertTrue(joinedPrompt(client.snapshots.get(0)).contains("historical observation about first task"));
+            assertTrue(client.snapshots.get(0).stream().anyMatch(m->"tool".equals(m.role())&&"old-read".equals(m.toolCallId())));
+            assertTrue(client.snapshots.stream().allMatch(m->joinedPrompt(m).contains("ONLY_INSPECT_CURRENT")));
+            assertFalse(joinedPrompt(client.snapshots.get(1)).contains("historical observation about first task"));
+            var bindings=attempts.findTaskAttempts(tempDir,parent.sessionId(),"original-execution",plan.getId(),"interrupted");
+            assertEquals(2,bindings.size());assertEquals(source.attemptId(),bindings.get(1).sourceAttemptId());
+            assertTrue(sessions.readSnapshot(bindings.get(1).childSessionId(),tempDir,parent.sessionId(),-1).events().stream().anyMatch(e->"recovery_import".equals(e.source())));
+            assertEquals(2,sessions.readSnapshot(oldChildId,tempDir,parent.sessionId(),-1).lastSequence());
+        } finally {registry.closeWorkspaceResources();}
+    }
+
+    private Planner fourTaskPlanner(LlmClient client, AtomicInteger replans) {
+        return new Planner(client, new PrintStream(new ByteArrayOutputStream())) {
+            @Override public ExecutionPlan createPlan(String goal) {
+                var plan = new ExecutionPlan("parallel-plan", goal);
+                for (int i = 0; i < 4; i++) plan.addTask(new Task("task_" + i, "read " + i, Task.TaskType.FILE_READ));
+                assertTrue(plan.computeExecutionOrder());
+                return plan;
+            }
+            @Override public ExecutionPlan replan(ExecutionPlan failed, String reason, String context) {
+                replans.incrementAndGet();
+                throw new AssertionError("recovery initialization must not trigger replan");
+            }
+        };
+    }
+
+    @Test
+    void defaultRecoveryStoreBindsFourRealParallelTasksBeforeTheirFirstChats() throws Exception {
+        var registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (var sessions = SessionStore.open(tempDir.resolve("parallel-history"));
+             var parent = sessions.create(new SessionStore.SessionCreateRequest(tempDir, "test", "model", null, "plan", "agent"))) {
+            var plans = new PlanStateStore(tempDir.resolve("parallel.db"));
+            var chats = new AtomicInteger();
+            var replans = new AtomicInteger();
+            var allFirstChats = new java.util.concurrent.CyclicBarrier(4);
+            var client = new GLMClient("synthetic") {
+                @Override public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+                    try {
+                        allFirstChats.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                        var store = com.codeagent.plan.TaskRecoveryStore.openReadOnly(plans.dbPath());
+                        for (int i = 0; i < 4; i++) {
+                            var bindings = store.findTaskAttempts(tempDir, parent.sessionId(), "parallel-execution", "parallel-plan", "task_" + i);
+                            assertEquals(1, bindings.size(), "all actual child bindings precede any first-chat response");
+                            assertTrue(sessions.readSnapshot(bindings.get(0).childSessionId(), tempDir, parent.sessionId(), -1).lastSequence() >= 2);
+                        }
+                    } catch (Exception error) { throw new IOException("parallel binding verification failed", error); }
+                    chats.incrementAndGet();
+                    return new ChatResponse("assistant", "completed", null, 1, 1);
+                }
+            };
+            var agent = new PlanExecuteAgent(client, registry, fourTaskPlanner(client, replans), null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(), new PrintStream(new ByteArrayOutputStream()), PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(plans);
+            agent.setParentConversationContext(parentContext(parent));
+            agent.setTaskRecoveryIdentity(new com.codeagent.model.recovery.TaskExecutionIdentity("parallel-execution", parent.sessionId(), "owner", 1));
+            String result = agent.run("read independently", "read independently");
+            assertTrue(result.contains("计划执行完成"), result);
+            assertEquals(4, chats.get());
+            assertEquals(0, replans.get());
+            assertTrue(plans.readRecoveryState(tempDir, parent.sessionId()).get(0).tasks().stream().allMatch(t -> "COMPLETED".equals(t.recordedStatus())));
+        }
+    }
+
+    @Test
+    void parallelPreparationFailuresDrainAndInterruptEveryStartedTask() throws Exception {
+        var registry = new ToolRegistry(); registry.setProjectPath(tempDir.toString());
+        var client = new RecordingClient();
+        var replans = new AtomicInteger();
+        try (var sessions = SessionStore.open(tempDir.resolve("parallel-failure-history"));
+             var parent = sessions.create(new SessionStore.SessionCreateRequest(tempDir, "test", "model", null, "plan", "agent"))) {
+            var plans = new PlanStateStore(tempDir.resolve("parallel-failure.db"));
+            var allBindings = new java.util.concurrent.CyclicBarrier(4);
+            var finished = new AtomicInteger();
+            var attempts = new com.codeagent.plan.TaskRecoveryStore(plans.dbPath()) {
+                @Override public com.codeagent.model.recovery.TaskAttemptBinding bindAttempt(Path workspace, String session, String execution,
+                        String plan, String task, String child, String source, String owner, int attempt) throws java.sql.SQLException {
+                    try { allBindings.await(10, java.util.concurrent.TimeUnit.SECONDS); }
+                    catch (Exception error) { throw new java.sql.SQLException("fixture barrier failed", error); }
+                    finally { finished.incrementAndGet(); }
+                    throw new java.sql.SQLException("synthetic preparation failure");
+                }
+            };
+            var agent = new PlanExecuteAgent(client, registry, fourTaskPlanner(client, replans), null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(), new PrintStream(new ByteArrayOutputStream()), PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(plans); agent.setParentConversationContext(parentContext(parent)); agent.setTaskRecoveryStore(attempts);
+            agent.setTaskRecoveryIdentity(new com.codeagent.model.recovery.TaskExecutionIdentity("parallel-failure-execution", parent.sessionId(), "owner", 1));
+            assertThrows(TaskRecoveryPreparationException.class, () -> agent.run("read", "read"));
+            assertEquals(4, finished.get(), "all workers physically drained before defer");
+            assertEquals(0, client.snapshots.size());
+            assertEquals(0, replans.get());
+            var snapshot = plans.readRecoveryState(tempDir, parent.sessionId()).get(0);
+            assertEquals("RUNNING", snapshot.recordedStatus());
+            assertTrue(snapshot.tasks().stream().allMatch(t -> "INTERRUPTED".equals(t.recordedStatus())), "no orphan RUNNING task after preparation-only batch failure");
+        }
+    }
+
+    @Test
+    void exactAttemptIsDurableBeforeFirstTaskChatAndRealChildGroupsAreReadable() throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (SessionStore sessions = SessionStore.open(tempDir.resolve("history-binding"));
+             var session = sessions.create(new SessionStore.SessionCreateRequest(
+                     tempDir,"glm","test",null,"plan","agent"))) {
+            var plans = new PlanStateStore(tempDir.resolve("binding-plans.db"));
+            var attempts = new com.codeagent.plan.TaskRecoveryStore(plans.dbPath());
+            var chats = new AtomicInteger();
+            var client = new GLMClient("synthetic") {
+                @Override public ChatResponse chat(List<Message> messages,List<Tool> tools,StreamListener listener) throws IOException {
+                    try {
+                        var bound=attempts.findTaskAttempts(tempDir,session.sessionId(),"exec-binding","plan-new","task_1");
+                        assertEquals(1,bound.size(),"child binding must exist before chat");
+                        var snapshot=sessions.readSnapshot(bound.get(0).childSessionId(),tempDir,session.sessionId(),-1);
+                        assertTrue(snapshot.lastSequence()>=2,"current system/input persisted after binding");
+                    } catch (java.sql.SQLException e) { throw new IOException("test",e); }
+                    if(chats.incrementAndGet()==1){
+                        return new ChatResponse("assistant","checking",List.of(
+                                new ToolCall("read-call",new ToolCall.Function("list_dir","{\"path\":\".\"}"))),1,1);
+                    }
+                    return new ChatResponse("assistant","done",null,1,1);
+                }
+            };
+            var agent = new PlanExecuteAgent(client,registry,new SingleTaskPlanner(client),null,
+                    (goal,plan)->PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()),PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(plans);agent.setParentConversationContext(parentContext(session));
+            agent.setTaskRecoveryIdentity(new com.codeagent.model.recovery.TaskExecutionIdentity(
+                    "exec-binding",session.sessionId(),"owner",3));
+            agent.setTaskRecoveryStore(attempts);
+            agent.run("请读取当前目录","请读取当前目录");
+            assertEquals(2,chats.get());
+            var binding=attempts.findTaskAttempts(tempDir,session.sessionId(),"exec-binding","plan-new","task_1").get(0);
+            var transcript=new com.codeagent.history.TaskTranscriptReader(sessions,attempts).read(binding,-1);
+            assertTrue(transcript.groups().stream().anyMatch(g->g.messages().size()==2
+                    &&"read-call".equals(g.messages().get(1).toolCallId())));
+            assertEquals(1,attempts.readCheckpoint(binding).facts().size());
+            assertEquals(com.codeagent.model.recovery.RecoveryFact.VerificationClass.HISTORICAL,
+                    attempts.readCheckpoint(binding).facts().get(0).verificationClass());
+        }
+    }
+
+    @Test
+    void bindingFailurePreventsFirstTaskModelAndTool() throws Exception {
+        var client = new RecordingClient();var registry = new ToolRegistry();registry.setProjectPath(tempDir.toString());
+        try(var sessions=SessionStore.open(tempDir.resolve("history-binding-fail"));
+            var session=sessions.create(new SessionStore.SessionCreateRequest(tempDir,"glm","test",null,"plan","agent"))) {
+            var plans=new PlanStateStore(tempDir.resolve("binding-fail.db"));
+            var failing=new com.codeagent.plan.TaskRecoveryStore(plans.dbPath()){
+                @Override public synchronized com.codeagent.model.recovery.TaskAttemptBinding bindAttempt(
+                        Path workspace,String parent,String execution,String plan,String task,String child,String source,String owner,int attempt)throws java.sql.SQLException {
+                    throw new java.sql.SQLException("synthetic private detail");
+                }
+            };
+            var agent=new PlanExecuteAgent(client,registry,new SingleTaskPlanner(client),null,
+                    (goal,plan)->PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()),PipelineOptions.PLAN_PRESET);
+            agent.setPlanStateStore(plans);agent.setParentConversationContext(parentContext(session));agent.setTaskRecoveryStore(failing);
+            agent.setTaskRecoveryIdentity(new com.codeagent.model.recovery.TaskExecutionIdentity("exec-binding-fail",session.sessionId(),"owner",1));
+            assertThrows(com.codeagent.agent.TaskRecoveryPreparationException.class,()->agent.run("goal","goal"));
+            assertTrue(client.snapshots.isEmpty());
+            var snapshot=plans.readRecoveryState(tempDir,session.sessionId());
+            assertEquals("RUNNING",snapshot.get(0).recordedStatus());
+            assertEquals("INTERRUPTED",snapshot.get(0).tasks().get(0).recordedStatus());
+        }
+    }
+
+    @Test
     void resumesCurrentSessionPlanWithoutReplanningOrRepeatingCompletedTask() throws Exception {
         RecordingClient client = new RecordingClient();
         ToolRegistry registry = new ToolRegistry();

@@ -15,6 +15,8 @@ import com.codeagent.history.SessionEvent;
 import com.codeagent.history.SessionEventDraft;
 import com.codeagent.history.SessionProjection;
 import com.codeagent.history.SessionStore;
+import com.codeagent.model.recovery.*;
+import com.codeagent.prompt.RecoveryContextFormatter;
 import com.codeagent.lsp.LspDiagnosticReport;
 import com.codeagent.memory.AutoCompactionManager;
 import com.codeagent.memory.ExplicitMemoryHints;
@@ -78,6 +80,10 @@ public class Agent {
     private final RequestSnapshotFactory requestSnapshotFactory = new RequestSnapshotFactory();
     private long historyVersion;
     private long observedCompactionGeneration;
+    private RecoveryRequestContext recoveryRequestContext;
+    private String recoveryRequestFingerprint;
+    private String recoveryInputPrefix = "";
+    private String recoveryInputSuffix = "";
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry());
@@ -232,6 +238,28 @@ public class Agent {
     }
 
     public AgentExecutionResult runExecution(String userInput, String submittedUserInput) {
+        return runExecution(userInput, submittedUserInput, null);
+    }
+
+    /** The trusted worker must attest the snapshot under its owner/gate/Session lease before calling. */
+    public AgentExecutionResult runExecution(String userInput, String submittedUserInput, RecoveryRequestContext recovery) {
+        if (recoveryRequestContext != null) throw new IllegalStateException("Recovery execution already active");
+        recoveryRequestContext = recovery;
+        try {
+            if (recovery != null) validateRecoveryRequest(submittedUserInput);
+            return runExecutionInternal(userInput, submittedUserInput);
+        } finally {
+            recoveryRequestContext = null;
+            recoveryInputPrefix = "";
+            recoveryInputSuffix = "";
+            if (recovery != null) {
+                recoveryRequestFingerprint = null;
+                contextTokenTracker.invalidate(InvalidationReason.RECOVERY_CONTEXT_CHANGED);
+            }
+        }
+    }
+
+    private AgentExecutionResult runExecutionInternal(String userInput, String submittedUserInput) {
         synchronizeParentContext();
         memoryManager.setSubmittedUserInput(submittedUserInput);
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
@@ -241,7 +269,7 @@ public class Agent {
                 toolRegistry.hasAgentOwnedCurrentBrowserPage());
         try {
             pruneHistoricalImagePayloads();
-            storeExplicitBrowserMemoryHint(userInput);
+            if (!statusOnly()) storeExplicitBrowserMemoryHint(recoveryRequestContext == null ? userInput : submittedUserInput);
 
             // 检索相关长期记忆；结果注入本轮用户消息，不进 system prompt，
             // 否则每轮变化的检索文本会中断 provider 的自动前缀缓存。
@@ -250,14 +278,22 @@ public class Agent {
             refreshSystemPrompt();
 
             // 添加用户输入到历史（如有 skill body 注入，前置到原文之前；长期记忆追加到同一消息末尾）
-            String userMessageContent = prependSkillBodies(userInput);
-            if (!memoryContext.isEmpty()) {
-                userMessageContent = userMessageContent + "\n\n" + memoryContext;
+            String skillPrefix = prependSkillBodies("");
+            String memorySuffix = memoryContext.isEmpty() ? "" : "\n\n" + memoryContext;
+            String userMessageContent = skillPrefix + userInput + memorySuffix;
+            if (recoveryRequestContext != null) {
+                recoveryInputPrefix = skillPrefix;
+                recoveryInputSuffix = memorySuffix;
+                // A never-started original goal is background; enrich only this round's exact input.
+                userMessageContent = userInput;
             }
             if (!currentExecutionUserAlreadyPersisted()) {
-                appendTopLevelUserMessage(ImageReferenceParser.userMessage(
+                LlmClient.Message backgroundOrCurrent = recoveryRequestContext != null
+                        ? LlmClient.Message.user(userMessageContent) : ImageReferenceParser.userMessage(
                         userMessageContent,
-                        Path.of(toolRegistry.getProjectPath())), submittedUserInput, "user_input");
+                        Path.of(toolRegistry.getProjectPath()));
+                appendTopLevelUserMessage(backgroundOrCurrent,
+                        recoveryRequestContext == null ? submittedUserInput : recoveryRequestContext.originalSubmittedInput(), "user_input");
             }
         } catch (SessionPersistenceException e) {
             log.error("Failed to persist ReAct input before provider call", e);
@@ -282,16 +318,24 @@ public class Agent {
             }
             // 工具定义必须先冻结，token 预测与实际 chat() 使用同一份列表。
             injectPendingLspDiagnostics();
-            List<LlmClient.Tool> toolDefinitions = llmClient.supportsTools()
+            List<LlmClient.Tool> toolDefinitions = llmClient.supportsTools() && !statusOnly()
                     ? toolRegistry.getToolDefinitions()
-                    : null;
+                    : List.of();
             TurnToolPolicy.ToolExposure toolExposure = turnToolPolicy.expose(toolDefinitions);
+            if (recoveryRequestContext != null) {
+                // First reduce the real parent surface if it already fills the input ceiling;
+                // otherwise the required recovery provenance cannot be budgeted at all.
+                RequestSnapshot base = requestSnapshotFactory.capture(llmClient, conversationHistory, toolExposure.definitions(), historyVersion);
+                maybeCompactHistory(base, contextTokenTracker.predict(base));
+            }
+            List<LlmClient.Message> requestMessages = assembleRequest(toolExposure.definitions());
             RequestSnapshot requestSnapshot = requestSnapshotFactory.capture(
-                    llmClient, conversationHistory, toolExposure.definitions(), historyVersion);
+                    llmClient, requestMessages, toolExposure.definitions(), historyVersion);
             ContextTokenTracker.ContextPrediction prediction = contextTokenTracker.predict(requestSnapshot);
             if (maybeCompactHistory(requestSnapshot, prediction)) {
+                requestMessages = assembleRequest(toolExposure.definitions());
                 requestSnapshot = requestSnapshotFactory.capture(
-                        llmClient, conversationHistory, toolExposure.definitions(), historyVersion);
+                        llmClient, requestMessages, toolExposure.definitions(), historyVersion);
                 prediction = contextTokenTracker.predict(requestSnapshot);
             }
             AgentBudget.ExitReason exitReason = budget.check();
@@ -309,7 +353,7 @@ public class Agent {
                 streamRenderer.beginThinking();
                 // 调用 LLM
                 LlmClient.ChatResponse response = llmClient.chat(
-                        conversationHistory,
+                        requestMessages,
                         toolExposure.definitions(),
                         streamRenderer
                 );
@@ -323,6 +367,16 @@ public class Agent {
                 }
 
                 budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+
+                if (statusOnly() && response.hasToolCalls()) {
+                    String diagnostic = "状态查询不允许执行工具；请根据已有记录重新询问状态。";
+                    LlmClient.Message rejected = LlmClient.Message.assistant(diagnostic);
+                    persistCompletedResponse(requestId, rejected, llmClient.normalizeUsage(response), true);
+                    appendCommittedConversationMessage(rejected);
+                    streamRenderer.finish();
+                    pushStatus(budget, startNanos, "idle");
+                    return AgentExecutionResult.failed(diagnostic, "STATUS_TOOLS_REFUSED");
+                }
 
                 LlmClient.Message assistantMessage = LlmClient.Message.assistant(
                         response.reasoningContent(), response.content(), response.toolCalls());
@@ -463,8 +517,12 @@ public class Agent {
 
         try {
             streamRenderer.beginThinking();
+            List<LlmClient.Message> requestMessages = assembleRequest(List.of());
+            RequestSnapshot requestSnapshot = requestSnapshotFactory.capture(llmClient, requestMessages, List.of(), historyVersion);
+            String requestId = UUID.randomUUID().toString();
+            persistRequestStarted(requestId, requestSnapshot);
             LlmClient.ChatResponse response = llmClient.chat(
-                    conversationHistory,
+                    requestMessages,
                     List.of(),
                     streamRenderer);
             budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
@@ -473,11 +531,7 @@ public class Agent {
             String responseContent = response.content() == null ? "" : response.content().trim();
             String partialResult = formatPartialResult(description, responseContent);
             LlmClient.Message partialAssistant = LlmClient.Message.assistant(partialResult);
-            if (parentConversationContext.sessionHandle() != null) {
-                persistMessage(partialAssistant, SessionEvent.Types.ASSISTANT_MESSAGE,
-                        SessionEvent.SurfaceOperation.append(), null,
-                        conversationMetadata("react", "assistant", partialResult, null, null));
-            }
+            persistCompletedResponse(requestId, partialAssistant, llmClient.normalizeUsage(response), true);
             conversationHistory.add(partialAssistant);
             historyVersion++;
             conversationLedger.appendMessage(
@@ -644,6 +698,8 @@ public class Agent {
         int messageCount = 0;
         int imageCount = 0;
         for (int i = 0; i < conversationHistory.size(); i++) {
+            if (recoveryRequestContext != null && parentConversationContext.projection().activeSurface().get(i).sequence()
+                    == recoveryRequestContext.boundary().inputUserSequence()) continue;
             LlmClient.Message message = conversationHistory.get(i);
             int images = message.imagePartCount();
             if (images <= 0) {
@@ -823,12 +879,62 @@ public class Agent {
         return Math.max(0L, messageTokens + estimateToolsSchemaTokens());
     }
 
+    private boolean statusOnly() { return recoveryRequestContext != null && recoveryRequestContext.statusOnly(); }
+
+    private String resultExecutionId() {
+        if (recoveryRequestContext != null) return recoveryRequestContext.boundary().resultExecutionId();
+        var current = ExecutionInteractionContext.current();
+        return current == null ? null : current.executionId();
+    }
+
+    private void validateRecoveryRequest(String submittedInput) {
+        var session = parentConversationContext.sessionHandle();
+        var snapshot = recoveryRequestContext.snapshot();
+        var boundary = recoveryRequestContext.boundary();
+        if (session == null || !session.sessionId().equals(snapshot.parentSessionId())
+                || snapshot.parentLastSequence() < boundary.inputUserSequence()
+                || snapshot.parentLastSequence() > session.projection().lastAppliedSequence())
+            throw new IllegalArgumentException("Recovery Session boundary mismatch");
+        var user = session.readAll().stream().filter(e -> e.sequence() == boundary.inputUserSequence()).findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("Recovery input source missing"));
+        if (!Objects.equals(submittedInput, user.payload().path("conversation").path("content").asText()))
+            throw new IllegalArgumentException("Recovery authority must be the durable current user input");
+        var resultEnvelope = session.projection().executionEnvelopes().get(boundary.resultExecutionId());
+        if (resultEnvelope != null && resultEnvelope.userSequence() == null
+                && (recoveryRequestContext.originalSubmittedInput() == null || recoveryRequestContext.originalSubmittedInput().isBlank()))
+            throw new IllegalArgumentException("Durable original input required before first recovery execution user");
+        // Also validates E1/E2 envelopes and source before memory, model or tool effects.
+        new RecoveryRequestAugmenter().augmentRequest(session.projection().messages(),
+                new FormattedRecoveryContext("{}", snapshot.stateFingerprint(), 1,0,0,0,0,0,0,RecoveryCompleteness.METADATA_ONLY), boundary, session);
+    }
+
+    private List<LlmClient.Message> assembleRequest(List<LlmClient.Tool> tools) {
+        if (recoveryRequestContext == null) return List.copyOf(conversationHistory);
+        var snapshot = recoveryRequestContext.snapshot();
+        var boundary = recoveryRequestContext.boundary();
+        var augmenter = new RecoveryRequestAugmenter(recoveryInputPrefix, recoveryInputSuffix);
+        var sendBase = augmenter.requestBaseMessages(conversationHistory, boundary, parentConversationContext.sessionHandle());
+        var baseSnapshot = requestSnapshotFactory.capture(llmClient, sendBase, tools, historyVersion);
+        // Ordinary providers have no configured output cap. Reuse the existing context policy's
+        // input ceiling, which already reserves summary output and compaction buffer, conservatively.
+        int window = Math.max(0, llmClient.maxContextWindow());
+        int inputCeiling = Math.min(window, memoryManager.getContextProfile().compressionTriggerTokens());
+        var budget = new RecoveryContextBudget(Math.max(0L, inputCeiling - baseSnapshot.estimatedRequestTokens()), 4096, window - inputCeiling);
+        var formatted = new RecoveryContextFormatter().formatForParent(snapshot, budget, boundary.inputExecutionId());
+        String fingerprint = boundary + "\u0000" + formatted.stateFingerprint() + "\u0000" + formatted.content();
+        if (!Objects.equals(fingerprint, recoveryRequestFingerprint)) {
+            recoveryRequestFingerprint = fingerprint;
+            contextTokenTracker.invalidate(InvalidationReason.RECOVERY_CONTEXT_CHANGED);
+        }
+        return augmenter.augmentRequest(conversationHistory, formatted, boundary, parentConversationContext.sessionHandle());
+    }
+
     private long projectedContextTokens() {
         try {
             List<LlmClient.Tool> tools = llmClient != null && llmClient.supportsTools()
                     ? toolRegistry.getToolDefinitions() : null;
             RequestSnapshot snapshot = requestSnapshotFactory.capture(
-                    llmClient, conversationHistory, tools, historyVersion);
+                    llmClient, assembleRequest(tools), tools, historyVersion);
             return contextTokenTracker.predict(snapshot).effectiveTokens();
         } catch (Exception e) {
             return estimateCurrentContextTokens();
@@ -837,10 +943,10 @@ public class Agent {
 
     /** Returns the same context prediction used by the next provider request. */
     public ContextTokenTracker.ContextPrediction currentContextPrediction() {
-        List<LlmClient.Tool> tools = llmClient != null && llmClient.supportsTools()
-                ? toolRegistry.getToolDefinitions() : null;
+        List<LlmClient.Tool> tools = llmClient != null && llmClient.supportsTools() && !statusOnly()
+                ? toolRegistry.getToolDefinitions() : List.of();
         RequestSnapshot snapshot = requestSnapshotFactory.capture(
-                llmClient, conversationHistory, tools, historyVersion);
+                llmClient, assembleRequest(tools), tools, historyVersion);
         return contextTokenTracker.predict(snapshot);
     }
 
@@ -1247,7 +1353,7 @@ public class Agent {
         persistEvent(type, operation, payload);
     }
 
-    private static ObjectNode conversationMetadata(String mode, String role, String content,
+    private ObjectNode conversationMetadata(String mode, String role, String content,
                                                    String turnId, String planId) {
         if (content == null || content.isBlank()) {
             return null;
@@ -1262,21 +1368,21 @@ public class Agent {
         if (planId != null && !planId.isBlank()) {
             conversation.put("planId", planId);
         }
-        ExecutionInteractionContext.Identity execution = ExecutionInteractionContext.current();
-        if (execution != null) {
-            conversation.put("executionId", execution.executionId());
+        String executionId = resultExecutionId();
+        if (executionId != null) {
+            conversation.put("executionId", executionId);
         }
         return conversation;
     }
 
     private boolean currentExecutionUserAlreadyPersisted() {
-        ExecutionInteractionContext.Identity execution = ExecutionInteractionContext.current();
+        String executionId = resultExecutionId();
         SessionProjection projection = parentConversationContext.projection();
-        if (execution == null || projection == null) {
+        if (executionId == null || projection == null) {
             return false;
         }
         SessionProjection.ExecutionEnvelope envelope =
-                projection.executionEnvelopes().get(execution.executionId());
+                projection.executionEnvelopes().get(executionId);
         return envelope != null && envelope.userSequence() != null;
     }
 
@@ -1299,6 +1405,12 @@ public class Agent {
             return;
         }
         try {
+            if (resultExecutionId() != null && switch (type) {
+                case SessionEvent.Types.REQUEST_STARTED, SessionEvent.Types.REQUEST_SNAPSHOT,
+                        SessionEvent.Types.REQUEST_FINISHED, SessionEvent.Types.REQUEST_FAILED,
+                        SessionEvent.Types.PROVIDER_USAGE -> true;
+                default -> false;
+            }) payload.put("executionId", resultExecutionId());
             parentConversationContext.sessionHandle().append(new SessionEventDraft(type, "react", "agent", "agent",
                     false, operation, payload));
         } catch (IOException | IllegalStateException e) {

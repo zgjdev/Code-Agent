@@ -101,7 +101,7 @@ final class CliCommandParser {
         }
 
         if (trimmed.equalsIgnoreCase("/resume")) {
-            return new ParsedCommand(CommandType.RESUME_SESSION, "last");
+            return new ParsedCommand(CommandType.RESUME_SESSION, null);
         }
 
         if (trimmed.regionMatches(true, 0, "/resume ", 0, 8)) {

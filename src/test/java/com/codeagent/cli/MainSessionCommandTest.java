@@ -13,10 +13,20 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MainSessionCommandTest {
+    @org.junit.jupiter.api.BeforeAll
+    static void initializeLoggingOutsideTemporaryPlanHome() {
+        org.slf4j.LoggerFactory.getLogger(MainSessionCommandTest.class);
+    }
+
+    @Test void deprecatedSettingOnlyProducesOneLocalNotice() {
+        assertTrue(Main.automaticResumeDeprecationNotice(null, null).isEmpty());
+        assertTrue(Main.automaticResumeDeprecationNotice("auto", "auto").contains("已弃用"));
+        assertFalse(Main.isAutomaticSessionResumeEnabled("auto", "auto"));
+    }
 
     @Test
-    void automaticResumeIsEnabledByDefault() {
-        assertTrue(Main.isAutomaticSessionResumeEnabled(null, null));
+    void automaticResumeIsDisabledByDefault() {
+        assertFalse(Main.isAutomaticSessionResumeEnabled(null, null));
     }
 
     @Test
@@ -31,7 +41,7 @@ class MainSessionCommandTest {
 
     @Test
     void unknownValuesRetainSafeDefault() {
-        assertTrue(Main.isAutomaticSessionResumeEnabled("unexpected", null));
+        assertFalse(Main.isAutomaticSessionResumeEnabled("unexpected", null));
     }
     @Test
     void activePlanNoticeIsScopedToCurrentSession(@TempDir Path tempDir) throws Exception {

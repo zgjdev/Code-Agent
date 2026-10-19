@@ -260,7 +260,8 @@ class CliCommandParserTest {
         assertEquals("session-123", resume.payload());
         CliCommandParser.ParsedCommand resumeLast = CliCommandParser.parse("/resume");
         assertEquals(CliCommandParser.CommandType.RESUME_SESSION, resumeLast.type());
-        assertEquals("last", resumeLast.payload());
+        assertNull(resumeLast.payload());
+        assertEquals("last", CliCommandParser.parse("/resume last").payload());
     }
 
     @Test

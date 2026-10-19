@@ -81,4 +81,7 @@ public final class RuntimeExecutionQueue {
     public boolean hasNonTerminal(String sessionId) throws SQLException {
         return store.hasNonTerminal(sessionId);
     }
+    public boolean hasActiveOrReadyExecution(String sessionId) throws SQLException {
+        return store.hasActiveOrReadyExecution(sessionId);
+    }
 }

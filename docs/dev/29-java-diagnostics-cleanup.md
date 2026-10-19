@@ -111,3 +111,19 @@ flowchart LR
 - 三个 LLM retry 包级异常拆为独立源文件，避免 Javac auxiliary-class 诊断，不改变可见性或构造契约。
 - `mvn clean package -DskipTests` 首次执行时，VS Code Red Hat Java Language Server 在 Maven 清理期间重新生成 `target/test-classes`，导致 clean 删除阶段失败；关闭相关 VS Code 窗口后重新执行成功，335 个主源码与 203 个测试源码编译通过并生成 shaded JAR。
 - Maven Shade Plugin 仍报告依赖 JAR 中 `module-info.class`、许可证及服务描述文件等元数据重叠；这些是既有打包诊断，与本次 Java 源码 warning 清理无关。该命令使用 `-DskipTests`，测试通过结论来自前述 `mvn test -Pquick` 回归。
+
+### 5.2 无引用演示文件清理（2026-10-19）
+
+目标：删除用户指定的 `src/main/java/com/example/Demo.java`，检查生产源码、内置资源、根目录受控文件和安装脚本是否还有同类演示/临时遗留。非目标：删除测试夹具、兼容 API、历史文档、用户配置、IDE 数据或业务功能；当前分支继续检查，不自动提交或推送。
+
+源码证据：Demo 仅打印 Hello World 和局部变量值，全仓类名/包名搜索没有实际引用；POM 两个 mainClass 均为 `com.codeagent.cli.Main`。`src/test/resources/rag/SampleService.java` 被 CodeAnalyzerTest/CodeChunkerTest 读取，启动器模板被安装与分发脚本使用，Prompt/Skill 资源通过枚举、拼接路径和提取清单加载，不能用简单文本“无直接引用”判断可删。既有 RAG/Memory 兼容构造器与反射测试入口继续保留。
+
+追加引用审查：JsonRpcMessage、McpInitializeResult、TuiHitlHandler、FetchResult 在生产、测试、配置、脚本、文档中均没有外部引用。JsonRpcClient.request/handleMessage 与 McpClient.initialize 直接处理 JsonNode；TuiBootstrap.launch 实际绑定 RendererHitlHandler；WebFetcher.fetch 返回自己的 RawResponse。McpCapabilities 是只被废弃 McpInitializeResult 使用的空 record，随之删除。以上属于未接线实现残留，不是标记保留的兼容 API。评测组件、LegacySessionMigrator、InteractionPresentationQueue 和 RAG 兼容门面虽然只被测试或宿主使用，均不按“仅测试引用”删除。
+
+最小方案评审：移除没有引用和运行职责的 Demo、5 个遗留类及已空目录，不调整 Maven 入口、模块依赖、配置或存储。先完成搜索与当前源码核对，再删除并做干净构建；回滚仅需从 Git 恢复对应文件。此次没有新增行为，因此不编写仅断言文件不存在的单元测试，以原 quick 回归、MCP/TUI 针对性测试、干净编译和最终 JAR 无遗留类为验收证据。
+
+验收：生产源码没有同类第二个演示入口；测试夹具和动态资源保留；`mvn clean test -Pquick`、`mvn test -DskipTests=false -Dtest=JsonRpcClientTest,McpClientTest,RendererHitlHandlerTest,TuiBootstrapTest,HtmlExtractorTest,WebToolBackendRouterTest`、`mvn package -DskipTests` 和 `git diff --check` 通过，最终 JAR 不含上述6个类。
+
+实施结果：已删除6个 Java 文件、空 com/example 与 tui/hitl 目录，未修改运行入口、命令、依赖、授权链或业务逻辑。干净编译447个生产源码、301个测试源码通过。quick 实际1715 tests、0 failures、0 errors、20 skipped，exit0；相关MCP/审批/TUI/Web测试38 tests、0 failures/errors/skipped，exit0；package跳测构建成功，exit0。验证日志放在临时目录 paicli-unused-cleanup-20261019（quick.log/targeted.log/package.log），不进入Git。`jar tf target/codeagent-1.0-SNAPSHOT.jar` 检查6个已删类型及嵌套类均不存在、CLI Main.class仍存在；git diff --check通过。其他无直接生产引用但具有测试、兼容或宿主用途的类型继续保留；用户配置、IDE数据、测试样例与模板未删除。改动保留未提交，无推送。
+
+2026-10-20：用户追加授权提交当前修改。本次仅创建本地清理提交，不推送；提交前复核分支、同名 upstream、diff 和上述未变更代码的验证记录。

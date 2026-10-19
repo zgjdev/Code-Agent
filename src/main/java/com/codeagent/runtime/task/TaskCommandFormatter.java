@@ -91,7 +91,7 @@ public final class TaskCommandFormatter {
                 input = input.substring(0, 57) + "...";
             }
             result.append("   ").append(execution.id())
-                    .append("  ").append(execution.status().databaseValue())
+                    .append("  ").append(executionStatus(execution))
                     .append("  #").append(execution.ordinal())
                     .append("  ").append(input).append('\n');
         }
@@ -101,7 +101,7 @@ public final class TaskCommandFormatter {
     public static String formatExecution(RuntimeExecution execution) {
         StringBuilder result = new StringBuilder()
                 .append("📋 任务 ").append(execution.id()).append('\n')
-                .append("状态: ").append(execution.status().databaseValue()).append('\n')
+                .append("状态: ").append(executionStatus(execution)).append('\n')
                 .append("会话: ").append(execution.sessionId()).append('\n')
                 .append("序号: ").append(execution.ordinal()).append('\n')
                 .append("创建: ").append(execution.createdAt()).append('\n');
@@ -116,6 +116,10 @@ public final class TaskCommandFormatter {
             result.append("\n结果:\n").append(execution.result()).append('\n');
         }
         return result.toString().trim();
+    }
+
+    private static String executionStatus(RuntimeExecution execution) {
+        return execution.awaitingInput() ? "等待用户继续" : execution.status().databaseValue();
     }
 
     public static String formatList(List<DurableTask> tasks) {

@@ -16,12 +16,12 @@ final class ExecutionControlPolicy {
     static Category classify(CliCommandParser.CommandType type) {
         return switch (type) {
             case NONE, SWITCH_PLAN, SWITCH_REACT -> Category.TASK_INPUT;
-            case SESSIONS, MEMORY_STATUS, MEMORY_LIST, MEMORY_SEARCH,
+            case SESSIONS, RESUME_SESSION, MEMORY_STATUS, MEMORY_LIST, MEMORY_SEARCH,
                  SEARCH_CODE, GRAPH_QUERY, CONTEXT_STATUS, POLICY_STATUS,
                  AUDIT_TAIL, MCP_LIST, MCP_LOGS, MCP_RESOURCES, MCP_PROMPTS,
                  SKILL_LIST, SKILL_SHOW -> Category.READ_ONLY;
             case CANCEL, EXIT, TASK -> Category.EXECUTION_CONTROL;
-            case CLEAR, COMPACT, RESUME_SESSION, NEW_SESSION, HISTORY_CLEAR,
+            case CLEAR, COMPACT, NEW_SESSION, HISTORY_CLEAR,
                  MEMORY_CLEAR, MEMORY_DELETE, MEMORY_SAVE,
                  PLAN_RESUME, PLAN_ABANDON -> Category.SESSION_MUTATION;
             case INIT_PROJECT_MEMORY, SWITCH_MODEL,

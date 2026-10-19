@@ -41,6 +41,8 @@ MemoryWriteResolver先做canonical exact duplicate检查，再召回同作用域
 
 普通检索只取当前scope可见的active条目。Jieba对正文和查询做一致预分词，FTS5/BM25给出词法排名；本地BGE与代码RAG的Qwen分开，对可见记忆精确计算cosine，语义候选沿用`>= 0.475`门槛。两路各取最多`max(50, limit)`条，以`sum(1/(60+rank))`进行RRF融合，再乘`0.6 + 0.4 * 2^(-ageDays/30)`。RRF不是相关概率，不增加未经校准的总分阈值；词法命中也可独立进入候选。
 
+恢复路径中，当前用户消息可能已由 Dispatcher 或继续控制轮持久化。Agent 仍检索本轮 Memory 并消费 Skill buffer，但通过 RecoveryRequestAugmenter 按 inputUserSequence 仅补充本轮发送副本；不重复追加 user、不改写历史消息或权限原文。正文、图片 parts、恢复摘要共同进入真实 RequestSnapshot 和 chat，多工具轮及压缩重建复用同一份本轮补充，运行结束即清理。
+
 BGE向量同时缓存在进程内与同一memory.db的派生表，按memory id、正文SHA-256、embedding space（包括模型revision）和维度校验复用。已有数据库首次回填词法索引，不在启动时推理；查询时只计算缺失向量。正文或状态变更/删除使旧向量失效，推理在数据库事务之外，批量条件写回重新检查当前正文和active状态，拒绝迟到覆盖。坏向量按miss重算，向量缓存读写失败保留本次内存结果，模型故障降级FTS词法。向量与词法数据可重建，文本仍是唯一事实源。
 
 时间优先取lastConfirmedAt，缺失时回退创建时间。读取不自动确认；显式写入的关系候选继续用原词法覆盖率与语义加权评分、无时间衰减，不以RRF改变旧事实替代协议。自动注入从最多50条排序候选中按既有条目token估算选择最多10条完整记忆，单条过长可从后续候选补位；ContextProfile预算与Agent/Plan注入位置不变。设计与验证见[长期记忆核心升级](../dev/23-long-term-memory-hybrid-retrieval.md#12-持久化向量与-rrf-核心升级2026-10-18)。

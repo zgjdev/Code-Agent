@@ -2,6 +2,7 @@ package com.codeagent.agent;
 
 import com.codeagent.context.MeasuredUsage;
 import com.codeagent.history.SessionProjection;
+import com.codeagent.model.recovery.FormattedRecoveryContext;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.llm.StructuredJsonExecutor;
 import com.codeagent.llm.StructuredOutputException;
@@ -34,12 +35,17 @@ public final class ExecutionModeRouter {
 
     public RoutingDecision route(String submittedInput,
                                  List<SessionProjection.ConversationNode> history) {
+        return route(submittedInput, history, null);
+    }
+
+    public RoutingDecision route(String submittedInput,
+                                 List<SessionProjection.ConversationNode> history, FormattedRecoveryContext recoveryContext) {
         ensureNotCancelled();
         LlmClient.ChatResponse response = null;
         try {
             StructuredJsonExecutor.Result<ExecutionMode> result = structuredJsonExecutor.execute(
                     llmClient,
-                    promptBuilder.build(history, submittedInput),
+                    promptBuilder.build(history, submittedInput, recoveryContext),
                     null,
                     ROUTING_OUTPUT,
                     false,

@@ -15,13 +15,13 @@ import static org.junit.jupiter.api.Assertions.*;
 class RuntimeExecutionStoreTest {
 
     @Test
-    void migratesExecutionIdentitySchemaToVersionTwo(@TempDir Path tempDir) throws Exception {
+    void migratesExecutionIdentitySchemaToVersionFour(@TempDir Path tempDir) throws Exception {
         try (RuntimeExecutionStore ignored = new RuntimeExecutionStore(tempDir.resolve("tasks.db"));
              var connection = DriverManager.getConnection("jdbc:sqlite:" + tempDir.resolve("tasks.db"));
              var statement = connection.createStatement();
              var rows = statement.executeQuery("SELECT MAX(version) FROM runtime_schema_migrations")) {
             assertTrue(rows.next());
-            assertEquals(2, rows.getInt(1), "workspace identity requires schema version 2");
+            assertEquals(4, rows.getInt(1), "durable request semantics require schema version 4");
         }
     }
 

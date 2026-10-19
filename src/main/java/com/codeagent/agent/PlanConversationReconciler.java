@@ -57,21 +57,22 @@ public final class PlanConversationReconciler {
                 }
                 if (openTurns.size() == 1) {
                     SessionProjection.OpenTurn existing = openTurns.get(0);
-                    appendTurnStart(context, existing.turnId(), active.planId(), true);
+                    appendTurnStart(context, existing.turnId(), active.planId(), true,knownOwner(context,active.executionId()));
                     matching = context.projection().openTurns().get(existing.turnId());
                 } else {
                     String turnId = "plan-turn-" + UUID.randomUUID();
-                    appendTurnStart(context, turnId, active.planId(), false);
+                    appendTurnStart(context, turnId, active.planId(), false,knownOwner(context,active.executionId()));
                     matching = context.projection().openTurns().get(turnId);
                 }
             } else if (!active.planId().equals(matching.activePlanId())) {
-                appendTurnStart(context, matching.turnId(), active.planId(), true);
+                appendTurnStart(context, matching.turnId(), active.planId(), true,knownOwner(context,active.executionId()));
                 matching = context.projection().openTurns().get(matching.turnId());
             }
 
-            if (!hasTopLevelUser(context, matching.turnId())) {
+            var owned=active.executionId()==null?null:context.projection().executionEnvelopes().get(knownOwner(context,active.executionId()));
+            if ((owned==null||owned.userSequence()==null)&&!hasTopLevelUser(context, matching.turnId())) {
                 appendTopLevelMessage(context, matching.turnId(), matching.rootPlanId(), "user",
-                        semanticUser(active));
+                        semanticUser(active),knownOwner(context,active.executionId()),null);
             }
             context.synchronizeProviderFromProjection();
             return;
@@ -94,12 +95,16 @@ public final class PlanConversationReconciler {
                             && node.kind() == SessionProjection.ConversationKind.ASSISTANT);
             if (!assistantAlreadyPresent) {
                 appendTopLevelMessage(context, turn.turnId(), turn.activePlanId(), "assistant",
-                        resultBuilder.build(stored.plan()));
+                        resultBuilder.build(stored.plan()),knownOwner(context,stored.info().executionId()),null);
             }
             appendTurnEnd(context, turn.turnId(), turn.activePlanId(),
-                    stored.plan().getStatus().name().toLowerCase());
+                    stored.plan().getStatus().name().toLowerCase(),knownOwner(context,stored.info().executionId()));
             context.synchronizeProviderFromProjection();
         }
+    }
+
+    private static String knownOwner(ParentConversationContext context,String executionId) {
+        return executionId!=null&&context.projection().executionEnvelopes().containsKey(executionId)?executionId:null;
     }
 
     private static String semanticUser(PlanStateStore.StoredPlanInfo active) {
@@ -131,11 +136,14 @@ public final class PlanConversationReconciler {
                                 String turnId,
                                 String planId,
                                 boolean continuation) throws IOException {
+        appendTurnStart(context,turnId,planId,continuation,currentExecutionId());
+    }
+    static void appendTurnStart(ParentConversationContext context,String turnId,String planId,boolean continuation,String executionId) throws IOException {
         ObjectNode payload = JSON.createObjectNode()
                 .put("turnId", turnId)
                 .put("planId", planId)
                 .put("mode", "plan");
-        addExecutionId(payload);
+        if(executionId!=null)payload.put("executionId",executionId);
         if (continuation) {
             payload.put("continuation", true);
         }
@@ -153,12 +161,15 @@ public final class PlanConversationReconciler {
                               String turnId,
                               String planId,
                               String status) throws IOException {
+        appendTurnEnd(context,turnId,planId,status,currentExecutionId());
+    }
+    static void appendTurnEnd(ParentConversationContext context,String turnId,String planId,String status,String executionId) throws IOException {
         ObjectNode payload = JSON.createObjectNode()
                 .put("turnId", turnId)
                 .put("planId", planId)
                 .put("mode", "plan")
                 .put("status", status == null ? "unknown" : status);
-        addExecutionId(payload);
+        if(executionId!=null)payload.put("executionId",executionId);
         context.append(new SessionEventDraft(
                 SessionEvent.Types.TURN_END,
                 "plan",
@@ -174,10 +185,14 @@ public final class PlanConversationReconciler {
                                       String planId,
                                       String role,
                                       String content) throws IOException {
+        appendTopLevelMessage(context,turnId,planId,role,content,currentExecutionId(),null);
+    }
+    static void appendTopLevelMessage(ParentConversationContext context,String turnId,String planId,String role,String content,
+                                      String executionId,LlmClient.Message providerMessage) throws IOException {
         if (content == null || content.isBlank()) {
             throw new IOException("top-level Plan conversation content must not be blank");
         }
-        LlmClient.Message message = "assistant".equals(role)
+        LlmClient.Message message = providerMessage!=null?providerMessage:"assistant".equals(role)
                 ? LlmClient.Message.assistant(content)
                 : LlmClient.Message.user(content);
         ObjectNode payload = JSON.createObjectNode();
@@ -188,10 +203,9 @@ public final class PlanConversationReconciler {
                 .put("mode", "plan")
                 .put("role", role)
                 .put("content", content);
-        ExecutionInteractionContext.Identity execution = ExecutionInteractionContext.current();
-        if (execution != null) {
-            payload.put("executionId", execution.executionId());
-            conversation.put("executionId", execution.executionId());
+        if (executionId != null) {
+            payload.put("executionId", executionId);
+            conversation.put("executionId", executionId);
         }
         context.append(new SessionEventDraft(
                 "assistant".equals(role)
@@ -210,5 +224,8 @@ public final class PlanConversationReconciler {
         if (execution != null) {
             payload.put("executionId", execution.executionId());
         }
+    }
+    private static String currentExecutionId() {
+        var identity=ExecutionInteractionContext.current();return identity==null?null:identity.executionId();
     }
 }

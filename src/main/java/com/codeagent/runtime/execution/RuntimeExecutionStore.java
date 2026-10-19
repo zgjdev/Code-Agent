@@ -2,6 +2,7 @@ package com.codeagent.runtime.execution;
 
 import com.codeagent.agent.ExecutionMode;
 import com.codeagent.agent.RoutingSource;
+import com.codeagent.history.SessionProjection;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -25,7 +26,31 @@ import java.util.Set;
 import java.util.UUID;
 
 public final class RuntimeExecutionStore implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 2;
+    private static final int SCHEMA_VERSION = 4;
+    private static final String READY_CANDIDATE_QUERY = """
+                    SELECT candidate.*
+                    FROM runtime_executions candidate
+                    WHERE candidate.workspace_key = ?
+                      AND candidate.status = 'enqueued'
+                      AND candidate.dispatch_state = 'ready'
+                      AND candidate.legacy_unbound = 0
+                      AND (? IS NULL OR candidate.id = ?)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM runtime_executions running
+                          WHERE running.workspace_key = candidate.workspace_key
+                            AND running.status = 'running'
+                            AND running.legacy_unbound = 0
+                      )
+                      AND candidate.ordinal = (
+                          SELECT MIN(head.ordinal)
+                          FROM runtime_executions head
+                          WHERE head.session_id = candidate.session_id
+                            AND head.legacy_unbound = 0
+                            AND (head.status = 'running' OR (head.status = 'enqueued' AND head.dispatch_state = 'ready'))
+                      )
+                    ORDER BY candidate.created_at, candidate.ordinal, candidate.id
+                    LIMIT 1
+                    """;
     private final Connection connection;
     private final WorkspaceIdentityResolver identityResolver = new WorkspaceIdentityResolver();
 
@@ -50,7 +75,7 @@ public final class RuntimeExecutionStore implements AutoCloseable {
             }
             if ((tableExists("runtime_executions") || tableExists("runtime_tasks"))
                     && (!tableExists("runtime_schema_migrations") || !migrationApplied(SCHEMA_VERSION))) {
-                Path backup = absolute.resolveSibling(absolute.getFileName() + ".pre-v2-" + UUID.randomUUID() + ".bak");
+                Path backup = absolute.resolveSibling(absolute.getFileName() + ".pre-v" + SCHEMA_VERSION + "-" + UUID.randomUUID() + ".bak");
                 try (var statement = connection.prepareStatement("VACUUM INTO ?")) {
                     statement.setString(1, backup.toString()); statement.execute();
                 }
@@ -203,6 +228,48 @@ public final class RuntimeExecutionStore implements AutoCloseable {
         }
     }
 
+    /** Exact session recovery view, independent of UI's 100-row workspace page. */
+    public synchronized List<RuntimeExecution> listRecoveryState(Path workspace, String sessionId) throws SQLException {
+        WorkspaceKey key=resolveWorkspace(workspace).key();
+        var result=new ArrayList<RuntimeExecution>();
+        try(var query=connection.prepareStatement(
+                "SELECT * FROM runtime_executions WHERE workspace_key=? AND session_id=? AND legacy_unbound=0 AND status IN ('enqueued','running') ORDER BY ordinal,id")){
+            query.setString(1,key.value());query.setString(2,sessionId);
+            try(var rows=query.executeQuery()){
+                while(rows.next()){
+                    if(result.size()==1000)throw new SQLException("Recovery execution limit exceeded");
+                    result.add(map(rows));
+                }
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    public synchronized boolean hasAwaitingTask(Path workspace, String sessionId) throws SQLException {
+        requireText(sessionId, "sessionId");
+        WorkspaceKey key = resolveWorkspace(workspace).key();
+        try (var query = connection.prepareStatement("""
+                SELECT 1 FROM runtime_executions WHERE workspace_key=? AND session_id=?
+                  AND legacy_unbound=0 AND status='enqueued' AND dispatch_state='awaiting_input'
+                  AND request_kind='task' LIMIT 1
+                """)) {
+            query.setString(1, key.value());
+            query.setString(2, sessionId);
+            try (var rows = query.executeQuery()) { return rows.next(); }
+        }
+    }
+
+    public synchronized boolean hasActiveOrReadyExecution(String sessionId) throws SQLException {
+        requireText(sessionId, "sessionId");
+        try (var statement = connection.prepareStatement("""
+                SELECT 1 FROM runtime_executions WHERE session_id=? AND legacy_unbound=0
+                  AND (status='running' OR (status='enqueued' AND dispatch_state='ready')) LIMIT 1
+                """)) {
+            statement.setString(1, sessionId);
+            try (var rows = statement.executeQuery()) { return rows.next(); }
+        }
+    }
+
     public synchronized Optional<String> running(Path workspace) throws SQLException {
         WorkspaceKey workspaceKey = resolveWorkspace(workspace).key();
         try (PreparedStatement statement = connection.prepareStatement("""
@@ -237,29 +304,7 @@ public final class RuntimeExecutionStore implements AutoCloseable {
         WorkspaceKey workspaceKey = resolveWorkspace(workspace).key();
         return inTransaction(() -> {
             String id = null;
-            try (PreparedStatement statement = connection.prepareStatement("""
-                    SELECT candidate.id
-                    FROM runtime_executions candidate
-                    WHERE candidate.workspace_key = ?
-                      AND candidate.status = 'enqueued'
-                      AND candidate.legacy_unbound = 0
-                      AND (? IS NULL OR candidate.id = ?)
-                      AND NOT EXISTS (
-                          SELECT 1 FROM runtime_executions running
-                          WHERE running.workspace_key = candidate.workspace_key
-                            AND running.status = 'running'
-                            AND running.legacy_unbound = 0
-                      )
-                      AND candidate.ordinal = (
-                          SELECT MIN(head.ordinal)
-                          FROM runtime_executions head
-                          WHERE head.session_id = candidate.session_id
-                            AND head.legacy_unbound = 0
-                            AND head.status IN ('enqueued', 'running')
-                      )
-                    ORDER BY candidate.created_at, candidate.ordinal, candidate.id
-                    LIMIT 1
-                    """)) {
+            try (PreparedStatement statement = connection.prepareStatement(READY_CANDIDATE_QUERY)) {
                 statement.setString(1, workspaceKey.value());
                 statement.setString(2, candidateId);
                 statement.setString(3, candidateId);
@@ -277,7 +322,7 @@ public final class RuntimeExecutionStore implements AutoCloseable {
                     UPDATE runtime_executions
                     SET status = 'running', started_at = COALESCE(started_at, ?),
                         updated_at = ?, attempt = attempt + 1, owner_id = ?
-                    WHERE id = ? AND status = 'enqueued'
+                    WHERE id = ? AND status = 'enqueued' AND dispatch_state = 'ready'
                     """)) {
                 statement.setString(1, now.toString());
                 statement.setString(2, now.toString());
@@ -302,15 +347,9 @@ public final class RuntimeExecutionStore implements AutoCloseable {
     }
 
     synchronized Optional<RuntimeExecution> nextQueuedExecution(WorkspaceKey key) throws SQLException {
-        try (var statement = connection.prepareStatement("""
-                SELECT * FROM runtime_executions
-                WHERE workspace_key=? AND legacy_unbound=0 AND status='enqueued'
-                ORDER BY created_at, ordinal, id LIMIT 1
-                """)) {
-            statement.setString(1, key.value());
-            try (var rows = statement.executeQuery()) {
-                return rows.next() ? Optional.of(map(rows)) : Optional.empty();
-            }
+        try (var statement = connection.prepareStatement(READY_CANDIDATE_QUERY)) {
+            statement.setString(1,key.value()); statement.setString(2,null); statement.setString(3,null);
+            try (var rows=statement.executeQuery()) { return rows.next() ? Optional.of(map(rows)) : Optional.empty(); }
         }
     }
 
@@ -359,26 +398,197 @@ public final class RuntimeExecutionStore implements AutoCloseable {
         });
     }
 
-    public synchronized RuntimeExecution claimForReconciliation(WorkspaceOwnerLease owner, String id) throws SQLException {
+    /** Reconciles a durable END without reserving the workspace's unique running slot. */
+    synchronized RuntimeExecution completeReconciliation(WorkspaceOwnerLease owner, RuntimeExecution expected,
+            SessionProjection.ExecutionEnvelope envelope) throws SQLException {
         verifyOwner(owner);
         return inTransaction(() -> {
-            RuntimeExecution current = requireFound(id);
-            if (!owner.identity().key().equals(current.workspaceKey())) throw new IllegalStateException("Recovery workspace mismatch");
-            if (current.terminal()) return current;
+            RuntimeExecution current = requireFound(expected.id());
+            if (!owner.identity().key().equals(current.workspaceKey()) || current.legacyUnbound())
+                throw new IllegalStateException("Recovery workspace mismatch");
+            if (!current.equals(expected) || current.terminal())
+                throw new IllegalStateException("Recovery execution snapshot is stale");
+            if (envelope == null || !envelope.ended() || envelope.startSequence() < 1
+                    || envelope.endSequence() <= envelope.startSequence()
+                    || envelope.selectedMode() == null || envelope.outcome() == null || envelope.status() == null
+                    || !current.id().equals(envelope.executionId())
+                    || !java.util.Objects.equals(current.ordinal(), envelope.ordinal())
+                    || !java.util.Objects.equals(encode(current.explicitMode()), envelope.explicitMode()))
+                throw new IllegalArgumentException("Execution END identity conflicts with execution");
+            ExecutionMode mode = decodeMode(envelope.selectedMode());
+            ExecutionOutcome outcome = ExecutionOutcome.fromDatabase(envelope.outcome());
+            ExecutionStatus status = statusFor(outcome);
+            if (mode == null || !encode(mode).equals(envelope.selectedMode())
+                    || (current.selectedMode() != null && current.selectedMode() != mode)
+                    || (current.explicitMode() != null && current.explicitMode() != mode)
+                    || !status.databaseValue().equals(envelope.status()))
+                throw new IllegalArgumentException("Execution END terminal state conflicts with execution");
+            RoutingSource source = current.routingSource() != null ? current.routingSource()
+                    : current.explicitMode() == null ? RoutingSource.AUTO_FALLBACK : RoutingSource.EXPLICIT;
+            String now = Instant.now().toString();
             try (var statement = connection.prepareStatement("""
-                    UPDATE runtime_executions SET status='running', owner_id=?, attempt=attempt+1
-                    WHERE id=? AND status IN ('running','enqueued')
+                    UPDATE runtime_executions SET status=?, outcome=?, selected_mode=?, routing_source=?,
+                        owner_id=?, attempt=attempt+1, finished_at=?, updated_at=?
+                    WHERE id=? AND status=? AND attempt=?
                     """)) {
-                statement.setString(1, owner.ownerId()); statement.setString(2, id);
+                statement.setString(1, status.databaseValue()); statement.setString(2, outcome.databaseValue());
+                statement.setString(3, encode(mode)); statement.setString(4, encode(source));
+                statement.setString(5, owner.ownerId()); statement.setString(6, now); statement.setString(7, now);
+                statement.setString(8, current.id()); statement.setString(9, current.status().databaseValue());
+                statement.setInt(10, current.attempt());
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("Recovery state changed");
             }
-            return requireFound(id);
+            return requireFound(current.id());
         });
     }
 
     public synchronized int recoverStaleRunning(WorkspaceOwnerLease owner) throws SQLException {
         verifyOwner(owner);
         return recoverStaleRunning(owner.identity().canonicalRoot());
+    }
+
+    /** Called after terminal-envelope reconciliation while this workspace owner is exclusive. */
+    public synchronized int freezeForUser(WorkspaceOwnerLease owner) throws SQLException {
+        verifyOwner(owner);
+        return inTransaction(() -> {
+            String now = Instant.now().toString();
+            try (var cancel = connection.prepareStatement("""
+                    UPDATE runtime_executions SET status='canceled',outcome='canceled',finished_at=?,updated_at=?,
+                        interruption_reason='recovered_cancel_request',
+                        selected_mode=COALESCE(selected_mode,explicit_mode,'react'),
+                        routing_source=COALESCE(routing_source,CASE WHEN explicit_mode IS NULL THEN 'auto_fallback' ELSE 'explicit' END)
+                    WHERE workspace_key=? AND legacy_unbound=0 AND status IN ('running','enqueued') AND cancel_requested_at IS NOT NULL
+                    """)) {
+                cancel.setString(1,now); cancel.setString(2,now); cancel.setString(3,owner.identity().key().value());
+                cancel.executeUpdate();
+            }
+            try (var statement = connection.prepareStatement("""
+                    UPDATE runtime_executions SET dispatch_state='awaiting_input',
+                        recovery_generation=recovery_generation+1, owner_id=NULL, started_at=NULL,
+                        interruption_reason=CASE WHEN status='running' THEN 'stale_running_recovery' ELSE interruption_reason END,
+                        status='enqueued', continuation_request_id=NULL, current_policy_input=NULL, updated_at=?
+                    WHERE workspace_key=? AND legacy_unbound=0 AND status IN ('running','enqueued')
+                    """)) {
+                statement.setString(1,now); statement.setString(2,owner.identity().key().value());
+                return statement.executeUpdate();
+            }
+        });
+    }
+
+    /** Defers only a current attempt whose host-side recovery preparation has not executed work. */
+    public synchronized RuntimeExecution deferForUser(ExecutionClaim claim, String reason) throws SQLException {
+        requireText(reason,"reason");
+        return inTransaction(() -> {
+            RuntimeExecution current=requireFound(claim.executionId());
+            requireClaim(current,claim);
+            if(current.status()!=ExecutionStatus.RUNNING || current.cancelRequestedAt()!=null)
+                throw new IllegalStateException("Cannot defer inactive or canceled execution");
+            try(var update=connection.prepareStatement("""
+                    UPDATE runtime_executions SET status='enqueued',dispatch_state='awaiting_input',
+                        recovery_generation=recovery_generation+1,owner_id=NULL,started_at=NULL,
+                        continuation_request_id=NULL,current_policy_input=NULL,interruption_reason=?,updated_at=? WHERE id=?
+                    """)) {
+                update.setString(1,reason); update.setString(2,Instant.now().toString()); update.setString(3,current.id());
+                update.executeUpdate();
+            }
+            return requireFound(current.id());
+        });
+    }
+
+    /** Records only durable request metadata. Target stays held until the request finalizer succeeds. */
+    public synchronized RuntimeExecution prepareContinuation(ExecutionClaim claim, String targetId, int generation) throws SQLException {
+        return inTransaction(() -> {
+            RuntimeExecution request=requireFound(claim.executionId());
+            requireClaim(request,claim);
+            if(request.status()!=ExecutionStatus.RUNNING || request.cancelRequestedAt()!=null)
+                throw new IllegalStateException("Continuation request must be running");
+            requireSemanticsCompatible(request, RequestSemantics.CONTINUE, ExecutionMode.REACT, RoutingSource.CONTINUATION_CONTROL);
+            if("continuation_control".equals(request.requestKind())) {
+                if(java.util.Objects.equals(targetId,request.controlTargetExecutionId())
+                        && java.util.Objects.equals(generation,request.controlTargetGeneration())
+                        && claim.ownerId().equals(request.controlOwnerId())) return request;
+                throw new IllegalStateException("Continuation target already committed");
+            }
+            RuntimeExecution target=requireFound(targetId);
+            if(!sameContinuationScope(request,target) || !target.awaitingInput() || target.cancelRequestedAt()!=null
+                    || target.recoveryGeneration()!=generation || !"task".equals(target.requestKind()))
+                throw new IllegalStateException("Continuation target is unavailable or stale");
+            try(var update=connection.prepareStatement("""
+                    UPDATE runtime_executions SET request_kind='continuation_control',control_target_execution_id=?,
+                        control_target_generation=?,control_owner_id=?,current_policy_input=?,updated_at=?,
+                        request_semantics='continue',selected_mode='react',routing_source='continuation_control' WHERE id=?
+                    """)) {
+                update.setString(1,targetId); update.setInt(2,generation); update.setString(3,claim.ownerId());
+                update.setString(4,request.submittedInput()); update.setString(5,Instant.now().toString()); update.setString(6,request.id());
+                update.executeUpdate();
+            }
+            return requireFound(request.id());
+        });
+    }
+
+    public synchronized ContinuationReleaseResult releaseContinuation(WorkspaceOwnerLease owner,
+            String requestId, String targetId, int generation) throws SQLException {
+        verifyOwner(owner);
+        return inTransaction(() -> {
+            RuntimeExecution request=find(requestId).orElse(null), target=find(targetId).orElse(null);
+            if(request==null || target==null || !sameContinuationScope(request,target)
+                    || !owner.identity().key().equals(request.workspaceKey()) || !owner.ownerId().equals(request.ownerId())
+                    || !owner.ownerId().equals(request.controlOwnerId()) || !"continuation_control".equals(request.requestKind())
+                    || !targetId.equals(request.controlTargetExecutionId())
+                    || !java.util.Objects.equals(generation,request.controlTargetGeneration())
+                    || target.recoveryGeneration()!=generation || target.terminal() || target.cancelRequestedAt()!=null)
+                return ContinuationReleaseResult.STALE;
+            if(request.status()!=ExecutionStatus.COMPLETED || request.outcome()!=ExecutionOutcome.SUCCEEDED)
+                return ContinuationReleaseResult.NOT_READY;
+            if(requestId.equals(target.continuationRequestId())) return ContinuationReleaseResult.ALREADY_RELEASED;
+            if(!target.awaitingInput()) return ContinuationReleaseResult.STALE;
+            try(var update=connection.prepareStatement("""
+                    UPDATE runtime_executions SET dispatch_state='ready',continuation_request_id=?,current_policy_input=?,updated_at=?
+                    WHERE id=? AND status='enqueued' AND dispatch_state='awaiting_input' AND recovery_generation=?
+                      AND cancel_requested_at IS NULL
+                    """)) {
+                update.setString(1,requestId); update.setString(2,request.submittedInput()); update.setString(3,Instant.now().toString());
+                update.setString(4,targetId); update.setInt(5,generation);
+                return update.executeUpdate()==1 ? ContinuationReleaseResult.RELEASED : ContinuationReleaseResult.STALE;
+            }
+        });
+    }
+
+    private static boolean sameContinuationScope(RuntimeExecution request, RuntimeExecution target) {
+        return !request.id().equals(target.id()) && request.workspaceKey()!=null
+                && request.workspaceKey().equals(target.workspaceKey()) && request.sessionId()!=null
+                && request.sessionId().equals(target.sessionId()) && !request.legacyUnbound() && !target.legacyUnbound();
+    }
+
+    /** Fixes semantics before user persistence or any answer/tool request. CONTINUE requires target CAS. */
+    public synchronized RuntimeExecution commitRequestSemantics(ExecutionClaim claim, RequestSemantics semantics) throws SQLException {
+        java.util.Objects.requireNonNull(semantics);
+        if (semantics == RequestSemantics.CONTINUE) throw new IllegalArgumentException("Use prepareContinuation for CONTINUE");
+        return inTransaction(() -> {
+            RuntimeExecution current = requireFound(claim.executionId());
+            requireClaim(current, claim);
+            if (current.status() != ExecutionStatus.RUNNING || current.cancelRequestedAt() != null)
+                throw new IllegalStateException("Semantics require an active uncanceled claim");
+            ExecutionMode mode = semantics == RequestSemantics.NEW_REQUEST ? null : ExecutionMode.REACT;
+            RoutingSource source = semantics == RequestSemantics.STATUS_QUESTION ? RoutingSource.AUTO_MODEL
+                    : semantics == RequestSemantics.CLARIFY ? RoutingSource.CONTINUATION_CONTROL : null;
+            requireSemanticsCompatible(current, semantics, mode, source);
+            if (current.requestSemantics() == semantics) return current;
+            try (var update = connection.prepareStatement("UPDATE runtime_executions SET request_semantics=?,selected_mode=COALESCE(?,selected_mode),routing_source=COALESCE(?,routing_source),updated_at=? WHERE id=?")) {
+                update.setString(1, encode(semantics)); update.setString(2, encode(mode)); update.setString(3, encode(source));
+                update.setString(4, Instant.now().toString()); update.setString(5, current.id()); update.executeUpdate();
+            }
+            return requireFound(current.id());
+        });
+    }
+
+    private static void requireSemanticsCompatible(RuntimeExecution current, RequestSemantics semantics,
+            ExecutionMode mode, RoutingSource source) {
+        if (current.requestSemantics() != null && current.requestSemantics() != semantics)
+            throw new IllegalStateException("Request semantics already committed");
+        if (mode != null && current.selectedMode() != null
+                && (current.selectedMode() != mode || current.routingSource() != source))
+            throw new IllegalStateException("Request route conflicts with semantics");
     }
 
     private static void verifyOwner(WorkspaceOwnerLease owner) throws SQLException {
@@ -508,25 +718,16 @@ public final class RuntimeExecutionStore implements AutoCloseable {
 
     public synchronized RuntimeExecution complete(
             ExecutionClaim claim, ExecutionOutcome requestedOutcome, String result, String error) throws SQLException {
-        return complete(claim, requestedOutcome, result, error, false, (execution, outcome) -> { });
+        return complete(claim, requestedOutcome, result, error, (execution, outcome) -> { });
     }
 
     synchronized RuntimeExecution completeWithEnvelope(ExecutionClaim claim, ExecutionOutcome outcome,
             String result, String error, BeforeCompletion before) throws SQLException {
-        return complete(claim, outcome, result, error, false, before);
-    }
-
-    synchronized RuntimeExecution completeReconciliation(WorkspaceOwnerLease owner, ExecutionClaim claim,
-            ExecutionOutcome outcome, String result, String error) throws SQLException {
-        verifyOwner(owner);
-        if (!owner.identity().key().equals(requireFound(claim.executionId()).workspaceKey())) {
-            throw new IllegalStateException("Recovery workspace mismatch");
-        }
-        return complete(claim, outcome, result, error, true, (execution, effectiveOutcome) -> { });
+        return complete(claim, outcome, result, error, before);
     }
 
     private RuntimeExecution complete(ExecutionClaim claim, ExecutionOutcome requestedOutcome, String result,
-            String error, boolean authoritativeEnvelope, BeforeCompletion before) throws SQLException {
+            String error, BeforeCompletion before) throws SQLException {
         if (requestedOutcome == null) {
             throw new IllegalArgumentException("Execution outcome must not be null");
         }
@@ -548,13 +749,9 @@ public final class RuntimeExecutionStore implements AutoCloseable {
             if (current.status() != ExecutionStatus.RUNNING) {
                 throw new IllegalStateException("Only a running execution can complete: " + id);
             }
-            ExecutionOutcome outcome = authoritativeEnvelope || current.cancelRequestedAt() == null
+            ExecutionOutcome outcome = current.cancelRequestedAt() == null
                     ? requestedOutcome : ExecutionOutcome.CANCELED;
-            ExecutionStatus status = switch (outcome) {
-                case SUCCEEDED, PARTIAL -> ExecutionStatus.COMPLETED;
-                case FAILED, REJECTED -> ExecutionStatus.FAILED;
-                case CANCELED -> ExecutionStatus.CANCELED;
-            };
+            ExecutionStatus status = statusFor(outcome);
             Instant now = Instant.now();
             before.append(current, outcome);
             try (PreparedStatement statement = connection.prepareStatement("""
@@ -577,6 +774,14 @@ public final class RuntimeExecutionStore implements AutoCloseable {
             }
             return requireFound(id);
         });
+    }
+
+    private static ExecutionStatus statusFor(ExecutionOutcome outcome) {
+        return switch (outcome) {
+            case SUCCEEDED, PARTIAL -> ExecutionStatus.COMPLETED;
+            case FAILED, REJECTED -> ExecutionStatus.FAILED;
+            case CANCELED -> ExecutionStatus.CANCELED;
+        };
     }
 
     @FunctionalInterface interface BeforeCompletion {
@@ -736,7 +941,7 @@ public final class RuntimeExecutionStore implements AutoCloseable {
                 }
                 recordMigration(1);
             }
-            if (!migrationApplied(SCHEMA_VERSION)) {
+            if (!migrationApplied(2)) {
                 migrateExistingWorkspaceIdentities();
                 try (Statement statement = connection.createStatement()) {
                     statement.execute("DROP INDEX IF EXISTS uq_runtime_execution_running_workspace");
@@ -756,7 +961,29 @@ public final class RuntimeExecutionStore implements AutoCloseable {
                             WHERE status = 'running' AND legacy_unbound = 0 AND session_id IS NOT NULL
                             """);
                 }
-                recordMigration(SCHEMA_VERSION);
+                recordMigration(2);
+            }
+            if (!migrationApplied(3)) {
+                String[] columns = {
+                        "request_kind TEXT NOT NULL DEFAULT 'task' CHECK(request_kind IN ('task','continuation_control'))",
+                        "dispatch_state TEXT NOT NULL DEFAULT 'ready' CHECK(dispatch_state IN ('ready','awaiting_input'))",
+                        "recovery_generation INTEGER NOT NULL DEFAULT 0 CHECK(recovery_generation >= 0)",
+                        "continuation_request_id TEXT REFERENCES runtime_executions(id)",
+                        "control_target_execution_id TEXT REFERENCES runtime_executions(id)",
+                        "control_target_generation INTEGER CHECK(control_target_generation >= 0)",
+                        "control_owner_id TEXT",
+                        "current_policy_input TEXT"
+                };
+                try (Statement statement = connection.createStatement()) {
+                    for (String column : columns) statement.execute("ALTER TABLE runtime_executions ADD COLUMN " + column);
+                }
+                recordMigration(3);
+            }
+            if (!migrationApplied(4)) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("ALTER TABLE runtime_executions ADD COLUMN request_semantics TEXT CHECK(request_semantics IS NULL OR request_semantics IN ('new_request','status_question','continue','clarify'))");
+                }
+                recordMigration(4);
             }
             return null;
         });
@@ -1014,7 +1241,12 @@ public final class RuntimeExecutionStore implements AutoCloseable {
                 instant(rows.getString("created_at")),
                 instant(rows.getString("started_at")),
                 instant(rows.getString("finished_at")),
-                instant(rows.getString("updated_at")));
+                instant(rows.getString("updated_at")),
+                rows.getString("request_kind"), rows.getString("dispatch_state"), rows.getInt("recovery_generation"),
+                rows.getString("continuation_request_id"), rows.getString("control_target_execution_id"),
+                nullableLong(rows, "control_target_generation") == null ? null : rows.getInt("control_target_generation"),
+                rows.getString("control_owner_id"), rows.getString("current_policy_input"),
+                RequestSemantics.decode(rows.getString("request_semantics")));
     }
 
     private <T> T inTransaction(SqlSupplier<T> operation) throws SQLException {

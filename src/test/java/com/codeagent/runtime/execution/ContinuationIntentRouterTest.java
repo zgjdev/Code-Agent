@@ -12,6 +12,35 @@ import static org.junit.jupiter.api.Assertions.*;
 class ContinuationIntentRouterTest {
     @TempDir Path temp;
 
+    @Test void largeHistoricalAnswerIsBoundedToTheActualClassifierRequest() throws Exception {
+        try (var store = new RuntimeExecutionStore(temp.resolve("runtime.db"))) {
+            var request = store.enqueue(temp, "session", "current progress question", null);
+            var client = new Client("{\"intent\":\"NEW_TURN\",\"newTurnKind\":\"STATUS_QUESTION\",\"targetExecutionId\":null,\"targetGeneration\":null}");
+            var history = List.of(new com.codeagent.history.SessionProjection.ConversationNode(1, null, null, "react",
+                    LlmClient.Message.assistant("old history ".repeat(40000) + "LATEST_ROUTING_CONTEXT"),
+                    com.codeagent.history.SessionProjection.ConversationKind.ASSISTANT));
+            var decision = new ContinuationIntentRouter(client, new PromptRepository(null, null))
+                    .route(request, history, snapshot(request), new RecoveryContextBudget(30000, 4096, 2000));
+            assertEquals(RequestSemantics.STATUS_QUESTION, decision.semantics());
+            assertTrue(com.codeagent.memory.TokenBudget.estimateMessagesTokens(client.messages) <= 30000);
+            var data = new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.messages.get(1).content());
+            assertEquals(request.submittedInput(), data.path("submittedInput").asText());
+            assertTrue(data.path("conversationContext").asText().contains("LATEST_ROUTING_CONTEXT"));
+            assertTrue(data.path("conversationContext").asText().contains("omitted"));
+            assertTrue(data.path("runtimeRecoveryContext").toString().contains("old-1"));
+        }
+    }
+
+    @Test void insufficientInputBudgetIsNotReportedAsAmbiguousUserIntent() throws Exception {
+        try (var store = new RuntimeExecutionStore(temp.resolve("runtime.db"))) {
+            var request = store.enqueue(temp, "session", "continue invoice goal", null);
+            var client = new Client("{}");
+            assertThrows(RecoveryContextBudgetExceededException.class, () -> new ContinuationIntentRouter(client,
+                    new PromptRepository(null, null)).route(request, List.of(), snapshot(request), new RecoveryContextBudget(20, 4096, 2000)));
+            assertNull(client.messages, "An impossible request must fail before calling the model");
+        }
+    }
+
     @Test void exactLocalTargetAndNamedQueuedGoalsReachToolFreeClassifier() throws Exception {
         try (var store = new RuntimeExecutionStore(temp.resolve("runtime.db"))) {
             var request = store.enqueue(temp, "session", "continue invoice goal", null);

@@ -17,6 +17,33 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ContinuationExecutionDispatcherTest {
     @TempDir Path temp;
+    @Test void longParentHistoryCannotStarveClassificationOfAStatusQuestion() throws Exception {
+        try (var f = new Fixture()) {
+            var old = f.claim("completed original task", ExecutionMode.REACT);
+            f.store.commitRoutingDecision(old.claim(), ExecutionMode.REACT, RoutingSource.EXPLICIT);
+            var finalizer = new ExecutionFinalizer(f.store);
+            finalizer.ensureStarted(old, f.session);
+            var parent = f.agent.getParentConversationContext();
+            parent.appendExecutionMessage(old.id(), LlmClient.Message.user(old.submittedInput()), old.submittedInput(), "agent", "agent");
+            int threshold = f.agent.getMemoryManager().getContextProfile().compressionTriggerTokens();
+            String large = "historical assistant output ".repeat((threshold - 5000) / 7);
+            parent.appendExecutionMessage(old.id(), LlmClient.Message.assistant(large), large, "agent", "agent");
+            finalizer.finish(old.claim(), new TopLevelExecutionResult(ExecutionMode.REACT, RoutingSource.EXPLICIT,
+                    ExecutionOutcome.SUCCEEDED, "done", null), f.session);
+            var held = f.store.enqueue(temp, f.session.sessionId(), "remaining work", ExecutionMode.REACT);
+            f.store.freezeForUser(f.owner);
+            long base = com.codeagent.memory.TokenBudget.estimateMessagesTokens(parent.providerMessages());
+            assertTrue(base > threshold - 4000 && base < threshold);
+            f.client.response = "{\"intent\":\"NEW_TURN\",\"newTurnKind\":\"STATUS_QUESTION\",\"targetExecutionId\":null,\"targetGeneration\":null}";
+            var status = f.claim("what progress was saved?", null);
+            f.run(status);
+            assertEquals(RequestSemantics.STATUS_QUESTION, f.store.find(status.id()).orElseThrow().requestSemantics());
+            assertEquals(1, f.client.classifications);
+            assertEquals(1, f.client.answers);
+            assertTrue(f.client.lastTools.isEmpty());
+            assertTrue(f.store.find(held.id()).orElseThrow().awaitingInput());
+        }
+    }
     @Test void ordinaryExplicitAndAutomaticRequestsDoNotDependOnRecoveryClassifier() throws Exception {
         try (var f = new Fixture()) {
             f.client.response = "classifier unavailable";

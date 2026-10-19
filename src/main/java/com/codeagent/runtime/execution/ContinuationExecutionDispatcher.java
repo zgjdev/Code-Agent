@@ -4,7 +4,6 @@ import com.codeagent.agent.*;
 import com.codeagent.history.*;
 import com.codeagent.image.ImageReferenceParser;
 import com.codeagent.llm.LlmClient;
-import com.codeagent.memory.TokenBudget;
 import com.codeagent.model.recovery.*;
 import com.codeagent.plan.*;
 import com.codeagent.prompt.*;
@@ -134,8 +133,8 @@ public final class ContinuationExecutionDispatcher {
     private RecoveryContextBudget budget(Agent agent) {
         int reserve=2000;
         int limit=Math.min(client.maxContextWindow(),agent.getMemoryManager().getContextProfile().compressionTriggerTokens());
-        long base=TokenBudget.estimateMessagesTokens(agent.getParentConversationContext().providerMessages());
-        return new RecoveryContextBudget(Math.max(0,limit-base-reserve),4096,reserve);
+        // The classifier sends a bounded semantic view, not the full Parent provider history.
+        return new RecoveryContextBudget(Math.max(0,limit-reserve),4096,reserve);
     }
     private static RecoveryRequestContext currentContext(RecoveryContextSnapshot snapshot,SessionExecutionContext context,RuntimeExecution execution) {
         var envelope=context.session().projection().executionEnvelopes().get(execution.id());

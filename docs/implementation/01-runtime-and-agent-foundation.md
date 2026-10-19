@@ -74,6 +74,8 @@ TEST/BUILD 证据以 typed 工具状态为准，相同完整命令重跑替换�
 
 inline/plain 的恢复意图分类仅处理当前 Session 确有 awaiting_input Task 的新输入，以及已有状态/控制语义或继续票据的请求。没有等待任务的新请求直接进入原 Coordinator，由显式模式或 Mode Router 选择 Agent；不读取完整恢复快照、不调用恢复分类器。此路径仍记录 NEW_REQUEST，保留 Plan 子任务恢复身份。已有 user 的未分类历史记录不走普通快路径，不能借此重新解释或授权旧输入。
 
+恢复分类预算按实际发送的 system、完整当前 submittedInput 和有界顶层历史计算，不扣并未发送的完整 Provider Surface。历史正文超过分类预算时保留后缀并标明省略，不裁剪当前输入；恢复摘要仍受剩余空间的15%及4096 tokens限制。连必要身份/省略计数也放不下时显式抛出准备预算异常，由 Main/Host 保留等待状态，不能记为用户需要澄清。实际 Agent 请求继续使用自身完整快照与自动压缩。
+
 审批与计划回答交给InteractionBroker，CLI是唯一终端输入者。CLI/TUI 和 Java Workspace Runtime 的 HITL 始终启用，不提供全局关闭入口；具体会话批准和无交互适配器时的拒绝行为见 [工具与安全边界](02-tools-policy-and-recovery.md#32-将hitl与审计置于共享执行链)。普通运行中输入排队；等待交互时优先回答交互，非法审批不能自动批准或变成任务。待交互时必须先完成当前审批或评审再提交新任务，显式 `/react` 与 `/plan` 新任务入口也拒绝；`/task` 仅查询、取消和日志。结束通过ExecutionFinalizer和持久化终态收敛账本与SQLite的崩溃窗口。
 
 每个 workspace 拥有局部 Session Registry、ToolRegistry、Broker 和可变运行依赖；单终端由InteractionPresentationQueue顺序展示，Host回答核对workspaceKey、executionId、interactionId。owner目录catalog和本机文件锁先于所属workspace恢复，Git common-dir用整轮粗租约；未知外部副作用资源须明确声明租约。默认headless工厂不自动创建MCP Manager或后台索引，CLI工厂复用已有服务。Tool/Plan内部executor退出时等待物理停止，SnapshotService执行`runTurnAndDrain`；Finalizer跨库失败或关闭超时保持隔离与owner，不让后继进入。schema v2迁移前使用`VACUUM INTO`一致性备份。Windows的`fileKey`为空时，目录核验退化为file store名称加创建时间，其身份强度有限。详见[多工作区执行调度方案](../dev/42-multi-workspace-execution-scheduling.md)。

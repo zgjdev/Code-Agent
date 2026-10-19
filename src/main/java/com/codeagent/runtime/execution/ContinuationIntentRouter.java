@@ -11,6 +11,8 @@ import com.codeagent.llm.StructuredOutputSpec;
 import com.codeagent.runtime.CancellationContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.codeagent.memory.TokenBudget;
 import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
@@ -32,9 +34,7 @@ public final class ContinuationIntentRouter {
             if (CancellationContext.isCancelled() || Thread.currentThread().isInterrupted()) return ContinuationIntent.clarify();
             if (!request.workspaceKey().value().equals(snapshot.workspaceKey()) || !request.sessionId().equals(snapshot.parentSessionId()))
                 return ContinuationIntent.clarify();
-            var formatted = new RecoveryContextFormatter().formatForParent(snapshot, budget, request.id());
-            var data = inputBuilder.build(history, request.submittedInput(), formatted).get(1);
-            var messages = List.of(LlmClient.Message.system(prompts.loadRequired("modes/continuation-intent.md")), data);
+            var messages = requestMessages(request, history, snapshot, budget);
             var result = new StructuredJsonExecutor().execute(client, messages, null,
                     new StructuredOutputSpec("continuation_intent", schema(), true), false,
                     root -> decode(root, snapshot, request.id()), LlmClient.StreamListener.NO_OP);
@@ -42,7 +42,37 @@ public final class ContinuationIntentRouter {
                     || result.response() != null && result.response().toolCalls() != null && !result.response().toolCalls().isEmpty())
                 return ContinuationIntent.clarify();
             return result.value();
+        } catch (RecoveryContextBudgetExceededException failure) {
+            throw failure;
         } catch (IOException | RuntimeException failure) { return ContinuationIntent.clarify(); }
+    }
+
+    /** Budget against this isolated request, not the full Parent provider surface. */
+    private List<LlmClient.Message> requestMessages(RuntimeExecution request,
+            List<SessionProjection.ConversationNode> history, RecoveryContextSnapshot snapshot,
+            RecoveryContextBudget budget) throws IOException {
+        var system = LlmClient.Message.system(prompts.loadRequired("modes/continuation-intent.md"));
+        var payload = (ObjectNode) JSON.readTree(inputBuilder.build(history, request.submittedInput()).get(1).content());
+        long ceiling = Math.min(budget.availableInputBudget(), Math.max(0L, (long) client.maxContextWindow() - budget.outputReserve()));
+        long historyCeiling = Math.min(12000, ceiling / 2);
+        String conversation = payload.path("conversationContext").asText();
+        var base = List.of(system, LlmClient.Message.user(JSON.writeValueAsString(payload)));
+        while (TokenBudget.estimateMessagesTokens(base) > historyCeiling && !conversation.isEmpty()) {
+            int points = conversation.codePointCount(0, conversation.length());
+            conversation = conversation.substring(conversation.offsetByCodePoints(0, (points + 1) / 2));
+            payload.put("conversationContext", "[Earlier conversation omitted for routing budget]\n" + conversation);
+            base = List.of(system, LlmClient.Message.user(JSON.writeValueAsString(payload)));
+        }
+        long remaining = Math.max(0, ceiling - TokenBudget.estimateMessagesTokens(base));
+        var formatted = new RecoveryContextFormatter().formatForParent(snapshot,
+                new RecoveryContextBudget(remaining, budget.maximumTokens(), budget.outputReserve()), request.id());
+        payload.set("runtimeRecoveryContext", JSON.readTree(formatted.content()));
+        var messages = List.of(system, LlmClient.Message.user(JSON.writeValueAsString(payload)));
+        int total = TokenBudget.estimateMessagesTokens(messages);
+        if (total > ceiling)
+            throw new RecoveryContextBudgetExceededException((int) ceiling, total, snapshot.executions().size(),
+                    snapshot.plans().size(), 0, 0, 0, snapshot.warnings().size());
+        return messages;
     }
 
     private static ContinuationIntent decode(JsonNode root, RecoveryContextSnapshot snapshot, String requestId) throws IOException {

@@ -1,6 +1,7 @@
 package com.codeagent.history;
 
 import com.codeagent.context.MeasuredUsage;
+import com.codeagent.context.ContextScopeState;
 import com.codeagent.llm.LlmClient;
 
 import java.util.ArrayList;
@@ -22,7 +23,20 @@ public record SessionProjection(
         Map<String, PendingToolInvocation> pendingTools,
         Map<String, ExecutionEnvelope> executionEnvelopes,
         boolean cleanlyClosed,
-        List<String> warnings) {
+        List<String> warnings,
+        Map<String, ContextScopeState> contextScopes,
+        Map<String, String> committedOperationDigests,
+        int requiredSchemaVersion) {
+
+    public SessionProjection(List<SurfaceNode> activeSurface, List<ConversationNode> topLevelConversation,
+            Map<String, OpenTurn> openTurns, long lastAppliedSequence, long historyVersion,
+            long compactionGeneration, MeasuredUsageFact lastCompletedUsage, Set<String> incompleteRequestIds,
+            Map<String, PendingToolInvocation> pendingTools, Map<String, ExecutionEnvelope> executionEnvelopes,
+            boolean cleanlyClosed, List<String> warnings) {
+        this(activeSurface, topLevelConversation, openTurns, lastAppliedSequence, historyVersion,
+                compactionGeneration, lastCompletedUsage, incompleteRequestIds, pendingTools, executionEnvelopes,
+                cleanlyClosed, warnings, Map.of(), Map.of(), 2);
+    }
 
     public SessionProjection {
         activeSurface = List.copyOf(activeSurface);
@@ -32,6 +46,8 @@ public record SessionProjection(
         pendingTools = Map.copyOf(pendingTools);
         executionEnvelopes = Map.copyOf(executionEnvelopes);
         warnings = List.copyOf(warnings);
+        contextScopes = Map.copyOf(contextScopes);
+        committedOperationDigests = Map.copyOf(committedOperationDigests);
     }
 
     public List<LlmClient.Message> messages() {
@@ -56,7 +72,8 @@ public record SessionProjection(
         updatedWarnings.add(warning);
         return new SessionProjection(activeSurface, topLevelConversation, openTurns,
                 lastAppliedSequence, historyVersion, compactionGeneration, lastCompletedUsage,
-                incompleteRequestIds, pendingTools, executionEnvelopes, cleanlyClosed, updatedWarnings);
+                incompleteRequestIds, pendingTools, executionEnvelopes, cleanlyClosed, updatedWarnings,
+                contextScopes, committedOperationDigests, requiredSchemaVersion);
     }
 
     public record SurfaceNode(long sequence, LlmClient.Message message) {

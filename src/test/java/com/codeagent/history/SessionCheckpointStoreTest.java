@@ -1,5 +1,10 @@
 package com.codeagent.history;
 
+import com.codeagent.context.ContextDigests;
+import com.codeagent.context.ContextEdit;
+import com.codeagent.context.ContextEditBatch;
+import com.codeagent.context.ContextEditReplay;
+import com.codeagent.context.ProtectionSet;
 import com.codeagent.llm.LlmClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -18,6 +23,64 @@ class SessionCheckpointStoreTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @TempDir Path tempDir;
+
+    @Test
+    void v3CheckpointPreservesContextStateAndOperationIdempotenceThroughTailReplay() throws Exception {
+        var manifest = manifest("session-context-checkpoint");
+        var replayer = new SessionReplayer();
+        var source = message(manifest.sessionId(), 0, "legacy body");
+        var before = replayer.replay(manifest, List.of(source));
+        var scope = before.contextScopes().get(manifest.sessionId());
+        var edit = new ContextEdit("edit", ContextEdit.Layer.SNIP, ContextEdit.Kind.REMOVE_SPAN,
+                List.of(scope.sourceNodes().get(0).id()), ContextDigests.sourceDigest(scope.sourceNodes()),
+                List.of(), List.of(), List.of(), 1);
+        var batch = new ContextEditBatch("operation", scope.scopeId(), scope.sourceRevision(),
+                scope.contextGeneration(), ProtectionSet.empty().digest(), ContextEditReplay.baseDigest(scope),
+                List.of(edit));
+        var committed = contextEdit(manifest.sessionId(), 1, batch);
+        var events = List.of(source, committed, contextEdit(manifest.sessionId(), 2, batch),
+                message(manifest.sessionId(), 3, "tail"));
+        var checkpoints = new SessionCheckpointStore(tempDir);
+        var prefix = events.subList(0, 2);
+        checkpoints.write(manifest.sessionId(), prefix, replayer.replay(manifest, prefix));
+
+        var loaded = checkpoints.loadLatest(manifest, events);
+        var file = loaded.checkpoint().orElseThrow().path();
+        assertEquals(replayer.replay(manifest, events), loaded.projection());
+        var stored = (ObjectNode) JSON.readTree(file.toFile());
+        assertEquals(3, stored.path("schemaVersion").asInt());
+        assertTrue(loaded.projection().committedOperationDigests().containsKey("operation"));
+
+        stored.put("schemaVersion", 2);
+        JSON.writeValue(file.toFile(), stored);
+        var fallback = checkpoints.loadLatest(manifest, events);
+        assertFalse(fallback.checkpoint().isPresent());
+        assertEquals(replayer.replay(manifest, events), fallback.projection());
+    }
+
+    @Test
+    void legacyCheckpointWithoutScopeIndexReplaysPrefixToRebuildMembership() throws Exception {
+        var manifest = manifest("legacy-scope-checkpoint");
+        var events = List.of(message(manifest.sessionId(), 0, "old body"));
+        var replayer = new SessionReplayer();
+        var expected = replayer.replay(manifest, events);
+        var checkpoints = new SessionCheckpointStore(tempDir);
+        checkpoints.write(manifest.sessionId(), events, expected);
+        var file = checkpoints.loadLatest(manifest, events).checkpoint().orElseThrow().path();
+        var stored = (ObjectNode) JSON.readTree(file.toFile());
+        assertEquals(2, stored.path("schemaVersion").asInt());
+        ((ObjectNode) stored.path("projection")).remove("contextScopes");
+        JSON.writeValue(file.toFile(), stored);
+
+        var loaded = checkpoints.loadLatest(manifest, events);
+        assertFalse(loaded.checkpoint().isPresent());
+        assertEquals(expected, loaded.projection());
+    }
+
+    private static SessionEvent contextEdit(String sessionId, long sequence, ContextEditBatch batch) {
+        return new SessionEvent(3, sessionId, sequence, sequence + 1, SessionEvent.Types.CONTEXT_EDIT,
+                "react", "agent", "test", false, SessionEvent.SurfaceOperation.none(), JSON.valueToTree(batch));
+    }
 
     @Test
     void checkpointAndTailEqualFullReplay() throws Exception {

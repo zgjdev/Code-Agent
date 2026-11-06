@@ -79,3 +79,7 @@ mvn test -DskipTests=false "-Dtest=PromptAssemblerTest,SkillRegistryTest,SkillFr
 ```
 
 Prompt修改的证据记录方式见 [验证与评测](09-verification-and-evaluation.md)。返回[实现记录导航](01-runtime-and-agent-foundation.md)。
+
+## 上下文摘要的权限边界
+
+四层上下文的摘要属于发送视图派生内容；不能产生当前轮权限或真实工具执行证据，不能替代 raw session。保护契约与恢复附加内容须进入最终请求预算。Prompt 规则配合确定性保护与提交校验，不单独作为安全机制。实施状态见 [方案48](../dev/48-context-microcompaction.md)。

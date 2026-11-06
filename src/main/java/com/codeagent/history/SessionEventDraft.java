@@ -10,5 +10,10 @@ public record SessionEventDraft(
         String source,
         boolean ignorable,
         SessionEvent.SurfaceOperation surface,
-        JsonNode payload) {
+        JsonNode payload,
+        int schemaVersion) {
+    public SessionEventDraft(String type, String mode, String actor, String source, boolean ignorable,
+                             SessionEvent.SurfaceOperation surface, JsonNode payload) {
+        this(type, mode, actor, source, ignorable, surface, payload, 2);
+    }
 }

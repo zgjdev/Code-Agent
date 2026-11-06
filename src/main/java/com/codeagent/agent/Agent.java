@@ -3,12 +3,31 @@ package com.codeagent.agent;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.llm.ContextWindowExceededException;
 import com.codeagent.llm.LlmTraceLogger;
+import com.codeagent.config.ContextManagementConfig;
+import com.codeagent.context.ContextAutoCompactor;
+import com.codeagent.context.ContextCollapseManager;
+import com.codeagent.context.ContextDigests;
+import com.codeagent.context.ContextEdit;
+import com.codeagent.context.ContextEditBatch;
+import com.codeagent.context.ContextEditReplay;
+import com.codeagent.context.ContextEditSink;
+import com.codeagent.context.ContextNode;
 import com.codeagent.context.ContextProfile;
+import com.codeagent.context.ContextScopeState;
 import com.codeagent.context.ContextTokenTracker;
+import com.codeagent.context.ContextWindowManager;
+import com.codeagent.context.ContextWindowState;
+import com.codeagent.context.NodeId;
+import com.codeagent.context.ProtectionSet;
+import com.codeagent.context.RequestPurpose;
 import com.codeagent.context.RequestSnapshot;
 import com.codeagent.context.RequestSnapshotFactory;
 import com.codeagent.context.InvalidationReason;
 import com.codeagent.context.TokenUsageFormatter;
+import com.codeagent.context.SourceKind;
+import com.codeagent.context.StructuredContextSummarizer;
+import com.codeagent.context.SummaryCallBudget;
+import com.codeagent.context.ToolResultDescriptor;
 import com.codeagent.history.ConversationLedger;
 import com.codeagent.history.ParentConversationContext;
 import com.codeagent.history.SessionEvent;
@@ -52,8 +71,13 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -78,6 +102,16 @@ public class Agent {
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private final ContextTokenTracker contextTokenTracker = new ContextTokenTracker();
     private final RequestSnapshotFactory requestSnapshotFactory = new RequestSnapshotFactory();
+    private final ContextManagementConfig contextConfig = ContextManagementConfig.load();
+    private final ContextWindowManager contextWindowManager = new ContextWindowManager();
+    private final String localContextScope = UUID.randomUUID().toString();
+    private final Map<LlmClient.Message, ContextNode> localContextNodes = new IdentityHashMap<>();
+    private final Map<String, String> localContextOperations = new java.util.HashMap<>();
+    private List<ContextEdit> localContextEdits = List.of();
+    private long nextLocalContextSequence;
+    private long localContextGeneration;
+    private String contextExecutionId;
+    private final Set<LlmClient.Message> finalizationInstructions = new HashSet<>();
     private long historyVersion;
     private long observedCompactionGeneration;
     private RecoveryRequestContext recoveryRequestContext;
@@ -103,6 +137,7 @@ public class Agent {
         this.parentConversationContext = new ParentConversationContext(
                 LlmClient.Message.system(buildSystemPrompt()), llmClient);
         this.conversationHistory = parentConversationContext.providerMessages();
+        if (contextConfig.diagnostic() != null) log.warn("{}", contextConfig.diagnostic());
     }
 
     /**
@@ -245,10 +280,13 @@ public class Agent {
     public AgentExecutionResult runExecution(String userInput, String submittedUserInput, RecoveryRequestContext recovery) {
         if (recoveryRequestContext != null) throw new IllegalStateException("Recovery execution already active");
         recoveryRequestContext = recovery;
+        contextExecutionId = UUID.randomUUID().toString();
         try {
             if (recovery != null) validateRecoveryRequest(submittedUserInput);
             return runExecutionInternal(userInput, submittedUserInput);
         } finally {
+            contextExecutionId = null;
+            finalizationInstructions.clear();
             recoveryRequestContext = null;
             recoveryInputPrefix = "";
             recoveryInputSuffix = "";
@@ -306,6 +344,7 @@ public class Agent {
         long startNanos = System.nanoTime();
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
         int overflowRetries = 0;
+        RequestSnapshot overflowBase = null;
         pushStatus(budget, startNanos, "running");
 
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
@@ -322,21 +361,41 @@ public class Agent {
                     ? toolRegistry.getToolDefinitions()
                     : List.of();
             TurnToolPolicy.ToolExposure toolExposure = turnToolPolicy.expose(toolDefinitions);
-            if (recoveryRequestContext != null) {
+            boolean layered = useLayeredContext();
+            if (!layered && recoveryRequestContext != null) {
                 // First reduce the real parent surface if it already fills the input ceiling;
                 // otherwise the required recovery provenance cannot be budgeted at all.
                 RequestSnapshot base = requestSnapshotFactory.capture(llmClient, conversationHistory, toolExposure.definitions(), historyVersion);
                 maybeCompactHistory(base, contextTokenTracker.predict(base));
             }
-            List<LlmClient.Message> requestMessages = assembleRequest(toolExposure.definitions());
-            RequestSnapshot requestSnapshot = requestSnapshotFactory.capture(
-                    llmClient, requestMessages, toolExposure.definitions(), historyVersion);
-            ContextTokenTracker.ContextPrediction prediction = contextTokenTracker.predict(requestSnapshot);
-            if (maybeCompactHistory(requestSnapshot, prediction)) {
-                requestMessages = assembleRequest(toolExposure.definitions());
+            List<LlmClient.Message> requestMessages;
+            List<LlmClient.Tool> requestTools = toolExposure.definitions();
+            RequestSnapshot requestSnapshot;
+            if (layered) {
+                try {
+                    var prepared = prepareLayeredRequest(requestTools, statusOnly() ? RequestPurpose.STATUS
+                            : recoveryRequestContext == null ? RequestPurpose.NORMAL : RequestPurpose.RECOVERY,
+                            overflowBase != null, budget);
+                    requestMessages = prepared.messages();
+                    requestTools = prepared.tools();
+                    requestSnapshot = prepared.snapshot();
+                    if (!prepared.sendable() || overflowBase != null && (
+                            requestSnapshot.surfaceFingerprint().equals(overflowBase.surfaceFingerprint())
+                                    || requestSnapshot.estimatedRequestTokens() >= overflowBase.estimatedRequestTokens())) {
+                        return contextBudgetFailure(prepared.reason().name(), streamRenderer, budget, startNanos);
+                    }
+                    overflowBase = null;
+                } catch (IOException | IllegalArgumentException e) {
+                    return contextBudgetFailure("CONTEXT_PREPARATION_FAILED", streamRenderer, budget, startNanos);
+                }
+            } else {
+                requestMessages = assembleRequest(requestTools);
                 requestSnapshot = requestSnapshotFactory.capture(
-                        llmClient, requestMessages, toolExposure.definitions(), historyVersion);
-                prediction = contextTokenTracker.predict(requestSnapshot);
+                        llmClient, requestMessages, requestTools, historyVersion);
+                if (maybeCompactHistory(requestSnapshot, contextTokenTracker.predict(requestSnapshot))) {
+                    requestMessages = assembleRequest(requestTools);
+                    requestSnapshot = requestSnapshotFactory.capture(llmClient, requestMessages, requestTools, historyVersion);
+                }
             }
             AgentBudget.ExitReason exitReason = budget.check();
             if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
@@ -348,13 +407,13 @@ public class Agent {
             String requestId = UUID.randomUUID().toString();
 
             try {
-                logRequestContext("react iteration=" + iteration, toolExposure.definitions());
+                if (!layered) logRequestContext("react iteration=" + iteration, requestTools);
                 persistRequestStarted(requestId, requestSnapshot);
                 streamRenderer.beginThinking();
                 // 调用 LLM
                 LlmClient.ChatResponse response = llmClient.chat(
                         requestMessages,
-                        toolExposure.definitions(),
+                        requestTools,
                         streamRenderer
                 );
                 LlmTraceLogger.logReasoning(log, "react iteration=" + iteration, llmClient, response.reasoningContent());
@@ -413,7 +472,7 @@ public class Agent {
                     for (ToolExecutionResult toolResult : toolResults) {
                         appendConversationMessage(
                                 LlmClient.Message.tool(toolResult.id(), toolResult.result()),
-                                "tool_execution");
+                                "tool_execution", toolResult.descriptor());
                     }
                     appendImageToolMessages(toolResults);
                     pushStatus(budget, startNanos, "running");
@@ -467,6 +526,11 @@ public class Agent {
                 persistRequestFailedBestEffort(requestId, e);
                 if (overflowRetries < 1) {
                     overflowRetries++;
+                    if (layered) {
+                        contextTokenTracker.invalidate(InvalidationReason.OVERFLOW_RECOVERY);
+                        overflowBase = requestSnapshot;
+                        continue;
+                    }
                     try {
                         long beforeTokens = estimateCurrentContextTokens();
                         List<LlmClient.Message> candidate = new ArrayList<>(conversationHistory);
@@ -517,8 +581,17 @@ public class Agent {
 
         try {
             streamRenderer.beginThinking();
-            List<LlmClient.Message> requestMessages = assembleRequest(List.of());
-            RequestSnapshot requestSnapshot = requestSnapshotFactory.capture(llmClient, requestMessages, List.of(), historyVersion);
+            List<LlmClient.Message> requestMessages;
+            RequestSnapshot requestSnapshot;
+            if (useLayeredContext()) {
+                var prepared = prepareLayeredRequest(List.of(), RequestPurpose.FINALIZATION, false, budget);
+                if (!prepared.sendable()) return contextBudgetFailure(prepared.reason().name(), streamRenderer, budget, startNanos);
+                requestMessages = prepared.messages();
+                requestSnapshot = prepared.snapshot();
+            } else {
+                requestMessages = assembleRequest(List.of());
+                requestSnapshot = requestSnapshotFactory.capture(llmClient, requestMessages, List.of(), historyVersion);
+            }
             String requestId = UUID.randomUUID().toString();
             persistRequestStarted(requestId, requestSnapshot);
             LlmClient.ChatResponse response = llmClient.chat(
@@ -532,8 +605,7 @@ public class Agent {
             String partialResult = formatPartialResult(description, responseContent);
             LlmClient.Message partialAssistant = LlmClient.Message.assistant(partialResult);
             persistCompletedResponse(requestId, partialAssistant, llmClient.normalizeUsage(response), true);
-            conversationHistory.add(partialAssistant);
-            historyVersion++;
+            appendCommittedConversationMessage(partialAssistant);
             conversationLedger.appendMessage(
                     "react",
                     "agent",
@@ -585,6 +657,9 @@ public class Agent {
                     SessionEvent.SurfaceOperation.append(), null);
         }
         conversationHistory.clear();
+        localContextNodes.clear();
+        localContextEdits = List.of();
+        localContextGeneration++;
         historyVersion++;
         contextTokenTracker.invalidate(InvalidationReason.CLEAR);
         conversationHistory.add(freshSystem);
@@ -600,6 +675,7 @@ public class Agent {
      * 手动压缩当前 ReAct 对话历史，不等待上下文窗口阈值触发。
      */
     public CompactionResult compactHistoryNow() {
+        if (contextConfig.enabled()) return compactLayeredNow();
         long beforeTokens = estimateCurrentContextTokens();
         int beforeMessages = conversationHistory.size();
         try {
@@ -813,7 +889,9 @@ public class Agent {
         // 分类估算 token 占用
         int systemTokens = 0, userTokens = 0, assistantTokens = 0, toolTokens = 0;
         int systemCount = 0, userCount = 0, assistantCount = 0, toolCount = 0;
-        for (LlmClient.Message msg : conversationHistory) {
+        ContextWindowManager.Result preview = useLayeredContext() ? previewLayeredContext() : null;
+        var displayMessages = preview == null ? conversationHistory : preview.messages();
+        for (LlmClient.Message msg : displayMessages) {
             int t = com.codeagent.memory.TokenBudget.estimateMessagesTokens(java.util.List.of(msg));
             switch (msg.role()) {
                 case "system" -> { systemTokens += t; systemCount++; }
@@ -823,7 +901,7 @@ public class Agent {
             }
         }
         int messagesTokens = userTokens + assistantTokens + toolTokens;
-        int toolsSchemaTokens = estimateToolsSchemaTokens();
+        int toolsSchemaTokens = preview == null ? estimateToolsSchemaTokens() : preview.snapshot().estimatedToolTokens();
         int total = systemTokens + messagesTokens + toolsSchemaTokens;
         double ratio = window > 0 ? (double) total / window : 0;
         int triggerRemaining = Math.max(0, triggerTokens - total);
@@ -847,10 +925,13 @@ public class Agent {
                 (int) (profile.compressionTriggerRatio() * 100),
                 formatTokens(triggerRemaining)));
         sb.append("  自动压缩: ")
-                .append(autoCompactionManager.isSessionMemoryEnabled()
+                .append(contextConfig.enabled() ? "Snip → Microcompact → Collapse → Auto compact"
+                        : autoCompactionManager.isSessionMemoryEnabled()
                         ? "Session Memory 优先，完整摘要回退"
                         : "完整摘要（Session Memory 实验开关关闭）")
                 .append("\n");
+        if (preview != null) sb.append("  含余量预测: ").append(formatTokens((int) Math.min(Integer.MAX_VALUE, preview.prediction().effectiveTokens())))
+                .append(" tokens（已提交发送视图）\n");
         sb.append("  MCP resources 自动索引: ")
                 .append(profile.mcpResourceIndexEnabled() ? "开启" : "关闭（window 不足 32k）")
                 .append("\n");
@@ -929,8 +1010,193 @@ public class Agent {
         return augmenter.augmentRequest(conversationHistory, formatted, boundary, parentConversationContext.sessionHandle());
     }
 
+    private boolean useLayeredContext() {
+        var projection = parentConversationContext.projection();
+        return contextConfig.enabled() || !localContextEdits.isEmpty()
+                || projection != null && projection.contextScopes().values().stream()
+                        .anyMatch(scope -> !scope.activeEdits().isEmpty());
+    }
+
+    private ContextWindowManager.Result prepareLayeredRequest(List<LlmClient.Tool> tools, RequestPurpose purpose,
+                                                               boolean overflow, AgentBudget executionBudget) throws IOException {
+        var options = ContextWindowState.Options.defaults(memoryManager.getContextProfile(), contextConfig.enabled());
+        var budget = new SummaryCallBudget(executionBudget != null
+                && executionBudget.check() == AgentBudget.ExitReason.WITHIN_BUDGET ? 16 : 0);
+        var handle = parentConversationContext.sessionHandle();
+        RecoveryRequestAugmenter.RecoveryView recovery = recoveryView(options, handle);
+        Supplier<ContextWindowState.Snapshot> refresh = () -> layeredSnapshot(options, recovery);
+        ContextEditSink sink = handle == null ? this::commitLocalEdit
+                : new com.codeagent.history.SessionContextEditSink(handle, () -> refresh.get().protection());
+        var summarizer = new StructuredContextSummarizer(llmClient, promptAssembler,
+                () -> executionBudget == null || executionBudget.check() == AgentBudget.ExitReason.WITHIN_BUDGET,
+                response -> {
+                    if (executionBudget != null && response != null) executionBudget.recordTokens(response.inputTokens(),
+                            response.outputTokens(), response.cachedInputTokens());
+                });
+        var collapse = new ContextCollapseManager(summarizer);
+        var auto = new ContextAutoCompactor(summarizer);
+        return contextWindowManager.prepare(llmClient, tools, purpose, overflow, options, contextTokenTracker,
+                    refresh, sink, new ContextWindowManager.SummaryLayers() {
+                        @Override public Optional<ContextEdit> collapse(ContextWindowState.Snapshot snapshot,
+                                                                      List<ContextNode> view) {
+                            return collapse.propose(snapshot, options, budget);
+                        }
+                        @Override public boolean auto(ContextWindowState.Snapshot snapshot, List<ContextNode> view) throws IOException {
+                            var proposal = auto.propose(snapshot, view, options.triggerTokens(), 3, budget);
+                            if (proposal.isEmpty()) return false;
+                            if (handle != null) {
+                                boolean committed = parentConversationContext.commitLayeredCompaction(snapshot, proposal.get(), refresh,
+                                        "react", "agent", "automatic");
+                                if (committed) synchronizeParentContext();
+                                return committed;
+                            }
+                            return sink.commit(contextBatch(snapshot, proposal.get())) == ContextEditSink.CommitResult.APPLIED;
+                        }
+                    }, recovery == null ? java.util.function.Function.identity() : recovery::apply);
+    }
+
+    private ContextWindowState.Snapshot layeredSnapshot(ContextWindowState.Options options) {
+        return layeredSnapshot(options, null);
+    }
+
+    private ContextWindowState.Snapshot layeredSnapshot(ContextWindowState.Options options,
+                                                         RecoveryRequestAugmenter.RecoveryView recovery) {
+        var handle = parentConversationContext.sessionHandle();
+        ContextScopeState scope;
+        if (handle != null) {
+            scope = handle.projection().contextScopes().get(handle.sessionId());
+            if (scope == null) throw new IllegalArgumentException("Parent context source identity unavailable");
+        } else {
+            var nodes = conversationHistory.stream().map(message -> localContextNodes.computeIfAbsent(message,
+                    key -> localNode(key, "system".equals(key.role()) ? SourceKind.SYSTEM : SourceKind.LEGACY_UNKNOWN, null))).toList();
+            var ids = new HashSet<>(nodes.stream().map(ContextNode::id).toList());
+            localContextNodes.keySet().removeIf(message -> !ids.contains(localContextNodes.get(message).id()));
+            var active = localContextEdits.stream().filter(edit -> ids.containsAll(edit.orderedSourceIds())
+                    && edit.dependencies().stream().allMatch(dep -> ids.contains(dep.nodeId()))).toList();
+            if (!active.equals(localContextEdits)) localContextGeneration++;
+            localContextEdits = active;
+            scope = new ContextScopeState(localContextScope, historyVersion, localContextGeneration, nodes, active);
+        }
+        var sources = scope.sourceNodes();
+        Set<NodeId> pinned = new HashSet<>();
+        sources.stream().filter(node -> finalizationInstructions.contains(node.message()))
+                .forEach(node -> pinned.add(node.id()));
+        for (int i = sources.size() - 1; i >= 0; i--) {
+            var node = sources.get(i);
+            if (node.sourceKind() == SourceKind.REAL_USER) {
+                pinned.add(node.id());
+                break;
+            }
+        }
+        var host = recovery == null ? new ProtectionSet(pinned, Set.of(), Set.of(), Set.of(), Set.of())
+                : new ProtectionSet(pinned, Set.of(), Set.of(), recovery.pinned(), Set.of(),
+                        Map.of("recovery", recovery.fingerprint()));
+        return new ContextWindowState.Snapshot(scope.scopeId(), scope.sourceRevision(), scope.contextGeneration(),
+                sources, scope.activeEdits(), ProtectionSet.derive(sources, host, options.recentToolBatches()));
+    }
+
+    private RecoveryRequestAugmenter.RecoveryView recoveryView(ContextWindowState.Options options,
+                                                              SessionStore.SessionHandle handle) {
+        if (recoveryRequestContext == null) return null;
+        var recovery = recoveryRequestContext;
+        var boundary = recovery.boundary();
+        int limit = (int) Math.min(4096, options.triggerTokens() / 4);
+        var formatted = new RecoveryContextFormatter().formatForParent(recovery.snapshot(),
+                new RecoveryContextBudget((limit * 100L + 14) / 15, limit, 0), boundary.inputExecutionId());
+        if (formatted.omittedUnknownCount() > 0 || formatted.omittedExecutionCount() > 0
+                || formatted.omittedPlanCount() > 0 || formatted.omittedTaskCount() > 0) {
+            throw new IllegalArgumentException("Required recovery metadata exceeds context budget");
+        }
+        var augmenter = new RecoveryRequestAugmenter(recoveryInputPrefix, recoveryInputSuffix);
+        return augmenter.composeNodes(layeredSnapshot(options).sourceNodes(), formatted, boundary, handle);
+    }
+
+    private ContextWindowManager.Result previewLayeredContext() {
+        List<LlmClient.Tool> tools = llmClient != null && llmClient.supportsTools() && !statusOnly()
+                ? toolRegistry.getToolDefinitions() : List.of();
+        try {
+            return prepareLayeredRequest(tools, RequestPurpose.PREVIEW, false, null);
+        } catch (IOException | IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private CompactionResult compactLayeredNow() {
+        var options = ContextWindowState.Options.defaults(memoryManager.getContextProfile(), true);
+        Supplier<ContextWindowState.Snapshot> refresh = () -> layeredSnapshot(options);
+        var state = refresh.get();
+        var visible = ContextEditReplay.project(contextScope(state), state.protection());
+        long before = com.codeagent.memory.TokenBudget.estimateMessagesTokens(visible.stream().map(ContextNode::message).toList());
+        try {
+            var compact = new ContextAutoCompactor(new StructuredContextSummarizer(llmClient, promptAssembler));
+            var proposal = compact.propose(state, visible, options.triggerTokens(), 1, new SummaryCallBudget(16));
+            if (proposal.isEmpty()) return new CompactionResult(false, before, before, null);
+            boolean committed = parentConversationContext.sessionHandle() != null
+                    ? parentConversationContext.commitLayeredCompaction(state, proposal.get(), refresh, "react", "agent", "manual")
+                    : commitLocalEdit(contextBatch(state, proposal.get())) == ContextEditSink.CommitResult.APPLIED;
+            if (committed) {
+                synchronizeParentContext();
+                contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
+            }
+            var next = refresh.get();
+            long after = com.codeagent.memory.TokenBudget.estimateMessagesTokens(
+                    ContextEditReplay.project(contextScope(next), next.protection()).stream().map(ContextNode::message).toList());
+            return new CompactionResult(committed, before, after, null);
+        } catch (IOException | IllegalArgumentException e) {
+            return new CompactionResult(false, before, before, "CONTEXT_COMPACTION_FAILED");
+        }
+    }
+
+    private ContextEditSink.CommitResult commitLocalEdit(ContextEditBatch batch) {
+        String digest = ContextDigests.canonicalDigest(batch);
+        String previous = localContextOperations.get(batch.operationId());
+        if (previous != null) {
+            if (!previous.equals(digest)) throw new IllegalArgumentException("Conflicting context operation identity");
+            return ContextEditSink.CommitResult.ALREADY_APPLIED;
+        }
+        var current = layeredSnapshot(ContextWindowState.Options.defaults(memoryManager.getContextProfile(), contextConfig.enabled()));
+        try {
+            var state = ContextEditReplay.apply(contextScope(current), batch, current.protection());
+            localContextEdits = state.activeEdits();
+            localContextGeneration = state.contextGeneration();
+            localContextOperations.put(batch.operationId(), digest);
+            return ContextEditSink.CommitResult.APPLIED;
+        } catch (ContextEditReplay.StaleContextException e) {
+            return ContextEditSink.CommitResult.STALE;
+        }
+    }
+
+    private static ContextScopeState contextScope(ContextWindowState.Snapshot snapshot) {
+        return new ContextScopeState(snapshot.scopeId(), snapshot.sourceRevision(), snapshot.contextGeneration(),
+                snapshot.sourceNodes(), snapshot.activeEdits());
+    }
+
+    private static ContextEditBatch contextBatch(ContextWindowState.Snapshot snapshot, ContextEdit edit) {
+        return new ContextEditBatch(edit.editId(), snapshot.scopeId(), snapshot.sourceRevision(), snapshot.contextGeneration(),
+                snapshot.protection().digest(), ContextEditReplay.baseDigest(contextScope(snapshot)), List.of(edit));
+    }
+
+    private AgentExecutionResult contextBudgetFailure(String reason, StreamRenderer streamRenderer,
+                                                      AgentBudget budget, long startNanos) {
+        streamRenderer.finish();
+        pushStatus(budget, startNanos, "idle");
+        return AgentExecutionResult.failed("❌ 上下文无法在预算内组装（" + reason + "）。", reason);
+    }
+
+    private ContextNode localNode(LlmClient.Message message, SourceKind kind, ToolResultDescriptor descriptor) {
+        return new ContextNode(NodeId.raw(localContextScope, nextLocalContextSequence++), message,
+                kind, contextOwner(), null, null, descriptor);
+    }
+
+    private String contextOwner() {
+        String execution = resultExecutionId();
+        return execution == null ? contextExecutionId : execution;
+    }
+
     private long projectedContextTokens() {
         try {
+            var preview = useLayeredContext() ? previewLayeredContext() : null;
+            if (preview != null) return preview.prediction().effectiveTokens();
             List<LlmClient.Tool> tools = llmClient != null && llmClient.supportsTools()
                     ? toolRegistry.getToolDefinitions() : null;
             RequestSnapshot snapshot = requestSnapshotFactory.capture(
@@ -943,6 +1209,8 @@ public class Agent {
 
     /** Returns the same context prediction used by the next provider request. */
     public ContextTokenTracker.ContextPrediction currentContextPrediction() {
+        var preview = useLayeredContext() ? previewLayeredContext() : null;
+        if (preview != null) return preview.prediction();
         List<LlmClient.Tool> tools = llmClient != null && llmClient.supportsTools() && !statusOnly()
                 ? toolRegistry.getToolDefinitions() : List.of();
         RequestSnapshot snapshot = requestSnapshotFactory.capture(
@@ -1238,9 +1506,10 @@ public class Agent {
     }
 
     private void appendTopLevelUserMessage(LlmClient.Message message, String submittedUserInput, String source) {
+        if (contextConfig.enabled()) localContextNodes.put(message, localNode(message, SourceKind.REAL_USER, null));
         if (parentConversationContext.sessionHandle() != null) {
             persistMessage(message, eventType(message), SessionEvent.SurfaceOperation.append(), null,
-                    conversationMetadata("react", "user", submittedUserInput, null, null));
+                    conversationMetadata("react", "user", submittedUserInput, null, null), SourceKind.REAL_USER, null);
         }
         conversationHistory.add(message);
         historyVersion++;
@@ -1248,8 +1517,15 @@ public class Agent {
     }
 
     private void appendConversationMessage(LlmClient.Message message, String source) {
+        appendConversationMessage(message, source, null);
+    }
+
+    private void appendConversationMessage(LlmClient.Message message, String source, ToolResultDescriptor descriptor) {
+        SourceKind kind = sourceKind(message);
+        if ("budget_finalization".equals(source)) finalizationInstructions.add(message);
+        if (contextConfig.enabled()) localContextNodes.put(message, localNode(message, kind, descriptor));
         if (parentConversationContext.sessionHandle() != null) {
-            persistMessage(message, eventType(message), SessionEvent.SurfaceOperation.append(), null);
+            persistMessage(message, eventType(message), SessionEvent.SurfaceOperation.append(), null, null, kind, descriptor);
         }
         conversationHistory.add(message);
         historyVersion++;
@@ -1257,6 +1533,7 @@ public class Agent {
     }
 
     private void appendCommittedConversationMessage(LlmClient.Message message) {
+        if (contextConfig.enabled()) localContextNodes.put(message, localNode(message, sourceKind(message), null));
         conversationHistory.add(message);
         historyVersion++;
     }
@@ -1339,8 +1616,17 @@ public class Agent {
     private void persistMessage(LlmClient.Message message, String type,
                                 SessionEvent.SurfaceOperation operation, String requestId,
                                 ObjectNode conversation) {
+        persistMessage(message, type, operation, requestId, conversation, sourceKind(message), null);
+    }
+
+    private void persistMessage(LlmClient.Message message, String type,
+                                SessionEvent.SurfaceOperation operation, String requestId,
+                                ObjectNode conversation, SourceKind kind, ToolResultDescriptor descriptor) {
         ObjectNode payload = JSON.createObjectNode();
         payload.set("message", JSON.valueToTree(message));
+        payload.put("sourceKind", kind.name());
+        if (contextOwner() != null) payload.put("contextExecutionId", contextOwner());
+        if (descriptor != null) payload.set("toolResultDescriptor", JSON.valueToTree(descriptor));
         if (conversation != null) {
             payload.set("conversation", conversation);
         }
@@ -1351,6 +1637,16 @@ public class Agent {
             payload.put("invocationId", message.toolCallId());
         }
         persistEvent(type, operation, payload);
+    }
+
+    private static SourceKind sourceKind(LlmClient.Message message) {
+        return switch (message.role()) {
+            case "system" -> SourceKind.SYSTEM;
+            case "tool" -> SourceKind.TOOL_RESULT;
+            case "assistant" -> message.toolCalls() == null || message.toolCalls().isEmpty()
+                    ? SourceKind.ASSISTANT : SourceKind.TOOL_CALL;
+            default -> SourceKind.SYNTHETIC;
+        };
     }
 
     private ObjectNode conversationMetadata(String mode, String role, String content,

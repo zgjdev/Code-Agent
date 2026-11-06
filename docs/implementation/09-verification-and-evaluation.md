@@ -108,3 +108,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File src/test/resources/launcher/
 ```
 
 配置向导单测通过可注入 UI 验证取消、状态失效、保存失败和秘密不入历史；真实 PTY 的遮罩/焦点/终端还原仍需单独记录。连接测试只用固定短消息和模拟服务，不自动使用开发者密钥。实施证据及未测边界见 [46号方案](../dev/46-global-cli-installation-and-onboarding.md)。
+
+## 四层上下文验收入口
+
+[方案48](../dev/48-context-microcompaction.md) 是本任务唯一实施与验证记录。新增回归须覆盖默认关闭及配置优先级、scope 隔离、四层顺序与重计量、durable edit 重放和 v3 兼容拒绝、手动压缩、只读预览、恢复附加预算、保护内容超限拒绝发送。摘要失败、陈旧来源和不确定写入不能被计为成功；本节列出验证要求，不表示相关测试已经通过。

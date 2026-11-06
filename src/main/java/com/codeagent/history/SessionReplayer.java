@@ -1,6 +1,7 @@
 package com.codeagent.history;
 
 import com.codeagent.context.MeasuredUsage;
+import com.codeagent.context.*;
 import com.codeagent.llm.LlmClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,6 +18,7 @@ import java.util.Set;
 public final class SessionReplayer {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> KNOWN_TYPES = Set.of(
+            SessionEvent.Types.CONTEXT_EDIT,
             SessionEvent.Types.SESSION_START,
             SessionEvent.Types.SESSION_END,
             SessionEvent.Types.SESSION_INTERRUPT,
@@ -53,6 +55,7 @@ public final class SessionReplayer {
         long expectedSequence = 0;
         for (SessionEvent event : events == null ? List.<SessionEvent>of() : events) {
             validate(manifest, event, expectedSequence);
+            state.requiredSchemaVersion = Math.max(state.requiredSchemaVersion, event.schemaVersion());
             expectedSequence++;
             state.lastAppliedSequence = event.sequence();
             state.cleanlyClosed = false;
@@ -79,6 +82,7 @@ public final class SessionReplayer {
         long expectedSequence = checkpoint.lastAppliedSequence() + 1;
         for (SessionEvent event : tail == null ? List.<SessionEvent>of() : tail) {
             validate(manifest, event, expectedSequence++);
+            state.requiredSchemaVersion = Math.max(state.requiredSchemaVersion, event.schemaVersion());
             state.lastAppliedSequence = event.sequence();
             state.cleanlyClosed = false;
             if (!KNOWN_TYPES.contains(event.type())) {
@@ -108,16 +112,39 @@ public final class SessionReplayer {
             throw new UnsupportedSessionEventException(
                     "unsupported schema version: " + event.schemaVersion());
         }
+        if (event.schemaVersion() < 1) throw new CorruptSessionException("Invalid event schema version");
     }
 
     private static void apply(MutableProjection state, SessionEvent event) {
+        state.requiredSchemaVersion = Math.max(state.requiredSchemaVersion, event.schemaVersion());
         JsonNode payload = event.payload();
+        if (SessionEvent.Types.CONTEXT_EDIT.equals(event.type())) {
+            if (event.schemaVersion() != 3 || event.ignorable() || !"none".equals(event.surface().op()))
+                throw new CorruptSessionException("context/edit requires schema 3 and required semantics");
+            try {
+                if (JSON.writeValueAsBytes(payload).length > 1024 * 1024)
+                    throw new CorruptSessionException("Context payload exceeds limit");
+                ContextEditBatch batch = JSON.treeToValue(payload, ContextEditBatch.class);
+                String digest = ContextDigests.canonicalDigest(batch);
+                String previous = state.committedOperationDigests.get(batch.operationId());
+                if (previous != null) {
+                    if (!previous.equals(digest)) throw new CorruptSessionException("Context operation identity conflict");
+                    return;
+                }
+                ContextScopeState scope = state.contextScopes.get(batch.scopeId());
+                if (scope == null) throw new CorruptSessionException("Missing context scope");
+                state.contextScopes.put(batch.scopeId(), ContextEditReplay.apply(scope, batch, null));
+                state.committedOperationDigests.put(batch.operationId(), digest);
+            } catch (Exception e) { throw new CorruptSessionException("Invalid context edit transaction", e); }
+            return;
+        }
         String compactionId = text(payload, "compactionId");
         if (SessionEvent.Types.COMPACTION_START.equals(event.type())) {
             require(compactionId, "compaction/start requires compactionId");
             if (state.compactions.putIfAbsent(compactionId, new ArrayList<>()) != null) {
                 throw new CorruptSessionException("duplicate compaction start: " + compactionId);
             }
+            state.compactionStarts.put(compactionId, event);
             return;
         }
         if (SessionEvent.Types.COMPACTION_END.equals(event.type())) {
@@ -251,7 +278,12 @@ public final class SessionReplayer {
         if (staged == null) {
             throw new CorruptSessionException("compaction end without start: " + compactionId);
         }
+        SessionEvent start = state.compactionStarts.remove(compactionId);
         if (!"completed".equals(text(event.payload(), "status"))) {
+            return;
+        }
+        if (start != null && start.schemaVersion() >= 3) {
+            completeExplicitCompaction(state, start, staged, event);
             return;
         }
         int insertionIndex = -1;
@@ -263,11 +295,89 @@ public final class SessionReplayer {
             } else if ("append".equals(stagedEvent.surface().op()) && insertionIndex >= 0) {
                 state.surface.add(insertionIndex++, messageNode(stagedEvent));
                 state.historyVersion++;
+                synchronizeContextSources(state, stagedEvent);
             } else {
                 applySurface(state, stagedEvent);
             }
         }
         state.compactionGeneration++;
+    }
+
+    private static void completeExplicitCompaction(MutableProjection state, SessionEvent start,
+            List<SessionEvent> staged, SessionEvent end) {
+        if (start.ignorable() || end.ignorable() || end.schemaVersion() != 3 || staged.size() != 1)
+            throw new CorruptSessionException("Invalid required compaction transaction");
+        SessionEvent summary = staged.get(0);
+        if (summary.schemaVersion() != 3 || summary.ignorable()
+                || !SessionEvent.Types.ASSISTANT_MESSAGE.equals(summary.type()) || !"none".equals(summary.surface().op()))
+            throw new CorruptSessionException("Invalid compaction summary");
+        if (!ContextDigests.canonicalDigest(List.of(start.payload(), summary.payload()))
+                .equals(text(end.payload(), "transactionDigest"))) throw new CorruptSessionException("Compaction transaction digest mismatch");
+        String scopeId = requiredText(start.payload(), "scopeId");
+        ContextScopeState scope = state.contextScopes.get(scopeId);
+        if (scope == null || scope.sourceRevision() != start.payload().path("expectedSourceRevision").asLong(-1)
+                || scope.contextGeneration() != start.payload().path("expectedContextGeneration").asLong(-1))
+            throw new CorruptSessionException("Stale compaction source");
+        List<NodeId> ids = new ArrayList<>();
+        try { for (JsonNode id : start.payload().path("orderedSourceIds")) ids.add(JSON.treeToValue(id, NodeId.class)); }
+        catch (Exception invalid) { throw new CorruptSessionException("Invalid compaction sources", invalid); }
+        if (ids.isEmpty()) throw new CorruptSessionException("Empty compaction sources");
+        List<ContextNode> selected = new ArrayList<>();
+        int from = -1;
+        for (int i = 0; i < scope.sourceNodes().size(); i++) if (scope.sourceNodes().get(i).id().equals(ids.get(0))) { from = i; break; }
+        if (from < 0 || from + ids.size() > scope.sourceNodes().size()) throw new CorruptSessionException("Missing compaction sources");
+        selected.addAll(scope.sourceNodes().subList(from, from + ids.size()));
+        if (!selected.stream().map(ContextNode::id).toList().equals(ids)
+                || !ContextDigests.sourceDigest(selected).equals(text(start.payload(), "sourceDigest")))
+            throw new CorruptSessionException("Compaction sources changed");
+        Set<NodeId> replacedIds = new LinkedHashSet<>(ids);
+        Set<String> retiredIds = new LinkedHashSet<>();
+        for (JsonNode retired : start.payload().path("retiredEditIds")) {
+            if (!retired.isTextual() || !retiredIds.add(retired.textValue()))
+                throw new CorruptSessionException("Invalid compaction retirement");
+        }
+        Map<String, ContextEdit> activeEdits = new LinkedHashMap<>();
+        scope.activeEdits().forEach(edit -> activeEdits.put(edit.editId(), edit));
+        if (!activeEdits.keySet().containsAll(retiredIds)) throw new CorruptSessionException("Unknown compaction retirement");
+        Set<NodeId> removedDependencyIds = new LinkedHashSet<>(replacedIds);
+        for (String retired : retiredIds) activeEdits.get(retired).replacementNodes().forEach(n -> removedDependencyIds.add(n.id()));
+        for (ContextEdit edit : scope.activeEdits()) {
+            if (edit.orderedSourceIds().stream().anyMatch(replacedIds::contains)
+                    && (!replacedIds.containsAll(edit.orderedSourceIds()) || !retiredIds.contains(edit.editId())))
+                throw new CorruptSessionException("Compaction must fully cover and retire overlapping edits");
+            if (!retiredIds.contains(edit.editId())
+                    && edit.dependencies().stream().anyMatch(d -> removedDependencyIds.contains(d.nodeId())))
+                throw new CorruptSessionException("Compaction must retire dependent edits");
+        }
+        List<Long> covered = new ArrayList<>();
+        for (JsonNode id : start.payload().path("coveredConversationNodeIds")) {
+            if (!id.isIntegralNumber()) throw new CorruptSessionException("Invalid conversation identity");
+            covered.add(id.longValue());
+        }
+        var sourceSequences = ids.stream().map(NodeId::sourceSequence).collect(java.util.stream.Collectors.toSet());
+        List<Long> actualCovered = state.conversation.stream().filter(n -> sourceSequences.contains(n.sequence()))
+                .map(SessionProjection.ConversationNode::sequence).toList();
+        if (!covered.equals(actualCovered) || covered.size() > state.conversation.size()
+                || !state.conversation.subList(0, covered.size()).stream().map(SessionProjection.ConversationNode::sequence).toList().equals(covered))
+            throw new CorruptSessionException("Compaction conversation coverage mismatch");
+        int surfaceFrom = indexOf(state.surface, ids.get(0).sourceSequence());
+        if (surfaceFrom < 0 || surfaceFrom + ids.size() > state.surface.size()
+                || !state.surface.subList(surfaceFrom, surfaceFrom + ids.size()).stream().map(SessionProjection.SurfaceNode::sequence).toList()
+                .equals(ids.stream().map(NodeId::sourceSequence).toList())) throw new CorruptSessionException("Compaction surface membership mismatch");
+        state.surface.subList(surfaceFrom, surfaceFrom + ids.size()).clear();
+        state.surface.add(surfaceFrom, messageNode(summary));
+        if (!covered.isEmpty()) {
+            state.conversation.subList(0, covered.size()).clear();
+            state.conversation.add(0, new SessionProjection.ConversationNode(summary.sequence(), null, null, "summary",
+                    messageNode(summary).message(), SessionProjection.ConversationKind.SUMMARY));
+        }
+        state.historyVersion++;
+        state.compactionGeneration++;
+        synchronizeContextSources(state, summary);
+        var replacedScope = state.contextScopes.get(scopeId);
+        state.contextScopes.put(scopeId, new ContextScopeState(scopeId, replacedScope.sourceRevision(),
+                replacedScope.contextGeneration(), replacedScope.sourceNodes(),
+                replacedScope.activeEdits().stream().filter(edit -> !retiredIds.contains(edit.editId())).toList()));
     }
 
     private static void applyMessageEvent(MutableProjection state, SessionEvent event) {
@@ -413,6 +523,63 @@ public final class SessionReplayer {
             default -> throw new CorruptSessionException("unknown surface operation: " + operation);
         }
         state.historyVersion++;
+        synchronizeContextSources(state, event);
+    }
+
+    private static void synchronizeContextSources(MutableProjection state, SessionEvent event) {
+        JsonNode payload = event.payload();
+        String scopeId = text(payload, "scopeId");
+        if (payload != null && payload.path("contextScopeStart").asBoolean(false))
+            scopeId = event.sessionId() + ":" + event.sequence();
+        if (scopeId == null) scopeId = event.sessionId();
+        ContextScopeState old = state.contextScopes.get(scopeId);
+        List<ContextNode> sources = new ArrayList<>(old == null ? List.of() : old.sourceNodes());
+        java.util.Set<Long> retained = new java.util.HashSet<>();
+        state.surface.forEach(n -> retained.add(n.sequence()));
+        sources.removeIf(node -> !retained.contains(node.id().sourceSequence()));
+        if (!"clear".equals(event.surface().op()) && state.surface.stream().anyMatch(n -> n.sequence() == event.sequence())) {
+            SourceKind kind = SourceKind.LEGACY_UNKNOWN;
+            String declaredKind = text(payload, "sourceKind");
+            if (declaredKind != null) {
+                try { kind = SourceKind.valueOf(declaredKind); }
+                catch (IllegalArgumentException e) { throw new CorruptSessionException("Invalid source kind"); }
+            }
+            ToolResultDescriptor descriptor = null;
+            if (payload != null && payload.hasNonNull("toolResultDescriptor")) {
+                try { descriptor = JSON.treeToValue(payload.get("toolResultDescriptor"), ToolResultDescriptor.class); }
+                catch (Exception e) { throw new CorruptSessionException("Invalid result descriptor", e); }
+            }
+            ContextNode.SyntheticContext synthetic = null;
+            if (payload != null && payload.hasNonNull("syntheticContext")) {
+                try { synthetic = JSON.treeToValue(payload.get("syntheticContext"), ContextNode.SyntheticContext.class); }
+                catch (Exception e) { throw new CorruptSessionException("Invalid synthetic provenance", e); }
+            }
+            ContextNode node = new ContextNode(NodeId.raw(scopeId, event.sequence()), messageNode(event).message(), kind,
+                    text(payload, "contextExecutionId") == null ? text(payload, "executionId") : text(payload, "contextExecutionId"),
+                    text(payload, "attemptId"), text(payload, "toolBatchId"), descriptor, synthetic);
+            int insertion = 0;
+            for (var surface : state.surface) {
+                if (surface.sequence() == event.sequence()) break;
+                if (sources.stream().anyMatch(n -> n.id().sourceSequence() == surface.sequence())) insertion++;
+            }
+            sources.add(insertion, node);
+        }
+        List<ContextEdit> edits = new ArrayList<>(old == null ? List.of() : old.activeEdits());
+        java.util.Set<NodeId> retainedIds = new java.util.HashSet<>(); sources.forEach(n -> retainedIds.add(n.id()));
+        boolean changed;
+        do {
+            java.util.Set<NodeId> reachable = new java.util.HashSet<>(retainedIds);
+            edits.forEach(e -> e.replacementNodes().forEach(n -> reachable.add(n.id())));
+            changed = edits.removeIf(e -> !retainedIds.containsAll(e.orderedSourceIds())
+                    || e.dependencies().stream().anyMatch(d -> !reachable.contains(d.nodeId())));
+        } while (changed);
+        state.contextScopes.put(scopeId, new ContextScopeState(scopeId, old == null ? 1 : old.sourceRevision() + 1,
+                old == null ? 0 : old.contextGeneration() + (edits.equals(old.activeEdits())
+                        && !"replace".equals(event.surface().op()) && text(payload, "compactionId") == null ? 0 : 1), sources, edits));
+        if ("clear".equals(event.surface().op())) {
+            state.contextScopes.replaceAll((id, scope) -> new ContextScopeState(id, scope.sourceRevision() + 1,
+                    scope.contextGeneration() + 1, List.of(), List.of()));
+        }
     }
 
     private static SessionProjection.SurfaceNode messageNode(SessionEvent event) {
@@ -489,9 +656,13 @@ public final class SessionReplayer {
         private final Map<String, SessionProjection.PendingToolInvocation> pendingTools = new LinkedHashMap<>();
         private final Map<String, SessionProjection.ExecutionEnvelope> executionEnvelopes = new LinkedHashMap<>();
         private final Map<String, List<SessionEvent>> compactions = new LinkedHashMap<>();
+        private final Map<String, SessionEvent> compactionStarts = new LinkedHashMap<>();
         private final Map<String, List<SessionEvent>> requestAssistants = new LinkedHashMap<>();
         private final Map<String, SessionProjection.MeasuredUsageFact> requestUsages = new LinkedHashMap<>();
         private final List<String> warnings = new ArrayList<>();
+        private final Map<String, ContextScopeState> contextScopes = new LinkedHashMap<>();
+        private final Map<String, String> committedOperationDigests = new LinkedHashMap<>();
+        private int requiredSchemaVersion = 2;
         private long lastAppliedSequence = -1;
         private long historyVersion;
         private long compactionGeneration;
@@ -515,12 +686,16 @@ public final class SessionReplayer {
             compactionGeneration = checkpoint.compactionGeneration();
             lastCompletedUsage = checkpoint.lastCompletedUsage();
             cleanlyClosed = checkpoint.cleanlyClosed();
+            contextScopes.putAll(checkpoint.contextScopes());
+            committedOperationDigests.putAll(checkpoint.committedOperationDigests());
+            requiredSchemaVersion = checkpoint.requiredSchemaVersion();
         }
 
         private SessionProjection freeze() {
             return new SessionProjection(surface, conversation, openTurns,
                     lastAppliedSequence, historyVersion, compactionGeneration, lastCompletedUsage,
-                    incompleteRequests, pendingTools, executionEnvelopes, cleanlyClosed, warnings);
+                    incompleteRequests, pendingTools, executionEnvelopes, cleanlyClosed, warnings,
+                    contextScopes, committedOperationDigests, requiredSchemaVersion);
         }
     }
 

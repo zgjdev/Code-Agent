@@ -20,7 +20,7 @@ public record SessionEvent(
         SurfaceOperation surface,
         JsonNode payload) {
 
-    public static final int CURRENT_SCHEMA_VERSION = 2;
+    public static final int CURRENT_SCHEMA_VERSION = 3;
 
     public SessionEvent {
         Objects.requireNonNull(sessionId, "sessionId");
@@ -29,6 +29,7 @@ public record SessionEvent(
     }
 
     public static final class Types {
+        public static final String CONTEXT_EDIT = "context/edit";
         public static final String SESSION_START = "session/start";
         public static final String SESSION_END = "session/end";
         public static final String SESSION_INTERRUPT = "session/interrupt";

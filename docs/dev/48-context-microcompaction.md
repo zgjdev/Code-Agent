@@ -1,6 +1,6 @@
 # 四层上下文管理实施方案
 
-当前状态为设计草案。本文统一维护 Snip、Microcompact、Context collapse、Auto compact 的设计、实施任务和验收。2026-11-04 按用户要求，将原“完全重复 read_file 去重”方案扩展为完整四层机制。下文新增接口、事件、配置和行为均为拟议实现。
+当前状态为实施中。本文统一维护 Snip、Microcompact、Context collapse、Auto compact 的设计、实施任务和验收。2026-11-04 按用户要求，将原“完全重复 read_file 去重”方案扩展为完整四层机制；方案已提交为 `a4b694b`。下文接口、事件和行为按设计实施，实际完成状态以第5.4节及测试证据为准。
 
 ## 1. 背景、目标与非目标
 
@@ -8,7 +8,7 @@
 
 参考 Claude Code 恢复版的分层机制，让 CodeAgent 在长任务、多工具调用、跨轮对话和多 Agent 协作中持续管理发送上下文。重复结果去重属于确定性裁剪的一条规则；唯一旧工具结果清理、单轮局部摘要、会话级摘要与持久恢复均属于本任务的实施目标。
 
-本次交付为修改本方案。分支沿用 `codex/context-microcompaction-plan`，创建方式为 `git switch --no-track -c codex/context-microcompaction-plan origin/main`，基线为 fetch 后的 `9f2daa32836ca939676116cb63393c18598542c4`，无 upstream。文档沿用编号48和现有文件名，后续设计修订、实施记录与验证统一追加到本文。
+本次交付范围已由方案编写推进到四层机制实现。分支沿用 `codex/context-microcompaction-plan`，创建方式为 `git switch --no-track -c codex/context-microcompaction-plan origin/main`，基线为 fetch 后的 `9f2daa32836ca939676116cb63393c18598542c4`，无 upstream。文档沿用编号48和现有文件名，后续设计修订、实施记录与验证统一追加到本文；实现改动保留未提交，前次提交授权仅涵盖方案。
 
 ### 1.2 目标与预期效果
 
@@ -414,3 +414,30 @@ Plan新增局部TaskRequestContext，持有每次executeTaskWithPolicy的scope�
 本轮再次执行 `mvn test -Pquick`，退出码1，1715项、0断言失败、2错误、20跳过。错误仍为DistributionContentTest.whitelistArchiveInstallsWithoutRepositoryOrEnvFiles和GlobalLauncherInstallationTest.installedCommandPreservesWorkspaceArgumentsAndConfiguration，均在读取子PowerShell日志时MalformedInputException。quick未通过，错误位置和前版一致，当前未修改产品源码。
 
 文档检查已执行 `git diff --check`，退出码0；未暂存文件使用 `git diff --no-index --check -- /dev/null docs/dev/48-context-microcompaction.md`，退出码1表示新增文件差异，输出只有Git的LF/CRLF提示，无空白错误。独立检查确认6个相对链接均存在、2个Mermaid块及全部代码围栏闭合、尾随空白0处。最终分支为codex/context-microcompaction-plan，无upstream，工作区仅本方案未提交文件。
+
+### 5.4 实施记录
+
+2026-11-04 用户授权开始实现。沿用已提交方案及当前功能分支，不创建额外工作树或实施文档。按测试先行、分边界实现及独立评审推进；以下中间记录不代表完整功能已交付。
+
+| 边界 | 当前状态 | 证据与待办 |
+|---|---|---|
+| T1 来源、保护、typed工具结果 | 实施中 | 模型和命令状态已接入；真实ReAct测试发现五种读取/搜索生产者仍落入legacy，正在补齐 |
+| T2 持久提交与重放 | 已接线，补边界测试 | 写前校验、换行提交、scope、幂等、v3及checkpoint；补显式退休与保护锁顺序 |
+| T3 Snip/Micro | 已实现，集成验证中 | 确定性候选、完整批次、近期保护及证明依赖；真实生产者门禁待通过 |
+| T4 Collapse | 已实现，集成验证中 | 有界结构化摘要、完整raw区间、校验引用、退休依赖与净收益 |
+| T5 配置 | 已实现并通过切片审查 | 配置与ConfigurationValuesTest共9项通过，非法值固定诊断 |
+| T5 编排与Auto | 已实现，集成验证中 | 逐层计量、全覆盖分块与归并、实际调用预算、预览和受控超限 |
+| T6 入口/恢复 | 已接线，补真实入口测试 | ReAct/Plan/SubAgent/Reviewer/恢复与收尾接线；摘要逐次计入执行预算 |
+| T7 展示/文档/评测 | 部分完成 | /context使用已提交视图，配置和实现文档同步；回归与场景门禁待完成 |
+
+配置验证命令：`mvn test -DskipTests=false "-Dtest=ContextManagementConfigTest,ConfigurationValuesTest"`，退出码0，9项、0失败、0错误、0跳过。覆盖默认关闭、true/false和1/0、非法属性优先关闭且不泄露值、属性/进程/项目/用户配置优先级。
+
+2026-11-05 基础验证 `mvn test -DskipTests=false "-Dtest=ContextProtectionTest,ToolRegistryTest,TurnToolPolicyTest,StructuredContextSummarizerTest,SummaryCallBudgetTest,SessionDurabilityBoundaryTest,SessionStoreTest,SessionCheckpointStoreTest,SessionReplayerTest,SessionCompactionRecoveryTest"` 退出码0，130项全部通过。新增durability测试先复现写后校验、无换行尾部、未结束checkpoint及执行envelope丢失，修复后通过。Parent并发测试先复现摘要占锁导致超时，再验证释放锁和源变化时丢弃旧候选。
+
+2026-11-06 集成验证 `mvn test -DskipTests=false "-Dtest=Context*Test,HistorySnipperTest,ToolResultMicrocompactorTest,StructuredContextSummarizerTest,SummaryCallBudgetTest,MemoryContextEditSinkTest,Session*Test,ParentConversationCompactionConcurrencyTest,AgentRecoveryRequestTest,RecoveryRequestAugmenterTest,SubAgentTest,PlanExecuteAgentTest"` 退出码0，175项、0失败、0错误、1跳过。随后真实ReAct读取用例发现native producer仍提供legacy描述符，按测试继续修复，不能据前述175项宣称完整入口验收。
+
+测试环境诊断已确认旧Windows安装失败由继承的PowerShell 7 PSModulePath污染Windows PowerShell 5.1模块发现导致，错误日志为系统码页936而被Java按UTF-8读取，掩盖了Get-FileHash未找到。隔离子进程移除PSModulePath后两模式返回0；常规回归以临时移除此变量并恢复的方式运行，不修改真实用户配置。部分早期独立javac验证曾让logback打开默认用户日志，后续独立验证均显式使用隔离codeagent.home，未读取真实Session。
+
+2026-11-06 用户授权阶段性保存提交，然后继续实施。提交前执行 `mvn test -DskipTests=false "-Dtest=AgentLayeredContextTest,ContextDurableReplayTest,RecoveryRequestAugmenterTest,ContextWindowManagerTest,ContextCollapseManagerTest,ContextAutoCompactorTest,StructuredContextSummarizerTest,ToolRegistryTest"`，退出码0，83项全部通过。真实ReAct用例现已验证不同文件的工具正文缩减、原始工具证据保留、重启重放和preview零日志写入。阶段提交包含当前实现及未完成边界的回归用例，并不代表全部验收完成。
+
+阶段提交后的明确待办为恢复formatter必需/可选两阶段接线与测试、摘要传输内部retry/fallback计数约束（SummaryTransportBoundaryTest待实现通过）、历史收尾解除保护回归、Plan及完整恢复评测、quick/全量/构建与最终审查。默认开关继续为false。

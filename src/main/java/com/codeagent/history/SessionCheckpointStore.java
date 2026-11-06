@@ -1,6 +1,8 @@
 package com.codeagent.history;
 
+import com.codeagent.context.ContextScopeState;
 import com.codeagent.context.MeasuredUsage;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.codeagent.llm.LlmClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,9 +40,9 @@ public final class SessionCheckpointStore {
 
     public void write(String sessionId, List<SessionEvent> prefix,
                       SessionProjection projection) throws IOException {
-        if (projection.lastAppliedSequence() < 0 || !projection.incompleteRequestIds().isEmpty()) return;
+        if (projection.lastAppliedSequence() < 0 || !isCheckpointable(projection)) return;
         ObjectNode root = JSON.createObjectNode()
-                .put("schemaVersion", SessionEvent.CURRENT_SCHEMA_VERSION)
+                .put("schemaVersion", prefixVersion(prefix, projection.lastAppliedSequence()))
                 .put("sessionId", sessionId)
                 .put("lastAppliedSequence", projection.lastAppliedSequence())
                 .put("eventPrefixSha256", prefixHash(prefix, projection.lastAppliedSequence()))
@@ -73,18 +75,28 @@ public final class SessionCheckpointStore {
                 try {
                     JsonNode root = JSON.readTree(path.toFile());
                     long sequence = root.path("lastAppliedSequence").asLong(-1);
-                    if (root.path("schemaVersion").asInt() != SessionEvent.CURRENT_SCHEMA_VERSION
+                    int schema = root.path("schemaVersion").asInt();
+                    if ((schema != 2 && schema != SessionEvent.CURRENT_SCHEMA_VERSION)
                             || !manifest.sessionId().equals(root.path("sessionId").asText())
                             || sequence < 0 || sequence >= events.size()
+                            || schema != prefixVersion(events, sequence)
                             || !root.path("eventPrefixSha256").asText()
                                     .equals(prefixHash(events, sequence))) continue;
                     JsonNode projectionNode = root.path("projection");
                     if (projectionNode.path("conversationProjectionVersion").asInt(0) != 1) {
                         continue;
                     }
-                    SessionProjection checkpoint = decodeProjection(projectionNode);
+                    if (!projectionNode.has("executionEnvelopes")
+                            && events.subList(0, (int) sequence + 1).stream().anyMatch(
+                                    event -> SessionEvent.Types.EXECUTION_START.equals(event.type()))) continue;
+                    if (schema == 3 && (!projectionNode.path("contextScopes").isObject()
+                            || !projectionNode.path("committedOperationDigests").isObject()
+                            || !projectionNode.path("executionEnvelopes").isObject())) continue;
+                    if (!projectionNode.has("contextScopes") && events.subList(0, (int) sequence + 1).stream()
+                            .anyMatch(event -> !"none".equals(event.surface().op()))) continue;
+                    SessionProjection checkpoint = decodeProjection(projectionNode, schema);
                     if (checkpoint.lastAppliedSequence() != sequence
-                            || !checkpoint.incompleteRequestIds().isEmpty()) continue;
+                            || !isCheckpointable(checkpoint)) continue;
                     SessionProjection projection = replayer.replayFrom(manifest, checkpoint,
                             events.subList((int) sequence + 1, events.size()));
                     return new LoadResult(Optional.of(new SessionCheckpoint(sequence, path)), projection);
@@ -96,6 +108,11 @@ public final class SessionCheckpointStore {
             // Full replay is the recovery path for unreadable checkpoint storage.
         }
         return new LoadResult(Optional.empty(), replayer.replay(manifest, events));
+    }
+
+    static boolean isCheckpointable(SessionProjection projection) {
+        return projection.incompleteRequestIds().isEmpty() && projection.warnings().stream()
+                .noneMatch(warning -> warning.startsWith("incomplete compaction ignored:"));
     }
 
     private static ObjectNode encodeProjection(SessionProjection value) {
@@ -135,6 +152,10 @@ public final class SessionCheckpointStore {
         value.pendingTools().values().forEach(tool -> tools.addObject()
                 .put("invocationId", tool.invocationId()).put("name", tool.name())
                 .put("arguments", tool.arguments()));
+        node.set("executionEnvelopes", JSON.valueToTree(value.executionEnvelopes()));
+        node.set("contextScopes", JSON.valueToTree(value.contextScopes()));
+        node.set("committedOperationDigests", JSON.valueToTree(value.committedOperationDigests()));
+        node.put("requiredSchemaVersion", value.requiredSchemaVersion());
         ArrayNode warnings = node.putArray("warnings");
         value.warnings().forEach(warnings::add);
         if (value.lastCompletedUsage() != null) {
@@ -151,7 +172,7 @@ public final class SessionCheckpointStore {
         return node;
     }
 
-    private static SessionProjection decodeProjection(JsonNode node) throws IOException {
+    private static SessionProjection decodeProjection(JsonNode node, int schema) throws IOException {
         List<SessionProjection.SurfaceNode> surface = new ArrayList<>();
         for (JsonNode item : node.path("activeSurface")) surface.add(new SessionProjection.SurfaceNode(
                 item.path("sequence").asLong(), JSON.treeToValue(item.path("message"), LlmClient.Message.class)));
@@ -213,10 +234,26 @@ public final class SessionCheckpointStore {
                             usage.path("includesTools").asBoolean(), usage.path("includesSystem").asBoolean(),
                             usage.path("trusted").asBoolean(), Instant.ofEpochMilli(usage.path("measuredAt").asLong())));
         }
+        Map<String, ContextScopeState> scopes = node.has("contextScopes")
+                ? JSON.convertValue(node.get("contextScopes"), new TypeReference<>() {}) : Map.of();
+        Map<String, String> operationDigests = node.has("committedOperationDigests")
+                ? JSON.convertValue(node.get("committedOperationDigests"), new TypeReference<>() {}) : Map.of();
+        int requiredSchemaVersion = node.path("requiredSchemaVersion").asInt(schema);
+        if (requiredSchemaVersion != schema || scopes.entrySet().stream()
+                .anyMatch(entry -> !entry.getKey().equals(entry.getValue().scopeId()))) {
+            throw new IOException("Invalid context checkpoint state");
+        }
         return new SessionProjection(surface, conversation, openTurns,
                 node.path("lastAppliedSequence").asLong(), node.path("historyVersion").asLong(),
                 node.path("compactionGeneration").asLong(), fact, requests, tools,
-                executions, node.path("cleanlyClosed").asBoolean(), warnings);
+                executions, node.path("cleanlyClosed").asBoolean(), warnings,
+                scopes, operationDigests, requiredSchemaVersion);
+    }
+
+    private static int prefixVersion(List<SessionEvent> events, long sequence) {
+        int version = 2;
+        for (int i = 0; i <= sequence; i++) version = Math.max(version, events.get(i).schemaVersion());
+        return version;
     }
 
     private static String prefixHash(List<SessionEvent> events, long sequence) throws IOException {

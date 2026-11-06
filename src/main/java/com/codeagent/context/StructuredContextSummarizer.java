@@ -172,7 +172,7 @@ public final class StructuredContextSummarizer {
                 reservation.beforeCall();
                 ChatResponse response = null;
                 try {
-                    response = client.chatStructured(messages, List.of(), spec, listener);
+                    response = client.chatStructuredOnce(messages, List.of(), spec, listener);
                     if (response != null && response.hasToolCalls()) throw new IOException("SUMMARY_TOOL_CALL_REJECTED");
                     return response;
                 } finally {

@@ -39,6 +39,18 @@ class PlanExecuteAgentTest {
     Path tempDir;
 
     @Test
+    void enabledLayeredTaskKeepsToolEvidenceInItsTaskContext() throws Exception {
+        String previous = System.getProperty("codeagent.context.layered.enabled");
+        try {
+            System.setProperty("codeagent.context.layered.enabled", "true");
+            shouldKeepPlanExecutionArtifactsInTheTaskConversationOnly();
+        } finally {
+            if (previous == null) System.clearProperty("codeagent.context.layered.enabled");
+            else System.setProperty("codeagent.context.layered.enabled", previous);
+        }
+    }
+
+    @Test
     void shouldKeepPlanExecutionArtifactsInTheTaskConversationOnly() throws Exception {
         Path sampleFile = Files.createFile(tempDir.resolve("sample.txt"));
         Files.writeString(sampleFile, "plan-memory-content");

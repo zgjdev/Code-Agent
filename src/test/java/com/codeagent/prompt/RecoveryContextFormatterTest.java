@@ -8,6 +8,25 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class RecoveryContextFormatterTest {
+    @Test void requiredUnknownsSurviveOptionalDetailPressure() throws Exception {
+        var task = new RecoveryTaskState("p", "t", 1, "task", "RUNNING", "INTERRUPTED", List.of(),
+                "optional result ".repeat(300), List.of(),
+                List.of(new RecoveryUnknown(RecoveryUnknown.Kind.INVOCATION_OUTCOME_UNKNOWN, "t", "call", "missing", "verify")),
+                List.of(), RecoveryCompleteness.PARTIAL);
+        var snapshot = new RecoveryContextSnapshot("w", "s", 1, 4, "a".repeat(64),
+                List.of(execution("old", "optional goal ".repeat(100))),
+                List.of(new RecoveryPlanState("p", "old", "optional plan goal ".repeat(100), "RUNNING", "now", List.of(task))), List.of());
+        var formatter = new RecoveryContextFormatter();
+        var required = formatter.formatRequiredForParent(snapshot, 4096, "current", false);
+        var full = formatter.formatRequiredForParent(snapshot, required.estimatedTokens() + 20, "current", true);
+        assertEquals(0, full.omittedUnknownCount());
+        assertEquals(0, full.omittedExecutionCount());
+        assertEquals(0, full.omittedPlanCount());
+        assertEquals(0, full.omittedTaskCount());
+        assertTrue(full.content().contains("INVOCATION_OUTCOME_UNKNOWN"));
+        assertTrue(full.estimatedTokens() <= required.estimatedTokens() + 20);
+        assertThrows(IllegalArgumentException.class, () -> formatter.formatRequiredForParent(snapshot, 100, "current", false));
+    }
     @Test void executionGoalExcerptNeverSplitsUnicodeCodePoints() {
         String goal = "a" + "😀".repeat(400);
         var execution = execution("held", goal);

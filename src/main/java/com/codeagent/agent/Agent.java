@@ -624,7 +624,7 @@ public class Agent {
             streamRenderer.clearThinkingPanel();
             return AgentExecutionResult.partial(
                     formatUserFacingResponse(reasoningTranscript.toString(), partialResult));
-        } catch (IOException e) {
+        } catch (IOException | IllegalArgumentException e) {
             log.error("LLM finalization call failed after ReAct budget exhaustion", e);
             streamRenderer.finish();
             pushStatus(budget, startNanos, "idle");
@@ -1023,7 +1023,8 @@ public class Agent {
         var budget = new SummaryCallBudget(executionBudget != null
                 && executionBudget.check() == AgentBudget.ExitReason.WITHIN_BUDGET ? 16 : 0);
         var handle = parentConversationContext.sessionHandle();
-        RecoveryRequestAugmenter.RecoveryView recovery = recoveryView(options, handle);
+        RecoveryRequestAugmenter.RecoveryView recovery = recoveryView(options, handle,
+                (int) Math.min(Integer.MAX_VALUE, options.triggerTokens()), false);
         Supplier<ContextWindowState.Snapshot> refresh = () -> layeredSnapshot(options, recovery);
         ContextEditSink sink = handle == null ? this::commitLocalEdit
                 : new com.codeagent.history.SessionContextEditSink(handle, () -> refresh.get().protection());
@@ -1035,7 +1036,7 @@ public class Agent {
                 });
         var collapse = new ContextCollapseManager(summarizer);
         var auto = new ContextAutoCompactor(summarizer);
-        return contextWindowManager.prepare(llmClient, tools, purpose, overflow, options, contextTokenTracker,
+        var prepared = contextWindowManager.prepare(llmClient, tools, purpose, overflow, options, contextTokenTracker,
                     refresh, sink, new ContextWindowManager.SummaryLayers() {
                         @Override public Optional<ContextEdit> collapse(ContextWindowState.Snapshot snapshot,
                                                                       List<ContextNode> view) {
@@ -1053,6 +1054,14 @@ public class Agent {
                             return sink.commit(contextBatch(snapshot, proposal.get())) == ContextEditSink.CommitResult.APPLIED;
                         }
                     }, recovery == null ? java.util.function.Function.identity() : recovery::apply);
+        if (recovery == null || !prepared.sendable()) return prepared;
+        int requiredTokens = com.codeagent.memory.TokenBudget.estimateMessageTokens(recovery.block().message());
+        long available = options.triggerTokens() - prepared.prediction().effectiveTokens() + requiredTokens;
+        int optionalLimit = (int) Math.min(Math.max(4096, requiredTokens), Math.max(requiredTokens, available));
+        var enriched = recoveryView(options, handle, optionalLimit, true);
+        return contextWindowManager.prepare(llmClient, prepared.tools(), purpose == RequestPurpose.PREVIEW
+                        ? RequestPurpose.PREVIEW : RequestPurpose.STATUS, false, options, contextTokenTracker,
+                () -> layeredSnapshot(options, enriched), sink, ContextWindowManager.SummaryLayers.NONE, enriched::apply);
     }
 
     private ContextWindowState.Snapshot layeredSnapshot(ContextWindowState.Options options) {
@@ -1096,13 +1105,13 @@ public class Agent {
     }
 
     private RecoveryRequestAugmenter.RecoveryView recoveryView(ContextWindowState.Options options,
-                                                              SessionStore.SessionHandle handle) {
+                                                              SessionStore.SessionHandle handle, int limit,
+                                                              boolean includeOptional) {
         if (recoveryRequestContext == null) return null;
         var recovery = recoveryRequestContext;
         var boundary = recovery.boundary();
-        int limit = (int) Math.min(4096, options.triggerTokens() / 4);
-        var formatted = new RecoveryContextFormatter().formatForParent(recovery.snapshot(),
-                new RecoveryContextBudget((limit * 100L + 14) / 15, limit, 0), boundary.inputExecutionId());
+        var formatted = new RecoveryContextFormatter().formatRequiredForParent(recovery.snapshot(),
+                limit, boundary.inputExecutionId(), includeOptional);
         if (formatted.omittedUnknownCount() > 0 || formatted.omittedExecutionCount() > 0
                 || formatted.omittedPlanCount() > 0 || formatted.omittedTaskCount() > 0) {
             throw new IllegalArgumentException("Required recovery metadata exceeds context budget");

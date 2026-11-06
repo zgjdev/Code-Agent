@@ -29,6 +29,12 @@ public interface LlmClient {
         return StructuredOutputCapability.NONE;
     }
 
+    /** One provider attempt, with repair and retry owned by the caller's bounded operation. */
+    default ChatResponse chatStructuredOnce(List<Message> messages, List<Tool> tools,
+                                            StructuredOutputSpec spec, StreamListener listener) throws IOException {
+        return chatStructured(messages, tools, spec, listener);
+    }
+
     String getModelName();
 
     String getProviderName();

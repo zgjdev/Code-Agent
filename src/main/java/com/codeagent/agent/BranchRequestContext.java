@@ -39,6 +39,7 @@ final class BranchRequestContext {
     private final SessionStore.SessionHandle child;
     private final ContextWindowState.Options options;
     private ContextWindowState state;
+    private MemoryContextEditSink memorySink;
     private long localSequence;
     private String toolBatchId;
 
@@ -62,6 +63,7 @@ final class BranchRequestContext {
         if (state == null) {
             String scopeId = child == null ? executionId : child.sessionId() + ":" + sequence;
             state = new ContextWindowState(scopeId, options);
+            if (child == null) memorySink = new MemoryContextEditSink(state);
         }
         if (child == null && kind == SourceKind.TOOL_CALL) toolBatchId = UUID.randomUUID().toString();
         String batchId = kind == SourceKind.TOOL_CALL || kind == SourceKind.TOOL_RESULT ? toolBatchId : null;
@@ -98,7 +100,7 @@ final class BranchRequestContext {
                                         RequestPurpose purpose, AgentBudget budget, boolean overflow) throws IOException {
         ContextEditSink sink;
         if (child == null) {
-            sink = new MemoryContextEditSink(state);
+            sink = memorySink;
         } else {
             var durable = new SessionContextEditSink(child, state::protection);
             sink = batch -> {
@@ -117,7 +119,7 @@ final class BranchRequestContext {
                             response.outputTokens(), response.cachedInputTokens());
                 });
         var summaryBudget = new com.codeagent.context.SummaryCallBudget(16);
-            return new ContextWindowManager().prepare(client, tools, purpose, overflow, options, state.tracker(),
+        return new ContextWindowManager().prepare(client, tools, purpose, overflow, options, state.tracker(),
                     state::snapshot, sink, new ContextWindowManager.SummaryLayers() {
                         @Override public Optional<ContextEdit> collapse(ContextWindowState.Snapshot snapshot,
                                                                        List<ContextNode> view) {

@@ -10,6 +10,21 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ContextEditReplayTest {
+    @Test void autoCanCoverHistoricalUserBoundariesWhileLocalCollapseCannot() {
+        var first = new ContextNode(NodeId.raw("s", 1), LlmClient.Message.user("first"), SourceKind.REAL_USER, "e1", null, null, null);
+        var second = new ContextNode(NodeId.raw("s", 2), LlmClient.Message.user("second"), SourceKind.REAL_USER, "e2", null, null, null);
+        var source = new ContextScopeState("s", 2, 0, List.of(first, second), List.of());
+        var protection = ProtectionSet.derive(source.sourceNodes(), ProtectionSet.empty(), 2);
+        var local = edit("local", source.sourceNodes(), List.of(), List.of());
+        var global = new ContextEdit("global", ContextEdit.Layer.AUTO, ContextEdit.Kind.REPLACE_SPAN,
+                local.orderedSourceIds(), local.sourceDigest(),
+                List.of(new ContextNode(NodeId.edit("s", "global", 0), LlmClient.Message.assistant("summary"),
+                        SourceKind.GLOBAL_SUMMARY, null, null, null, null)), List.of(), List.of(), 1);
+        var localBatch = new ContextEditBatch("local-op", "s", 2, 0, protection.digest(), ContextEditReplay.baseDigest(source), List.of(local));
+        var globalBatch = new ContextEditBatch("global-op", "s", 2, 0, protection.digest(), ContextEditReplay.baseDigest(source), List.of(global));
+        assertThrows(IllegalArgumentException.class, () -> ContextEditReplay.apply(source, localBatch, protection));
+        assertEquals("global", ContextEditReplay.apply(source, globalBatch, protection).activeEdits().get(0).editId());
+    }
     private ContextNode raw(long seq) { return new ContextNode(NodeId.raw("s", seq),
             LlmClient.Message.assistant("body-" + seq), SourceKind.ASSISTANT, null, null, null, null); }
     private ContextScopeState state() { return new ContextScopeState("s", 3, 0,

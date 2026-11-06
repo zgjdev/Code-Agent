@@ -22,7 +22,9 @@ public final class ContextEditReplay {
             require(ContextDigests.sourceDigest(members).equals(edit.sourceDigest()), "Source digest mismatch");
             if (protection != null) {
                 require(members.stream().noneMatch(n -> protection.protectedNodeIds().contains(n.id())), "Protected edit source");
-                require(members.stream().skip(1).noneMatch(n -> protection.boundaryNodeIds().contains(n.id())), "Edit crosses boundary");
+                require(members.stream().skip(1).noneMatch(n -> protection.boundaryNodeIds().contains(n.id())
+                        && !(edit.layer() == ContextEdit.Layer.AUTO && n.sourceKind() == SourceKind.REAL_USER)),
+                        "Edit crosses boundary");
             }
             Set<String> ids = new HashSet<>(edit.retiredEditIds());
             require(ids.size() == edit.retiredEditIds().size(), "Duplicate retirement");

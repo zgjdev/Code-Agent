@@ -394,12 +394,12 @@ Plan新增局部TaskRequestContext，持有每次executeTaskWithPolicy的scope�
 
 ### 5.2 后续实施
 
-- [ ] Snip完整裁剪合法冗余组且保留证明。
-- [ ] Micro可缩减不同文件/搜索/成功命令的旧唯一正文。
-- [ ] Collapse处理单轮闭合区间并保留宿主事实，失败不提交。
-- [ ] Auto有界全覆盖、连续提交正确，Task摘要具有持久身份。
-- [ ] 四层共享来源、保护和预算，实际chat与snapshot一致。
-- [ ] edit原子、幂等、可重放，旧reader正确拒绝。
+- [x] Snip完整裁剪合法冗余组且保留证明。
+- [x] Micro可缩减不同文件/搜索/成功命令的旧唯一正文。
+- [x] Collapse处理单轮闭合区间并保留宿主事实，失败不提交。
+- [x] Auto有界全覆盖、连续提交正确，Task摘要具有持久身份。
+- [x] 四层共享来源、保护和预算，实际chat与snapshot一致。
+- [x] edit原子、幂等、可重放，旧reader正确拒绝。
 - [ ] 恢复、Reviewer、收尾、clear、并行与超限路径满足矩阵。
 - [ ] 全量、构建、八组评测和联动文档完成。
 
@@ -421,14 +421,14 @@ Plan新增局部TaskRequestContext，持有每次executeTaskWithPolicy的scope�
 
 | 边界 | 当前状态 | 证据与待办 |
 |---|---|---|
-| T1 来源、保护、typed工具结果 | 实施中 | 模型和命令状态已接入；真实ReAct测试发现五种读取/搜索生产者仍落入legacy，正在补齐 |
-| T2 持久提交与重放 | 已接线，补边界测试 | 写前校验、换行提交、scope、幂等、v3及checkpoint；补显式退休与保护锁顺序 |
-| T3 Snip/Micro | 已实现，集成验证中 | 确定性候选、完整批次、近期保护及证明依赖；真实生产者门禁待通过 |
-| T4 Collapse | 已实现，集成验证中 | 有界结构化摘要、完整raw区间、校验引用、退休依赖与净收益 |
+| T1 来源、保护、typed工具结果 | 本地验证通过 | 原生读取/搜索生产者已typed，真实ReAct不同文件读取与命令状态验证通过 |
+| T2 持久提交与重放 | 本地验证通过 | 写前校验、换行提交、scope、幂等、v3及checkpoint、显式退休与保护锁顺序 |
+| T3 Snip/Micro | 本地验证通过 | 确定性候选、完整批次、近期保护及证明依赖，真实生产者门禁通过 |
+| T4 Collapse | 本地验证通过 | 有界结构化摘要、完整raw区间、校验引用、退休依赖与净收益 |
 | T5 配置 | 已实现并通过切片审查 | 配置与ConfigurationValuesTest共9项通过，非法值固定诊断 |
-| T5 编排与Auto | 已实现，集成验证中 | 逐层计量、全覆盖分块与归并、实际调用预算、预览和受控超限 |
-| T6 入口/恢复 | 已接线，补真实入口测试 | ReAct/Plan/SubAgent/Reviewer/恢复与收尾接线；摘要逐次计入执行预算 |
-| T7 展示/文档/评测 | 部分完成 | /context使用已提交视图，配置和实现文档同步；回归与场景门禁待完成 |
+| T5 编排与Auto | 本地验证通过 | 逐层计量、全覆盖分块与归并、实际调用预算、预览和受控超限 |
+| T6 入口/恢复 | 本地验证通过，保留压力门禁 | ReAct/Plan/SubAgent/Reviewer/恢复与收尾接线；摘要逐次计入执行预算 |
+| T7 展示/文档/评测 | 本地回归和构建完成，发布评测待完成 | /context使用已提交视图，文档同步；真实模型质量/费用及force故障注入待完成 |
 
 配置验证命令：`mvn test -DskipTests=false "-Dtest=ContextManagementConfigTest,ConfigurationValuesTest"`，退出码0，9项、0失败、0错误、0跳过。覆盖默认关闭、true/false和1/0、非法属性优先关闭且不泄露值、属性/进程/项目/用户配置优先级。
 
@@ -441,3 +441,34 @@ Plan新增局部TaskRequestContext，持有每次executeTaskWithPolicy的scope�
 2026-11-06 用户授权阶段性保存提交，然后继续实施。提交前执行 `mvn test -DskipTests=false "-Dtest=AgentLayeredContextTest,ContextDurableReplayTest,RecoveryRequestAugmenterTest,ContextWindowManagerTest,ContextCollapseManagerTest,ContextAutoCompactorTest,StructuredContextSummarizerTest,ToolRegistryTest"`，退出码0，83项全部通过。真实ReAct用例现已验证不同文件的工具正文缩减、原始工具证据保留、重启重放和preview零日志写入。阶段提交包含当前实现及未完成边界的回归用例，并不代表全部验收完成。
 
 阶段提交后的明确待办为恢复formatter必需/可选两阶段接线与测试、摘要传输内部retry/fallback计数约束（SummaryTransportBoundaryTest待实现通过）、历史收尾解除保护回归、Plan及完整恢复评测、quick/全量/构建与最终审查。默认开关继续为false。
+
+阶段提交为 `3b4bcf2`，提交后继续实施。摘要增加`LlmClient.chatStructuredOnce`，内置Provider单次传输禁用内部重试、结构化回退和重定向，普通主请求保持既有重试。`SummaryTransportBoundaryTest,StructuredContextSummarizerTest`共11项通过。恢复改为必需owner/attempt/source/UNKNOWN先预算，四层处理后按剩余空间仅补充一次可选细节。`RecoveryContextFormatterTest,RecoveryRequestAugmenterTest,AgentRecoveryRequestTest,AgentLayeredContextTest,AgentBudgetFinalizationTest`共33项通过。新加历史收尾后再进入Auto及启用四层的Plan真实入口测试，在后续34项定向验证中通过。
+
+首轮quick执行1787项，1断言失败、2错误、20跳过。新增StructuredJsonExecutor重载使源码评测旧marker出现两次，已将4处marker更新到唯一RequestGuard实现入口，保留原查询、分类及必需正文证据。Windows安装日志编码已显式UTF-8，从原MalformedInputException还原出Get-FileHash缺失。当前正隔离该测试启动的Windows PowerShell模块目录后验证；该结果尚不能记作quick通过。
+
+实现采用独立`ContextAutoCompactor`提供有界全覆盖Auto，启用四层时ReAct和Planner的Parent入口均接此实现；原`ConversationHistoryCompactor`保留开关关闭的兼容路径。SessionMemory旧预计算不提供新四层快捷提交，避免未满足scope/coverage/protection校验的缓存摘要进入新协议。该调整减少兼容行为变化，后续如恢复快捷路径须另补覆盖契约验证。
+
+固定合成场景的验证落点如下。使用Fake LLM和隔离数据，断言本地估算与状态行为，未将其等同真实Provider质量或费用评测。
+
+| 样本组 | 自动化落点 | 可观察断言 |
+|---|---|---|
+| 重复文件 | HistorySnipperTest | 裁剪完整旧批次，后续proof依赖保留，混合/不完整组跳过 |
+| 不同文件 | AgentLayeredContextTest、ToolResultMicrocompactorTest | 真实读取不同正文后发送Micro记录，raw结果完整且重启仍有edit |
+| 长命令 | ToolRegistryTest、ToolResultMicrocompactorTest | 实际退出状态/输出截断分离，短记录保留实际命令和退出码 |
+| 单轮长链 | ContextCollapseManagerTest | 同一输入后至少两完整工具批次可摘要，正文全量且有界，净收益不含虚假已节省正文 |
+| 多轮需求 | ContextAutoCompactorTest、ContextEditReplayTest | 全部块覆盖才提案，近期真实输入完整，Auto可跨历史用户边界 |
+| Plan/多Agent | PlanExecuteAgentTest、SubAgentTest | 启用路径可运行，child首system序号建立独立scope，Reviewer超窗不发送 |
+| 失败证据 | ToolRegistryTest、TaskTranscriptReaderTest、SummaryTransportBoundaryTest | 假成功文本不改变exit，摘要不成为真实执行结果，单摘要调用不隐藏传输重试 |
+| 跨进程恢复 | ContextDurableReplayTest、SessionCheckpointStoreTest、RecoveryRequestAugmenterTest | 两次非单调源压缩正确，checkpoint/tail一致，恢复先验证来源再对投影视图组装 |
+
+仍保留发布门禁：真实Provider的八组质量/缓存/费用对照、强制force异常注入与更广泛并发调度压力尚无完整实测记录。开发开关默认关闭，未授权远程模型评测或默认开启。现有回放、换行尾部恢复和MockWebServer传输验证不替代这些门禁。
+
+阶段提交后修复验证：Windows启动测试显式选用本机Windows PowerShell内置模块目录并统一UTF-8输出，两个安装测试独立通过；普通主请求重试和结构化回退仍通过MockWebServer验证。历史收尾控制解除保护、启用四层的Plan入口及Auto跨历史用户边界已补回归。Auto边界回归先以`Edit crosses boundary`失败，随后只对AUTO层放开真实历史用户边界，局部Collapse仍拒绝跨越。
+
+再次执行 `mvn test -Pquick` 退出码0，1789项、0失败、0错误、20跳过。该次运行在最后一项Auto跨用户边界修订前已完成编译，最新修订将由随后的全量测试覆盖；不能把quick结果单独作为最后修订的验证。正在执行 `mvn test -DskipTests=false`，通过后执行 `mvn clean package`。
+
+全量 `mvn test -DskipTests=false` 退出码0，1870项、0失败、0错误、26跳过，包含最后的Auto边界修订、恢复两阶段与历史收尾回归。测试输出保存在本机临时目录`context-full-final.log`。此前1789项quick通过；后续源码未再修改，正在构建。
+
+`mvn clean package` 退出码0，产物为`target/codeagent-1.0-SNAPSHOT.jar`。构建沿用pom的默认skipTests，测试结论来自前述独立全量运行。构建包含shade的重复资源/module-info警告，未出现构建错误。
+
+最终本地核对 `git diff --check` 退出码0，审查阶段提交后的全部diff及stat，未加入.env、target、raw Session或密钥。当前分支`codex/context-microcompaction-plan`、无upstream；阶段提交`3b4bcf2`后补充的修复及记录保持未提交。当前交付为完整四层的开发实现与本地验证，默认启用发布及真实Provider效果验收仍按上文门禁处理。

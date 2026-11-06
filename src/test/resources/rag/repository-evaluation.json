@@ -552,7 +552,7 @@
     "evidence": [
       {
         "path": "src/main/java/com/codeagent/llm/StructuredJsonExecutor.java",
-        "marker": "public <T> Result<T> execute(LlmClient client,",
+        "marker": "RequestGuard guard) throws IOException {",
         "requiredText": [
           "attemptMessages.add(LlmClient.Message.user(repairInstruction(spec, validationFailure)));"
         ]
@@ -566,7 +566,7 @@
     "evidence": [
       {
         "path": "src/main/java/com/codeagent/llm/StructuredJsonExecutor.java",
-        "marker": "public <T> Result<T> execute(LlmClient client,",
+        "marker": "RequestGuard guard) throws IOException {",
         "requiredText": [
           "attemptMessages.add(LlmClient.Message.user(repairInstruction(spec, validationFailure)));"
         ]
@@ -580,7 +580,7 @@
     "evidence": [
       {
         "path": "src/main/java/com/codeagent/llm/StructuredJsonExecutor.java",
-        "marker": "public <T> Result<T> execute(LlmClient client,",
+        "marker": "RequestGuard guard) throws IOException {",
         "requiredText": [
           "attemptMessages.add(LlmClient.Message.user(repairInstruction(spec, validationFailure)));"
         ]
@@ -1036,7 +1036,7 @@
     "evidence": [
       {
         "path": "src/main/java/com/codeagent/llm/StructuredJsonExecutor.java",
-        "marker": "public <T> Result<T> execute(LlmClient client,",
+        "marker": "RequestGuard guard) throws IOException {",
         "requiredText": [
           "attemptMessages.add(LlmClient.Message.user(repairInstruction(spec, validationFailure)));"
         ]

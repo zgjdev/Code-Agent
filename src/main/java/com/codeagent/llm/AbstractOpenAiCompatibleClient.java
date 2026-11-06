@@ -105,9 +105,22 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
         }
     }
 
+    @Override
+    public ChatResponse chatStructuredOnce(List<Message> messages, List<Tool> tools,
+                                           StructuredOutputSpec spec, StreamListener listener) throws IOException {
+        return chatInternal(messages, tools,
+                structuredOutputCapability() == StructuredOutputCapability.NONE ? null : spec, listener, true);
+    }
+
     private ChatResponse chatInternal(List<Message> messages, List<Tool> tools,
                                       StructuredOutputSpec structuredOutput,
                                       StreamListener listener) throws IOException {
+        return chatInternal(messages, tools, structuredOutput, listener, false);
+    }
+
+    private ChatResponse chatInternal(List<Message> messages, List<Tool> tools,
+                                      StructuredOutputSpec structuredOutput,
+                                      StreamListener listener, boolean singleAttempt) throws IOException {
         if (options.configurationCheck()) ProviderEndpoint.validate(getApiUrl());
         StreamListener streamListener = listener == null ? StreamListener.NO_OP : listener;
         RequestBody body = RequestBody.create(
@@ -134,17 +147,18 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
 
         LlmRetryPolicy retryPolicy = retryPolicy();
         IOException lastFailure = null;
-        for (int attempt = 1; attempt <= retryPolicy.maxAttempts(); attempt++) {
+        int attempts = singleAttempt ? 1 : retryPolicy.maxAttempts();
+        for (int attempt = 1; attempt <= attempts; attempt++) {
             AttemptProgress progress = new AttemptProgress(streamListener != StreamListener.NO_OP);
             try {
-                return executeAttempt(builtRequest, streamListener, progress, retryPolicy);
+                return executeAttempt(builtRequest, streamListener, progress, retryPolicy, singleAttempt);
             } catch (IOException failure) {
                 if (lastFailure != null && lastFailure != failure) {
                     failure.addSuppressed(lastFailure);
                 }
                 lastFailure = failure;
 
-                boolean canRetry = attempt < retryPolicy.maxAttempts()
+                boolean canRetry = attempt < attempts
                         && !progress.hasConsumableOutput()
                         && retryPolicy.isRetryableFailure(failure);
                 if (!canRetry) {
@@ -166,8 +180,10 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
     private ChatResponse executeAttempt(Request builtRequest,
                                         StreamListener streamListener,
                                         AttemptProgress progress,
-                                        LlmRetryPolicy retryPolicy) throws IOException {
-        Call call = httpClient().newCall(builtRequest);
+                                        LlmRetryPolicy retryPolicy, boolean singleAttempt) throws IOException {
+        OkHttpClient transport = singleAttempt ? httpClient().newBuilder().retryOnConnectionFailure(false)
+                .followRedirects(false).followSslRedirects(false).build() : httpClient();
+        Call call = transport.newCall(builtRequest);
         if (options.configurationCheck()) {
             activeCall.set(call);
             if (requestCanceled.get()) call.cancel();

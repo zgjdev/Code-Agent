@@ -95,8 +95,8 @@ public final class RecoveryContextFormatter {
                     continue;
                 }
                 for (var ref : t.sources()) {
-                    if (requiredFirst) optional.add(() -> add(root, sources, source(ref), omitted, "taskSources", limit));
-                    else add(root, sources, source(ref), omitted, "taskSources", limit);
+                    if (!add(root, sources, source(ref), omitted, "taskSources", limit) && requiredFirst)
+                        throw new IllegalArgumentException("Required recovery attempt provenance exceeds budget");
                 }
                 Runnable resultExcerpt = () -> { if (hasText(t.recordedResult())) {
                     var excerpt = excerpt(t.recordedResult());

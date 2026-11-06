@@ -25,6 +25,7 @@ public final class ContextTokenTracker {
 
     private final long safetyMarginTokens;
     private ContextAnchor anchor;
+    private String projectedView;
 
     public ContextTokenTracker() {
         this(256L);
@@ -47,6 +48,20 @@ public final class ContextTokenTracker {
         long raw = saturatingAdd(anchor.usage().usageAnchorTokens(), delta);
         raw = Math.max(0L, raw);
         return prediction(raw, full, delta, Mode.USAGE_ANCHORED_DELTA, null);
+    }
+
+    ContextPrediction predictProjected(RequestSnapshot current, String view, boolean publish, boolean overflow) {
+        boolean changed = !java.util.Objects.equals(projectedView, view);
+        if (publish && (changed || overflow)) {
+            invalidate(overflow ? InvalidationReason.OVERFLOW_RECOVERY : InvalidationReason.COMPACTION);
+            projectedView = view;
+        }
+        if (changed || overflow) {
+            long full = current.estimatedRequestTokens();
+            return prediction(full, full, 0, Mode.FULL_ESTIMATE,
+                    overflow ? "provider overflow" : "projected context changed");
+        }
+        return predict(current);
     }
 
     public void recordSuccessfulCall(

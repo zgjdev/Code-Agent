@@ -87,3 +87,7 @@ mvn test -DskipTests=false "-Dtest=ToolRegistryTest,TurnToolPolicyTest,ApprovalP
 ```
 
 返回[实现记录导航](01-runtime-and-agent-foundation.md)。
+
+## 上下文变换与恢复
+
+四层上下文新增 `context/edit` 持久变换，原始工具事件仍是执行事实来源。摘要、裁剪和工具正文替换不能证明命令成功、授予路径或 URL 权限。恢复先校验源身份，再重放合法 scope 内变换并组装恢复请求；恢复附加内容也计入最终请求预算。包含新状态的事件/检查点要求 v3 兼容 reader；不能以旧 reader 忽略 required 事件的方式恢复。具体兼容与失败验收见 [方案48](../dev/48-context-microcompaction.md)。

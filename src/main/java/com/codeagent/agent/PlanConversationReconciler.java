@@ -196,6 +196,8 @@ public final class PlanConversationReconciler {
                 ? LlmClient.Message.assistant(content)
                 : LlmClient.Message.user(content);
         ObjectNode payload = JSON.createObjectNode();
+        payload.put("sourceKind", "assistant".equals(role) ? "ASSISTANT" : "REAL_USER");
+        if (executionId != null) payload.put("contextExecutionId", executionId);
         payload.set("message", JSON.valueToTree(message));
         ObjectNode conversation = payload.putObject("conversation")
                 .put("turnId", turnId)

@@ -17,6 +17,13 @@ public class PromptAssembler {
         return new PromptAssembler(PromptRepository.createDefault());
     }
 
+    /** Summary requests have no tool registry or ordinary agent policy extensions. */
+    public String assembleContextSummary(boolean global) {
+        return repository.loadRequired("context/collapse-summary.md")
+                + (global ? "\n本次生成全局摘要，必须包含 goals、constraints、currentState。"
+                          : "\n本次生成局部摘要，只包含 summary、decisions、openItems、evidenceRefs。");
+    }
+
     public String assemble(PromptMode mode, PromptContext context) {
         Objects.requireNonNull(mode, "mode");
         PromptContext ctx = context == null ? PromptContext.empty() : context;

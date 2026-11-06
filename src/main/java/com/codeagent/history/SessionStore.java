@@ -1,5 +1,8 @@
 package com.codeagent.history;
 
+import com.codeagent.context.*;
+import java.util.function.Supplier;
+
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -67,7 +70,7 @@ public final class SessionStore implements AutoCloseable {
 
         long now = System.currentTimeMillis();
         SessionManifest manifest = new SessionManifest(
-                SessionEvent.CURRENT_SCHEMA_VERSION, sessionId, workspace.toString(),
+                2, sessionId, workspace.toString(),
                 normalize(request.provider()), normalize(request.model()), now, now,
                 normalize(request.parentSessionId()), normalize(request.mode()), normalize(request.actor()),
                 false, -1, false, null);
@@ -359,14 +362,17 @@ public final class SessionStore implements AutoCloseable {
 
     private ReadEventsResult readEvents(Path file) throws IOException {
         byte[] bytes = Files.readAllBytes(file);
-        String content = new String(bytes, StandardCharsets.UTF_8);
-        boolean endsWithNewline = content.endsWith("\n");
+        int committedLength = lastNewlineOffset(bytes) + 1;
+        String content;
+        try {
+            content = StandardCharsets.UTF_8.newDecoder()
+                    .decode(ByteBuffer.wrap(bytes, 0, committedLength)).toString();
+        } catch (java.nio.charset.CharacterCodingException e) {
+            throw new CorruptSessionLogException("invalid UTF-8 in committed session event log");
+        }
         String[] lines = content.split("\n", -1);
-        int count = endsWithNewline ? lines.length - 1 : lines.length;
         List<SessionEvent> events = new ArrayList<>();
-        boolean incompleteFinalLine = false;
-        long committedLength = bytes.length;
-        for (int index = 0; index < count; index++) {
+        for (int index = 0; index < lines.length - 1; index++) {
             String line = lines[index];
             if (line.isBlank()) {
                 continue;
@@ -374,17 +380,10 @@ public final class SessionStore implements AutoCloseable {
             try {
                 events.add(JSON.readValue(line, SessionEvent.class));
             } catch (IOException e) {
-                boolean finalPhysicalLine = index == count - 1 && !endsWithNewline;
-                if (finalPhysicalLine) {
-                    incompleteFinalLine = true;
-                    committedLength = lastNewlineOffset(bytes) + 1L;
-                    break;
-                }
-                throw new CorruptSessionLogException(
-                        "invalid JSON in session event log at line " + (index + 1), e);
+                throw new CorruptSessionLogException("invalid JSON in session event log at line " + (index + 1));
             }
         }
-        return new ReadEventsResult(events, incompleteFinalLine, committedLength);
+        return new ReadEventsResult(events, committedLength != bytes.length, committedLength);
     }
 
     private static void isolateIncompleteTail(Path eventsFile, long committedLength) throws IOException {
@@ -542,6 +541,7 @@ public final class SessionStore implements AutoCloseable {
         private SessionProjection projection;
         private SessionResumeResult resumeResult;
         private boolean released;
+        private boolean uncertainWrite;
 
         private SessionHandle(Path directory, SessionManifest manifest, List<SessionEvent> events,
                               SessionProjection projection, FileChannel lockChannel, FileLock lock) {
@@ -643,11 +643,18 @@ public final class SessionStore implements AutoCloseable {
             if (released) {
                 throw new IllegalStateException("session handle is closed");
             }
+            if (uncertainWrite) throw new IOException("Session write outcome requires recovery before append");
             long sequence = projection.lastAppliedSequence() + 1;
-            SessionEvent event = new SessionEvent(SessionEvent.CURRENT_SCHEMA_VERSION,
+            SessionEvent event = new SessionEvent(draft.schemaVersion(),
                     manifest.sessionId(), sequence, System.currentTimeMillis(), draft.type(),
                     draft.mode(), draft.actor(), draft.source(), draft.ignorable(),
                     draft.surface(), draft.payload());
+            List<SessionEvent> candidateEvents = new ArrayList<>(events);
+            candidateEvents.add(event);
+            SessionProjection candidate = replayer.replay(manifest, candidateEvents);
+            if (SessionEvent.Types.CONTEXT_EDIT.equals(event.type())
+                    && JSON.writeValueAsBytes(event.payload()).length > 1024 * 1024)
+                throw new IllegalArgumentException("Context transaction exceeds payload limit");
             byte[] json = JSON.writeValueAsBytes(event);
             ByteBuffer buffer = ByteBuffer.allocate(json.length + 1);
             buffer.put(json).put((byte) '\n').flip();
@@ -657,10 +664,13 @@ public final class SessionStore implements AutoCloseable {
                     eventChannel.write(buffer);
                 }
                 eventChannel.force(false);
+            } catch (IOException uncertain) {
+                uncertainWrite = true;
+                throw uncertain;
             }
 
             events.add(event);
-            projection = replayer.replay(manifest, events);
+            projection = candidate;
             manifest = withState(manifest,
                     SessionEvent.Types.SESSION_END.equals(event.type()), event.sequence(), event.timestamp());
             try {
@@ -680,11 +690,47 @@ public final class SessionStore implements AutoCloseable {
             return event;
         }
 
-        private boolean shouldCheckpoint(SessionEvent event, SessionProjection current) {
-            if (!current.incompleteRequestIds().isEmpty()) return false;
-            if (current.warnings().stream().anyMatch(warning -> warning.startsWith("incomplete compaction ignored:"))) {
-                return false;
+        /** Execution owner must be retained while the supplier rebuilds current host protection. */
+        public ContextEditSink.CommitResult commitContextEdit(ContextEditBatch batch,
+                Supplier<ProtectionSet> currentProtection) throws IOException {
+            String digest = ContextDigests.canonicalDigest(batch);
+            synchronized (this) {
+                String existing = projection.committedOperationDigests().get(batch.operationId());
+                if (existing != null) {
+                    if (!existing.equals(digest)) throw new IllegalArgumentException("Context operation identity conflict");
+                    return ContextEditSink.CommitResult.ALREADY_APPLIED;
+                }
             }
+            ProtectionSet protection = Objects.requireNonNull(currentProtection.get());
+            synchronized (this) {
+            String previous = projection.committedOperationDigests().get(batch.operationId());
+            if (previous != null) {
+                if (!previous.equals(digest)) throw new IllegalArgumentException("Context operation identity conflict");
+                return ContextEditSink.CommitResult.ALREADY_APPLIED;
+            }
+            ContextScopeState scope = projection.contextScopes().get(batch.scopeId());
+            if (scope == null) throw new IllegalArgumentException("Missing context scope");
+            try { ContextEditReplay.apply(scope, batch, protection); }
+            catch (ContextEditReplay.StaleContextException stale) { return ContextEditSink.CommitResult.STALE; }
+            try {
+                append(new SessionEventDraft(SessionEvent.Types.CONTEXT_EDIT, "context", "owner", "context-manager",
+                        false, SessionEvent.SurfaceOperation.none(), JSON.valueToTree(batch), 3));
+                return ContextEditSink.CommitResult.APPLIED;
+            } catch (IOException uncertain) {
+                // Never publish an unconfirmed view. Resolve the newline-committed prefix under the same writer lock.
+                ReadEventsResult reread = readEvents(directory.resolve("events.jsonl"));
+                if (reread.incompleteFinalLine()) isolateIncompleteTail(directory.resolve("events.jsonl"), reread.committedLength());
+                SessionProjection recovered = replayer.replay(manifest, reread.events());
+                events.clear(); events.addAll(reread.events()); projection = recovered; uncertainWrite = false;
+                String committed = recovered.committedOperationDigests().get(batch.operationId());
+                if (digest.equals(committed)) return ContextEditSink.CommitResult.APPLIED;
+                throw uncertain;
+            }
+            }
+        }
+
+        private boolean shouldCheckpoint(SessionEvent event, SessionProjection current) {
+            if (!SessionCheckpointStore.isCheckpointable(current)) return false;
             if (SessionEvent.Types.SESSION_END.equals(event.type())) return true;
             if (SessionEvent.Types.COMPACTION_END.equals(event.type())
                     && "completed".equals(event.payload().path("status").asText())) return true;

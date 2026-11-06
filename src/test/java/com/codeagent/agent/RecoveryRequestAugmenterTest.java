@@ -14,6 +14,30 @@ class RecoveryRequestAugmenterTest {
     private static final ObjectMapper JSON = com.fasterxml.jackson.databind.json.JsonMapper.builder()
             .disable(com.fasterxml.jackson.databind.MapperFeature.AUTO_DETECT_IS_GETTERS).build();
     @TempDir Path dir;
+    @Test void sourceValidatedRecipeCanComposeAShorterEditedView() throws Exception {
+        try (var store = SessionStore.open(dir.resolve("history")); var session = store.create(
+                new SessionStore.SessionCreateRequest(dir, "test", "test", null, "react", "agent"))) {
+            start(session, "original", 1);
+            message(session, "original", "user", "old goal", false);
+            start(session, "control", 2);
+            long input = message(session, "control", "user", "current input", true);
+            message(session, "control", "assistant", "accepted", true);
+            var raw = session.projection().contextScopes().get(session.sessionId()).sourceNodes();
+            var augmenter = new RecoveryRequestAugmenter("skill\n", "\nmemory");
+            var recipe = augmenter.composeNodes(raw, formatted(), new RequestAssemblyBoundary("original", "control", input), session);
+            var replacement = new com.codeagent.context.ContextNode(
+                    com.codeagent.context.NodeId.edit(session.sessionId(), "edit", 0), LlmClient.Message.assistant("historical summary"),
+                    com.codeagent.context.SourceKind.LOCAL_SUMMARY, null, null, null, null);
+            var view = recipe.apply(List.of(replacement, raw.get(1), raw.get(2)));
+            assertEquals(List.of("historical summary", formatted().content(), "skill\ncurrent input\nmemory"),
+                    view.stream().map(node -> node.message().content()).toList());
+            assertTrue(recipe.pinned().contains(raw.get(1).id()));
+            assertEquals(com.codeagent.context.NodeId.Kind.REQUEST, view.get(2).id().kind());
+            assertThrows(IllegalArgumentException.class, () -> augmenter.composeNodes(List.of(replacement), formatted(),
+                    new RequestAssemblyBoundary("original", "control", input), session));
+            assertEquals(3, session.projection().messages().size());
+        }
+    }
     @Test void exactSequenceDistinguishesIdenticalInputsPreservesHistoryAndToolSuffix() throws Exception {
         try (var store = SessionStore.open(dir.resolve("history")); var session = store.create(new SessionStore.SessionCreateRequest(dir, "test", "test", null, "react", "agent"))) {
             start(session, "original", 1); message(session, "original", "user", "original goal", false);

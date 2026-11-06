@@ -111,6 +111,11 @@ public final class TaskTranscriptReader {
             Set<String> origins = new HashSet<>();
             int filtered = 0;
             for (var event : snapshot.events()) {
+                String sourceKind = event.payload().path("sourceKind").asText();
+                if (event.payload().hasNonNull("compactionId") || "LOCAL_SUMMARY".equals(sourceKind)
+                        || "GLOBAL_SUMMARY".equals(sourceKind) || SessionEvent.Types.CONTEXT_EDIT.equals(event.type())) {
+                    continue;
+                }
                 if (event.source() != null && event.source().startsWith("recovery_import")) {
                     // Imports must use an exact canonical origin from the validated source chain.
                     if (!SessionEvent.Types.ASSISTANT_MESSAGE.equals(event.type()))

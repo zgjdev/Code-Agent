@@ -118,3 +118,7 @@ mvn test -DskipTests=false "-Dtest=StructuredJsonExecutorTest,ExecutionModeRoute
 ```
 
 持久化与恢复细节见 [统一执行Runtime](../dev/31-unified-background-execution-runtime.md)。本文列出的验证命令是模块验收入口，不表示本次文档重写逐项执行过所有命令；本次实际结果见 [重组验收记录](../dev/41-document-consolidation-and-channel-cleanup.md)。
+
+## 四层上下文接线（实施中）
+
+`ContextManagementConfig` 统一读取 `codeagent.context.layered.enabled` / `CODEAGENT_LAYERED_CONTEXT_ENABLED`，默认 false，无效值关闭并提供诊断。开关控制新变换创建；恢复必须继续重放已提交变换。Parent Session 与每次 Task 执行分别维护 scope，局部发送变换不直接修改 Planner 顶层对话视图。实现与验收边界见 [方案48](../dev/48-context-microcompaction.md)，不可将本节视为回归通过证据。

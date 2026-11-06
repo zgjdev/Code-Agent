@@ -103,3 +103,9 @@ mvn test -DskipTests=false "-Dtest=MemoryManagerTest,MemoryRetrieverTest,Convers
 ```
 
 自动维护并发与平台限制见 [40号设计](../dev/40-automatic-code-index-maintenance.md)。返回[实现记录导航](01-runtime-and-agent-foundation.md)。
+
+## 四层发送视图（实施中）
+
+`ContextWindowManager` 先重放已提交变换，再按 Snip（确定性冗余裁剪）→ Microcompact（旧工具正文缩减）→ Collapse（闭合局部过程摘要）→ Auto（会话级摘要）处理压力；每层后重新捕获请求和计量。局部 edit 作用于 scope 的发送覆盖层，Parent Auto 通过既有 durable 会话摘要边界提交；raw JSONL 不改写，长期记忆不自动写入。
+
+普通、最终化和恢复请求允许在开关启用时创建变换；预览不创建变换、不发布预测锚点，Reviewer 不创建变换。最终预算包含工具 schema、请求附加内容和安全余量；保护内容仍超预算时拒绝发送，不能通过摘要推断执行成功。`/context` 使用投影视图；手动 `/compact` 走显式 Auto 提案和提交边界，不等于预览或自动四层触发。默认开关关闭并不撤销已有 edit。源码落点为 `ContextManagementConfig`、`ContextWindowManager`、`Agent.prepareLayeredRequest/compactLayeredNow`。验证进展及限制统一见 [方案48](../dev/48-context-microcompaction.md)。

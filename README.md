@@ -605,3 +605,7 @@ mvn clean package
 ## License
 
 当前仓库尚未提供项目级 `LICENSE` 文件。在许可证明确之前，请勿假设代码可以被任意复制、修改或再分发。第三方组件信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+### 四层上下文（实施中）
+
+`CODEAGENT_LAYERED_CONTEXT_ENABLED=false` 为默认值；可通过环境变量启用，系统属性 `-Dcodeagent.context.layered.enabled=true` 优先。开启后发送视图依次尝试 Snip、Microcompact、Context collapse、Auto compact，各层后重新计量。原始会话保持 append-only，关闭开关不撤销已提交的变换。具体实现及尚待验证的验收项见 [四层上下文方案](docs/dev/48-context-microcompaction.md)。

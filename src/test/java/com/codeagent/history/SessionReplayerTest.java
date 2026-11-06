@@ -320,7 +320,7 @@ class SessionReplayerTest {
 
     private SessionEvent event(long sequence, String type,
                                SessionEvent.SurfaceOperation operation, ObjectNode payload) {
-        return new SessionEvent(SessionEvent.CURRENT_SCHEMA_VERSION, SESSION_ID, sequence, sequence + 1,
+        return new SessionEvent(2, SESSION_ID, sequence, sequence + 1,
                 type, "react", "agent", "test", false, operation, payload);
     }
 }

@@ -1,5 +1,9 @@
 package com.codeagent.agent;
 
+import com.codeagent.context.ContextDigests;
+import com.codeagent.context.ContextNode;
+import com.codeagent.context.NodeId;
+import com.codeagent.context.SourceKind;
 import com.codeagent.history.*;
 import com.codeagent.llm.LlmClient;
 import com.codeagent.model.recovery.*;
@@ -34,6 +38,17 @@ public final class RecoveryRequestAugmenter {
 
     private List<LlmClient.Message> compose(List<LlmClient.Message> baseMessages,
             FormattedRecoveryContext context, RequestAssemblyBoundary boundary, SessionStore.SessionHandle session) {
+        var original = inspect(baseMessages, boundary, session);
+        var nodes = original.projection().activeSurface();
+        var user = original.user();
+        var result = original.result();
+        var indexed = original.events();
+        var executionSuffix = original.suffix();
+        return composeMessages(baseMessages, context, boundary, nodes, user, result, indexed, executionSuffix);
+    }
+
+    private static Original inspect(List<LlmClient.Message> baseMessages, RequestAssemblyBoundary boundary,
+                                    SessionStore.SessionHandle session) {
         Objects.requireNonNull(boundary); Objects.requireNonNull(session);
         var projection = session.projection();
         var nodes = projection.activeSurface();
@@ -53,6 +68,16 @@ public final class RecoveryRequestAugmenter {
         Map<Long, SessionEvent> indexed = new HashMap<>();
         events.forEach(e -> indexed.put(e.sequence(), e));
         Set<Long> executionSuffix = executionSuffix(events, boundary);
+        return new Original(projection, user, result, indexed, executionSuffix);
+    }
+
+    private record Original(SessionProjection projection, SessionEvent user, SessionProjection.ExecutionEnvelope result,
+                            Map<Long, SessionEvent> events, Set<Long> suffix) {}
+
+    private List<LlmClient.Message> composeMessages(List<LlmClient.Message> baseMessages,
+            FormattedRecoveryContext context, RequestAssemblyBoundary boundary, List<SessionProjection.SurfaceNode> nodes,
+            SessionEvent user, SessionProjection.ExecutionEnvelope result, Map<Long, SessionEvent> indexed,
+            Set<Long> executionSuffix) {
         List<LlmClient.Message> copy = new ArrayList<>();
         boolean inserted = false;
         boolean userOnSurface = nodes.stream().anyMatch(n -> n.sequence() == boundary.inputUserSequence());
@@ -89,6 +114,74 @@ public final class RecoveryRequestAugmenter {
             copy.add(enrichInput(rematerialize(user)));
         }
         return List.copyOf(copy);
+    }
+
+    /** Validates the original surface and captures a recipe safe to apply to a shorter projection. */
+    RecoveryView composeNodes(List<ContextNode> source, FormattedRecoveryContext context,
+                              RequestAssemblyBoundary boundary, SessionStore.SessionHandle session) {
+        var original = inspect(source.stream().map(ContextNode::message).toList(), boundary, session);
+        var surface = original.projection().activeSurface();
+        for (int i = 0; i < source.size(); i++) {
+            if (!source.get(i).id().equals(NodeId.raw(session.sessionId(), surface.get(i).sequence()))
+                    || !source.get(i).message().equals(surface.get(i).message())) {
+                throw new IllegalArgumentException("Recovery surface source identity mismatch");
+            }
+        }
+        Long late = original.result().userSequence();
+        if (late != null && (late <= boundary.inputUserSequence()
+                || boundary.resultExecutionId().equals(boundary.inputExecutionId()))) late = null;
+        Set<NodeId> pinned = new HashSet<>();
+        Set<NodeId> receipts = new HashSet<>();
+        ContextNode input = null;
+        ContextNode lateGoal = null;
+        for (var node : source) {
+            long seq = node.id().sourceSequence();
+            if (controlReceipt(original.events().get(seq))) receipts.add(node.id());
+            if (original.suffix().contains(seq) || receipts.contains(node.id())) pinned.add(node.id());
+            if (seq == boundary.inputUserSequence()) input = node;
+            if (Objects.equals(late, seq)) lateGoal = node;
+        }
+        if (input != null) pinned.add(input.id());
+        if (lateGoal != null) pinned.add(lateGoal.id());
+        String assembly = ContextDigests.canonicalDigest(boundary);
+        ContextNode inputNode = new ContextNode(NodeId.request(assembly, 1),
+                enrichInput(input == null ? rematerialize(original.user()) : input.message()),
+                SourceKind.RECOVERY_CONTROL, boundary.inputExecutionId(), null, null, null);
+        ContextNode block = context == null ? null : new ContextNode(NodeId.request(assembly, 0),
+                LlmClient.Message.user(context.content()), SourceKind.RECOVERY_CONTROL,
+                boundary.resultExecutionId(), null, null, null);
+        return new RecoveryView(Set.copyOf(pinned), Set.copyOf(receipts), original.suffix(),
+                input == null ? null : input.id(), lateGoal, inputNode, block);
+    }
+
+    record RecoveryView(Set<NodeId> pinned, Set<NodeId> receipts, Set<Long> suffix, NodeId inputId,
+                        ContextNode lateGoal, ContextNode input, ContextNode block) {
+        List<ContextNode> apply(List<ContextNode> projected) {
+            var result = new ArrayList<ContextNode>();
+            boolean inserted = false;
+            for (var node : projected) {
+                if (receipts.contains(node.id()) || lateGoal != null && lateGoal.id().equals(node.id())) continue;
+                boolean atInput = node.id().equals(inputId);
+                if (!inserted && (atInput || inputId == null && node.id().sourceSequence() != null
+                        && suffix.contains(node.id().sourceSequence()))) {
+                    insert(result);
+                    inserted = true;
+                }
+                if (!atInput) result.add(node);
+            }
+            if (!inserted) insert(result);
+            return List.copyOf(result);
+        }
+
+        String fingerprint() {
+            return ContextDigests.canonicalDigest(apply(List.of()));
+        }
+
+        private void insert(List<ContextNode> result) {
+            if (lateGoal != null) result.add(lateGoal);
+            if (block != null) result.add(block);
+            result.add(input);
+        }
     }
 
     private LlmClient.Message enrichInput(LlmClient.Message input) {

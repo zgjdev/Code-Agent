@@ -211,13 +211,17 @@ public class SubAgent {
     }
 
     private void refreshSystemPrompt() {
+        refreshSystemPrompt(null);
+    }
+
+    private void refreshSystemPrompt(BranchRequestContext layered) {
         if (!conversationHistory.isEmpty()) {
             LlmClient.Message systemMessage = LlmClient.Message.system(getSystemPrompt());
             conversationHistory.set(0, systemMessage);
             historyVersion++;
             conversationLedger.appendMessage(
                     "team", name, "system_prompt_refresh", systemMessage);
-            persistChildMessage(systemMessage, "system_prompt_refresh");
+            recordChildContext(layered, systemMessage, "system_prompt_refresh", null);
         }
     }
 
@@ -300,11 +304,15 @@ public class SubAgent {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
         Objects.requireNonNull(activeToolPolicy, "activeToolPolicy");
         pruneHistoricalImagePayloads();
-        refreshSystemPrompt();
+        var layered = role != AgentRole.REVIEWER && com.codeagent.config.ContextManagementConfig.load().enabled()
+                ? new BranchRequestContext(childSession.get(), toolRegistry.getContextProfile()) : null;
+        refreshSystemPrompt(layered);
+        if (layered != null) conversationHistory.subList(1, conversationHistory.size())
+                .forEach(layered::appendRecoveryMessage);
         String taskContent = prependSkillBodies(task.content());
 
         // 将任务注入对话
-        appendConversationMessage(ImageReferenceParser.userMessage(
+        appendConversationMessage(layered, ImageReferenceParser.userMessage(
                 taskContent,
                 Path.of(toolRegistry.getProjectPath())), "task_input");
 
@@ -316,13 +324,17 @@ public class SubAgent {
         while (true) {
             AgentBudget.ExitReason exitReason = budget.check();
             if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
-                return finalizePartialResult(exitReason, budget, streamRenderer, out);
+                if (role == AgentRole.REVIEWER) {
+                    streamRenderer.finish();
+                    return AgentMessage.error(name, role, "Reviewer request budget exhausted");
+                }
+                return finalizePartialResult(layered, exitReason, budget, streamRenderer, out);
             }
 
             budget.beginIteration();
 
             // 冻结最终 tools exposure 后预测完整请求；只有快照/计量异常才回退旧估算。
-            injectPendingLspDiagnostics(out);
+            injectPendingLspDiagnostics(layered, out);
 
             try {
                 List<LlmClient.Tool> toolDefinitions = shouldUseTools() && llmClient.supportsTools()
@@ -331,7 +343,10 @@ public class SubAgent {
                 TurnToolPolicy.ToolExposure toolExposure = activeToolPolicy.expose(toolDefinitions);
                 RequestSnapshot requestSnapshot;
                 ContextTokenTracker.ContextPrediction prediction;
-                try {
+                if (layered != null) {
+                    requestSnapshot = null;
+                    prediction = null;
+                } else try {
                     requestSnapshot = requestSnapshotFactory.capture(
                             llmClient, conversationHistory, toolExposure.definitions(), historyVersion);
                     prediction = contextTokenTracker.predict(requestSnapshot);
@@ -342,7 +357,7 @@ public class SubAgent {
                             0, Integer.MAX_VALUE, 0, 0, 0,
                             ContextTokenTracker.Mode.NONE, false, "snapshot failed");
                 }
-                if (maybeCompactHistory(out, prediction)) {
+                if (layered == null && role != AgentRole.REVIEWER && maybeCompactHistory(out, prediction)) {
                     requestSnapshot = requestSnapshotFactory.capture(
                             llmClient, conversationHistory, toolExposure.definitions(), historyVersion);
                 }
@@ -355,8 +370,14 @@ public class SubAgent {
                             ReviewResponseParser.structuredOutputSpec(),
                             true,
                             ReviewResponseParser::validateStructured,
-                            streamRenderer
+                            streamRenderer,
+                            this::checkReviewerRequestBudget
                     ).response();
+                } else if (layered != null) {
+                    var request = layered.chat(llmClient, promptAssembler, toolExposure.definitions(),
+                            com.codeagent.context.RequestPurpose.NORMAL, budget, streamRenderer);
+                    response = request.response();
+                    requestSnapshot = request.snapshot();
                 } else {
                     response = llmClient.chat(
                             conversationHistory,
@@ -373,7 +394,7 @@ public class SubAgent {
                 LlmClient.Message assistantMessage = LlmClient.Message.assistant(
                         response.reasoningContent(), response.content(), response.toolCalls());
                 if (requestSnapshot != null) {
-                    contextTokenTracker.recordSuccessfulCall(
+                    (layered == null ? contextTokenTracker : layered.tracker()).recordSuccessfulCall(
                             requestSnapshot,
                             com.codeagent.memory.TokenBudget.estimateMessageTokens(assistantMessage),
                             llmClient.normalizeUsage(response));
@@ -383,7 +404,7 @@ public class SubAgent {
                     budget.recordToolCalls(response.toolCalls());
                     printToolCalls(out,
                             activeToolPolicy.visibleToolCalls(response.toolCalls(), toolExposure));
-                    appendConversationMessage(LlmClient.Message.assistant(
+                    appendConversationMessage(layered, LlmClient.Message.assistant(
                             response.reasoningContent(),
                             response.content(),
                             response.toolCalls()
@@ -396,27 +417,18 @@ public class SubAgent {
                     List<ToolExecutionResult> toolResults = executeToolCalls(
                             response.toolCalls(), activeToolPolicy, toolExposure);
                     for (ToolExecutionResult toolResult : toolResults) {
-                        appendConversationMessage(
+                        appendConversationMessage(layered,
                                 LlmClient.Message.tool(toolResult.id(), toolResult.result()),
-                                "tool_execution");
+                                "tool_execution", toolResult.descriptor());
                     }
-                    appendImageToolMessages(toolResults);
+                    appendImageToolMessages(layered, toolResults);
                     continue;
                 }
 
                 // 没有工具调用，返回最终结果
                 LlmClient.Message finalMessage = LlmClient.Message.assistant(
                         response.reasoningContent(), response.content());
-                conversationHistory.add(finalMessage);
-                historyVersion++;
-                conversationLedger.appendMessage(
-                        "team",
-                        name,
-                        "llm_response",
-                        LlmClient.Message.assistant(
-                                response.reasoningContent(),
-                                response.content()));
-                persistChildMessage(finalMessage, "llm_response");
+                appendConversationMessage(layered, finalMessage, "llm_response");
 
                 streamRenderer.finish();
 
@@ -430,9 +442,21 @@ public class SubAgent {
         }
     }
 
+    private void checkReviewerRequestBudget(List<LlmClient.Message> messages, List<LlmClient.Tool> tools)
+            throws IOException {
+        long limit = Math.min(llmClient.maxContextWindow(),
+                toolRegistry.getContextProfile().compressionTriggerTokens());
+        var contract = ReviewResponseParser.structuredOutputSpec();
+        long contractTokens = com.codeagent.memory.MemoryEntry.estimateTokens(contract.schema().toString());
+        var request = requestSnapshotFactory.capture(llmClient, messages, tools, historyVersion);
+        if (new ContextTokenTracker().predict(request).effectiveTokens() + contractTokens >= limit) {
+            throw new IOException("完整评审材料超出模型上下文预算");
+        }
+    }
+
     /** 命中显式预算后禁用工具并执行一次最佳努力收尾，保留已经完成的工作。 */
     private AgentMessage finalizePartialResult(
-            AgentBudget.ExitReason exitReason,
+            BranchRequestContext layered, AgentBudget.ExitReason exitReason,
             AgentBudget budget,
             SubAgentStreamRenderer streamRenderer,
             PrintStream out) {
@@ -441,16 +465,16 @@ public class SubAgent {
                 name, exitReason, budget.iteration(),
                 budget.totalInputTokens() + budget.totalOutputTokens(), budget.tokenBudget());
 
-        appendConversationMessage(
+        appendConversationMessage(layered,
                 LlmClient.Message.user(budget.finalizationInstruction(exitReason)),
                 "budget_finalization");
         out.println(AnsiStyle.section("⚠️ [" + name + "] 执行预算已触发，正在整理部分结果"));
 
         try {
-            LlmClient.ChatResponse response = llmClient.chat(
-                    conversationHistory,
-                    List.of(),
-                    streamRenderer);
+            LlmClient.ChatResponse response = layered == null
+                    ? llmClient.chat(conversationHistory, List.of(), streamRenderer)
+                    : layered.chat(llmClient, promptAssembler, List.of(),
+                            com.codeagent.context.RequestPurpose.FINALIZATION, budget, streamRenderer).response();
             budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
             String content = response.content() == null ? "" : response.content().trim();
             String partialResult = formatPartialResult(description, content);
@@ -460,8 +484,8 @@ public class SubAgent {
                     name,
                     "budget_finalization_response",
                     LlmClient.Message.assistant(response.reasoningContent(), partialResult));
-            persistChildMessage(LlmClient.Message.assistant(response.reasoningContent(), partialResult),
-                    "budget_finalization_response");
+            recordChildContext(layered, LlmClient.Message.assistant(response.reasoningContent(), partialResult),
+                    "budget_finalization_response", null);
             streamRenderer.finish();
             return AgentMessage.result(name, role, partialResult);
         } catch (IOException e) {
@@ -576,12 +600,12 @@ public class SubAgent {
         return role == AgentRole.WORKER;
     }
 
-    private void injectPendingLspDiagnostics(PrintStream out) {
+    private void injectPendingLspDiagnostics(BranchRequestContext layered, PrintStream out) {
         LspDiagnosticReport report = toolRegistry.flushPendingLspDiagnostics();
         if (report == null || report.isEmpty()) {
             return;
         }
-        appendConversationMessage(
+        appendConversationMessage(layered,
                 LlmClient.Message.user(report.promptText()),
                 "lsp_diagnostics");
         out.println(report.displayText());
@@ -606,7 +630,7 @@ public class SubAgent {
         return activeToolPolicy.execute(toolRegistry, invocations, toolExposure);
     }
 
-    private void appendImageToolMessages(List<ToolExecutionResult> toolResults) {
+    private void appendImageToolMessages(BranchRequestContext layered, List<ToolExecutionResult> toolResults) {
         if (toolResults == null || toolResults.isEmpty()) {
             return;
         }
@@ -617,22 +641,36 @@ public class SubAgent {
             List<LlmClient.ContentPart> parts = new ArrayList<>();
             parts.add(LlmClient.ContentPart.text("工具 " + result.name() + " 返回了图片内容，请结合上面的工具文本结果分析。"));
             parts.addAll(result.imageParts());
-            appendConversationMessage(
+            appendConversationMessage(layered,
                     LlmClient.Message.user(parts),
                     "image_tool_result");
         }
     }
 
-    private void appendConversationMessage(LlmClient.Message message, String source) {
+    private void appendConversationMessage(BranchRequestContext layered, LlmClient.Message message, String source) {
+        appendConversationMessage(layered, message, source, null);
+    }
+
+    private void appendConversationMessage(BranchRequestContext layered, LlmClient.Message message, String source,
+                                           com.codeagent.context.ToolResultDescriptor descriptor) {
         conversationHistory.add(message);
         historyVersion++;
         conversationLedger.appendMessage("team", name, source, message);
-        persistChildMessage(message, source);
+        recordChildContext(layered, message, source, descriptor);
     }
 
-    private void persistChildMessage(LlmClient.Message message, String source) {
+    private void recordChildContext(BranchRequestContext layered, LlmClient.Message message, String source,
+                                    com.codeagent.context.ToolResultDescriptor descriptor) {
+        var kind = BranchRequestContext.kind(message, source);
+        Long sequence = persistChildMessage(layered, message, source, kind, descriptor);
+        if (layered != null) layered.append(message, kind, descriptor, sequence);
+    }
+
+    private Long persistChildMessage(BranchRequestContext layered, LlmClient.Message message, String source,
+                                     com.codeagent.context.SourceKind kind,
+                                     com.codeagent.context.ToolResultDescriptor descriptor) {
         SessionStore.SessionHandle child = childSession.get();
-        if (child == null || message == null) return;
+        if (child == null || message == null) return null;
         String type = switch (message.role()) {
             case "system" -> SessionEvent.Types.SYSTEM_MESSAGE;
             case "assistant" -> SessionEvent.Types.ASSISTANT_MESSAGE;
@@ -644,9 +682,11 @@ public class SubAgent {
         if ("tool".equals(message.role())) {
             payload.put("invocationId", message.toolCallId() == null ? "unknown" : message.toolCallId());
         }
+        if (layered != null) layered.describe(payload, kind, descriptor);
+        else if (descriptor != null) payload.set("toolResultDescriptor", JSON_MAPPER.valueToTree(descriptor));
         try {
-            child.append(new SessionEventDraft(type, "team", name, source, false,
-                    SessionEvent.SurfaceOperation.append(), payload));
+            return child.append(new SessionEventDraft(type, "team", name, source, false,
+                    SessionEvent.SurfaceOperation.append(), payload)).sequence();
         } catch (IOException e) {
             throw new IllegalStateException("unable to append child message", e);
         }

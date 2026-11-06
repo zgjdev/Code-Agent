@@ -155,9 +155,20 @@ public class PlanExecuteAgent {
     private final PlanReviewHandler reviewHandler;
     private final MemoryManager memoryManager;
     private final AutoCompactionManager autoCompactionManager;
-    private final ContextTokenTracker contextTokenTracker = new ContextTokenTracker();
     private final RequestSnapshotFactory requestSnapshotFactory = new RequestSnapshotFactory();
-    private long historyVersion;
+    private static final class TaskRequestContext {
+        private final ContextTokenTracker legacyTracker = new ContextTokenTracker();
+        private final BranchRequestContext layered;
+        private long historyVersion;
+
+        TaskRequestContext(BranchRequestContext layered) {
+            this.layered = layered;
+        }
+
+        ContextTokenTracker tracker() {
+            return layered == null ? legacyTracker : layered.tracker();
+        }
+    }
     private final PrintStream out;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private ParentConversationContext parentConversationContext;
@@ -466,7 +477,7 @@ public class PlanExecuteAgent {
         }
     }
 
-    private boolean maybeCompactHistory(List<LlmClient.Message> messages,
+    private boolean maybeCompactHistory(TaskRequestContext context, List<LlmClient.Message> messages,
                                         PrintStream out,
                                         String actor,
                                         ContextTokenTracker.ContextPrediction prediction) {
@@ -483,8 +494,8 @@ public class PlanExecuteAgent {
                         messages, trigger, prediction.effectiveTokens());
             }
             if (result.compacted()) {
-                historyVersion++;
-                contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
+                context.historyVersion++;
+                context.tracker().invalidate(InvalidationReason.COMPACTION);
                 conversationLedger.appendEvent(
                         "compaction",
                         "plan",
@@ -505,8 +516,8 @@ public class PlanExecuteAgent {
                 AutoCompactionManager.Result fallback = autoCompactionManager
                         .compactIfNeeded(messages, trigger);
                 if (fallback.compacted()) {
-                    historyVersion++;
-                    contextTokenTracker.invalidate(InvalidationReason.COMPACTION);
+                    context.historyVersion++;
+                    context.tracker().invalidate(InvalidationReason.COMPACTION);
                     return true;
                 }
             } catch (Exception fallbackError) {
@@ -1584,11 +1595,15 @@ public class PlanExecuteAgent {
 
         String actor = "task:" + task.getId();
         List<LlmClient.Message> messages = new ArrayList<>();
-        appendTaskMessage(messages, actor, "system_prompt", LlmClient.Message.system(prompt));
+        var layered = com.codeagent.config.ContextManagementConfig.load().enabled()
+                ? new BranchRequestContext(childSession.get(), memoryManager.getContextProfile()) : null;
+        var context = new TaskRequestContext(layered);
+        appendTaskMessage(context, messages, actor, "system_prompt", LlmClient.Message.system(prompt));
         var currentTaskInput=currentTaskInput(taskInput);
         restoreTaskContext(messages,task,currentTaskInput,recoveryBinding);
+        if (layered != null) messages.subList(1, messages.size()).forEach(layered::appendRecoveryMessage);
         appendTaskMessage(
-                messages,
+                context, messages,
                 actor,
                 "task_input",
                 currentTaskInput);
@@ -1608,7 +1623,7 @@ public class PlanExecuteAgent {
             if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
                 return finalizePartialTask(
                         task,
-                        messages,
+                        context, messages,
                         actor,
                         exitReason,
                         budget,
@@ -1621,35 +1636,38 @@ public class PlanExecuteAgent {
             int iteration = budget.beginIteration();
 
             // 冻结最终 tools exposure 后预测完整请求；只有快照/计量异常才回退旧估算。
-            injectPendingLspDiagnostics(messages, out, actor, evidenceCollector);
+            injectPendingLspDiagnostics(context, messages, out, actor, evidenceCollector);
             List<LlmClient.Tool> toolDefinitions = llmClient.supportsTools()
                     ? toolRegistry.getToolDefinitions()
                     : null;
             TurnToolPolicy.ToolExposure toolExposure = taskToolPolicy.expose(toolDefinitions);
             RequestSnapshot requestSnapshot;
-            ContextTokenTracker.ContextPrediction prediction;
-            try {
-                requestSnapshot = requestSnapshotFactory.capture(
-                        llmClient, messages, toolExposure.definitions(), historyVersion);
-                prediction = contextTokenTracker.predict(requestSnapshot);
-            } catch (Exception snapshotError) {
-                log.warn("plan request snapshot failed; using legacy estimate fallback", snapshotError);
-                requestSnapshot = null;
-                prediction = new ContextTokenTracker.ContextPrediction(
-                        0, Integer.MAX_VALUE, 0, 0, 0,
-                        ContextTokenTracker.Mode.NONE, false, "snapshot failed");
-            }
-            if (maybeCompactHistory(messages, out, actor, prediction)) {
-                requestSnapshot = requestSnapshotFactory.capture(
-                        llmClient, messages, toolExposure.definitions(), historyVersion);
-                prediction = contextTokenTracker.predict(requestSnapshot);
-            }
+            LlmClient.ChatResponse response;
             taskExecutionStarted.set(true);
-            LlmClient.ChatResponse response = llmClient.chat(
-                    messages,
-                    toolExposure.definitions(),
-                    streamRenderer
-            );
+            if (layered != null) {
+                var request = layered.chat(llmClient, promptAssembler, toolExposure.definitions(),
+                        com.codeagent.context.RequestPurpose.NORMAL, budget, streamRenderer);
+                response = request.response();
+                requestSnapshot = request.snapshot();
+            } else {
+                ContextTokenTracker.ContextPrediction prediction;
+                try {
+                    requestSnapshot = requestSnapshotFactory.capture(
+                            llmClient, messages, toolExposure.definitions(), context.historyVersion);
+                    prediction = context.tracker().predict(requestSnapshot);
+                } catch (Exception snapshotError) {
+                    log.warn("plan request snapshot failed; using legacy estimate fallback", snapshotError);
+                    requestSnapshot = null;
+                    prediction = new ContextTokenTracker.ContextPrediction(
+                            0, Integer.MAX_VALUE, 0, 0, 0,
+                            ContextTokenTracker.Mode.NONE, false, "snapshot failed");
+                }
+                if (maybeCompactHistory(context, messages, out, actor, prediction)) {
+                    requestSnapshot = requestSnapshotFactory.capture(
+                            llmClient, messages, toolExposure.definitions(), context.historyVersion);
+                }
+                response = llmClient.chat(messages, toolExposure.definitions(), streamRenderer);
+            }
             LlmTraceLogger.logReasoning(log,
                     "plan-task task=" + task.getId() + " iteration=" + iteration,
                     llmClient,
@@ -1664,7 +1682,7 @@ public class PlanExecuteAgent {
             LlmClient.Message assistantMessage = LlmClient.Message.assistant(
                     response.reasoningContent(), response.content(), response.toolCalls());
             if (requestSnapshot != null) {
-                contextTokenTracker.recordSuccessfulCall(
+                context.tracker().recordSuccessfulCall(
                         requestSnapshot,
                         com.codeagent.memory.TokenBudget.estimateMessageTokens(assistantMessage),
                         llmClient.normalizeUsage(response));
@@ -1678,13 +1696,8 @@ public class PlanExecuteAgent {
                     response.content() == null ? 0 : response.content().length());
 
             if (!response.hasToolCalls()) {
-                conversationLedger.appendMessage(
-                        "plan",
-                        actor,
-                        "llm_response",
+                appendTaskMessage(context, messages, actor, "llm_response",
                         LlmClient.Message.assistant(response.reasoningContent(), response.content()));
-                persistChildMessage(LlmClient.Message.assistant(
-                        response.reasoningContent(), response.content()), "llm_response");
                 memoryManager.recordTokenUsage(
                         budget.totalInputTokens(),
                         budget.totalOutputTokens(),
@@ -1701,7 +1714,7 @@ public class PlanExecuteAgent {
             // 有工具调用：执行工具并将结果回灌到消息历史
             budget.recordToolCalls(response.toolCalls());
             printToolCalls(out, taskToolPolicy.visibleToolCalls(response.toolCalls(), toolExposure));
-            appendTaskMessage(messages, actor, "llm_response", LlmClient.Message.assistant(
+            appendTaskMessage(context, messages, actor, "llm_response", LlmClient.Message.assistant(
                     response.reasoningContent(),
                     response.content(),
                     response.toolCalls()
@@ -1716,12 +1729,12 @@ public class PlanExecuteAgent {
             for (ToolExecutionResult toolResult : toolResults) {
                 allResults.append(toolResult.result()).append("\n");
                 appendTaskMessage(
-                        messages,
+                        context, messages,
                         actor,
                         "tool_execution",
-                        LlmClient.Message.tool(toolResult.id(), toolResult.result()));
+                        LlmClient.Message.tool(toolResult.id(), toolResult.result()), toolResult.descriptor());
             }
-            appendImageToolMessages(messages, toolResults, actor);
+            appendImageToolMessages(context, messages, toolResults, actor);
             checkpointRecovery(recoveryObserver,"TOOL_BATCH");
         }
     }
@@ -1729,7 +1742,7 @@ public class PlanExecuteAgent {
     /** 命中显式预算后，以一次无工具调用整理计划任务的部分成果。 */
     private TaskRunResult finalizePartialTask(
             Task task,
-            List<LlmClient.Message> messages,
+            TaskRequestContext context, List<LlmClient.Message> messages,
             String actor,
             AgentBudget.ExitReason exitReason,
             AgentBudget budget,
@@ -1743,7 +1756,7 @@ public class PlanExecuteAgent {
                 task.getId(), exitReason, budget.iteration(),
                 budget.totalInputTokens() + budget.totalOutputTokens(), budget.tokenBudget());
         appendTaskMessage(
-                messages,
+                context, messages,
                 actor,
                 "budget_finalization",
                 LlmClient.Message.user(budget.finalizationInstruction(exitReason)));
@@ -1751,11 +1764,14 @@ public class PlanExecuteAgent {
 
         String content;
         try {
-            LlmClient.ChatResponse response = llmClient.chat(messages, List.of(), streamRenderer);
+            LlmClient.ChatResponse response = context.layered == null
+                    ? llmClient.chat(messages, List.of(), streamRenderer)
+                    : context.layered.chat(llmClient, promptAssembler, List.of(),
+                            com.codeagent.context.RequestPurpose.FINALIZATION, budget, streamRenderer).response();
             budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
             content = response.content() == null ? "" : response.content().trim();
             appendTaskMessage(
-                    messages,
+                    context, messages,
                     actor,
                     "budget_finalization_response",
                     LlmClient.Message.assistant(response.reasoningContent(), response.content()));
@@ -1803,7 +1819,7 @@ public class PlanExecuteAgent {
         }
     }
 
-    private void injectPendingLspDiagnostics(List<LlmClient.Message> messages, PrintStream out,
+    private void injectPendingLspDiagnostics(TaskRequestContext context, List<LlmClient.Message> messages, PrintStream out,
                                              String actor, TaskEvidenceCollector evidenceCollector) {
         LspDiagnosticReport report = toolRegistry.flushPendingLspDiagnostics();
         if (report == null || report.isEmpty()) {
@@ -1811,7 +1827,7 @@ public class PlanExecuteAgent {
         }
         evidenceCollector.observeLsp(report);
         appendTaskMessage(
-                messages,
+                context, messages,
                 actor,
                 "lsp_diagnostics",
                 LlmClient.Message.user(report.promptText()));
@@ -1854,7 +1870,7 @@ public class PlanExecuteAgent {
         return results;
     }
 
-    private void appendImageToolMessages(List<LlmClient.Message> messages,
+    private void appendImageToolMessages(TaskRequestContext context, List<LlmClient.Message> messages,
                                          List<ToolExecutionResult> toolResults,
                                          String actor) {
         if (toolResults == null || toolResults.isEmpty()) {
@@ -1868,24 +1884,34 @@ public class PlanExecuteAgent {
             parts.add(LlmClient.ContentPart.text("工具 " + result.name() + " 返回了图片内容，请结合上面的工具文本结果分析。"));
             parts.addAll(result.imageParts());
             appendTaskMessage(
-                    messages,
+                    context, messages,
                     actor,
                     "image_tool_result",
                     LlmClient.Message.user(parts));
         }
     }
 
-    private void appendTaskMessage(List<LlmClient.Message> messages, String actor,
+    private void appendTaskMessage(TaskRequestContext context, List<LlmClient.Message> messages, String actor,
                                    String source, LlmClient.Message message) {
-        messages.add(message);
-        historyVersion++;
-        conversationLedger.appendMessage("plan", actor, source, message);
-        persistChildMessage(message, source);
+        appendTaskMessage(context, messages, actor, source, message, null);
     }
 
-    private void persistChildMessage(LlmClient.Message message, String source) {
+    private void appendTaskMessage(TaskRequestContext context, List<LlmClient.Message> messages, String actor,
+                                   String source, LlmClient.Message message,
+                                   com.codeagent.context.ToolResultDescriptor descriptor) {
+        messages.add(message);
+        context.historyVersion++;
+        conversationLedger.appendMessage("plan", actor, source, message);
+        var kind = BranchRequestContext.kind(message, source);
+        Long sequence = persistChildMessage(context.layered, message, source, kind, descriptor);
+        if (context.layered != null) context.layered.append(message, kind, descriptor, sequence);
+    }
+
+    private Long persistChildMessage(BranchRequestContext context, LlmClient.Message message, String source,
+                                     com.codeagent.context.SourceKind kind,
+                                     com.codeagent.context.ToolResultDescriptor descriptor) {
         SessionStore.SessionHandle child = childSession.get();
-        if (child == null || message == null) return;
+        if (child == null || message == null) return null;
         String type = switch (message.role()) {
             case "system" -> SessionEvent.Types.SYSTEM_MESSAGE;
             case "assistant" -> SessionEvent.Types.ASSISTANT_MESSAGE;
@@ -1897,9 +1923,11 @@ public class PlanExecuteAgent {
         if ("tool".equals(message.role())) {
             payload.put("invocationId", message.toolCallId() == null ? "unknown" : message.toolCallId());
         }
+        if (context != null) context.describe(payload, kind, descriptor);
+        else if (descriptor != null) payload.set("toolResultDescriptor", JSON_MAPPER.valueToTree(descriptor));
         try {
-            child.append(new SessionEventDraft(type, "plan", child.manifest().actor(), source,
-                    false, SessionEvent.SurfaceOperation.append(), payload));
+            return child.append(new SessionEventDraft(type, "plan", child.manifest().actor(), source,
+                    false, SessionEvent.SurfaceOperation.append(), payload)).sequence();
         } catch (IOException e) {
             throw new IllegalStateException("unable to append plan child message", e);
         }

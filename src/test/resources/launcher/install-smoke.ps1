@@ -1,5 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$Repository, [Parameter(Mandatory=$true)][string]$JavaHome, [switch]$CheckPackage)
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('codeagent-launcher-' + [Guid]::NewGuid().ToString('N'))
 $crossDriveWorkspace = $null
 New-Item -ItemType Directory -Path $testRoot | Out-Null

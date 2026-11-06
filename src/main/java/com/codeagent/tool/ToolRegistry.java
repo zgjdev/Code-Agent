@@ -1,5 +1,10 @@
 package com.codeagent.tool;
 
+import com.codeagent.context.ContextDigests;
+import com.codeagent.context.ToolResultDescriptor;
+import com.codeagent.context.ToolResultDescriptor.CaptureCompleteness;
+import com.codeagent.context.ToolResultDescriptor.OutcomeSource;
+import com.codeagent.context.ToolResultDescriptor.ProcessOutcome;
 import com.codeagent.config.CodeAgentPaths;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -334,14 +339,7 @@ public class ToolRegistry {
                         new Param("offset", "integer", "起始行号，1 表示第一行；省略时读取全文", false),
                         new Param("limit", "integer", "最多读取多少行；省略时读取全文，最大 2000 行", false)
                 ),
-                args -> {
-                    Path safe = pathGuard.resolveSafe(args.get("path"));
-                    try {
-                        return readFileForTool(safe, args);
-                    } catch (Exception e) {
-                        return "读取文件失败: " + e.getMessage();
-                    }
-                }
+                args -> readFileOutput(args).text()
         ));
 
         // write_file 工具
@@ -394,24 +392,7 @@ public class ToolRegistry {
                 "list_dir",
                 "列出目录内容（仅限项目根目录之内）",
                 createParameters(new Param("path", "string", "目录路径", true)),
-                args -> {
-                    Path safe = pathGuard.resolveSafe(args.get("path"));
-                    try {
-                        File[] files = safe.toFile().listFiles();
-                        if (files == null) {
-                            return "目录为空或不存在";
-                        }
-                        StringBuilder sb = new StringBuilder("目录内容:\n");
-                        for (File f : files) {
-                            sb.append(f.isDirectory() ? "[D] " : "[F] ")
-                              .append(f.getName())
-                              .append("\n");
-                        }
-                        return sb.toString();
-                    } catch (Exception e) {
-                        return "列出目录失败: " + e.getMessage();
-                    }
-                }
+                args -> listDirectoryOutput(args).text()
         ));
 
         tools.put("glob_files", new Tool(
@@ -422,7 +403,7 @@ public class ToolRegistry {
                         new Param("path", "string", "搜索起始目录，默认 .", false),
                         new Param("max_results", "integer", "最多返回结果数，默认 50，上限 200", false)
                 ),
-                args -> globFiles(args)
+                args -> globFiles(args).text()
         ));
 
         tools.put("grep_code", new Tool(
@@ -439,25 +420,62 @@ public class ToolRegistry {
                         new Param("head_limit", "integer", "单个文件最多返回多少条命中，默认 20，上限 50", false),
                         new Param("max_chars", "integer", "单次工具结果字符预算，默认 24000，上限 60000", false)
                 ),
-                args -> grepCode(args)
+                args -> grepCode(args).text()
         ));
     }
 
-    private String readFileForTool(Path file, Map<String, String> args) throws IOException {
+    private ToolOutput readFileOutput(Map<String, String> args) {
+        Path file = pathGuard.resolveSafe(args.get("path"));
+        try {
+            return readFileForTool(file, args);
+        } catch (IOException e) {
+            return ToolOutput.failure("读取文件失败: " + e.getMessage());
+        }
+    }
+
+    private Map<String, String> resourcePath(Path path) {
+        String relative = ToolPathFormatter.portable(pathGuard.getRootPath().relativize(path));
+        return new LinkedHashMap<>(Map.of("path", relative.isEmpty() ? "." : relative));
+    }
+
+    private ToolOutput listDirectoryOutput(Map<String, String> args) {
+        Path safe = pathGuard.resolveSafe(args.get("path"));
+        try {
+            File[] files = safe.toFile().listFiles();
+            if (files == null) return ToolOutput.failure("目录为空或不存在");
+            StringBuilder sb = new StringBuilder("目录内容:\n");
+            for (File file : files) {
+                sb.append(file.isDirectory() ? "[D] " : "[F] ").append(file.getName()).append("\n");
+            }
+            return ToolOutput.text(sb.toString()).withCapture(
+                    CaptureCompleteness.COMPLETE, resourcePath(safe), files.length);
+        } catch (Exception e) {
+            return ToolOutput.failure("列出目录失败: " + e.getMessage());
+        }
+    }
+
+    private ToolOutput readFileForTool(Path file, Map<String, String> args) throws IOException {
         if (!Files.isRegularFile(file)) {
-            return "读取文件失败: 不是普通文件";
+            return ToolOutput.failure("读取文件失败: 不是普通文件");
         }
         boolean ranged = args.containsKey("offset") || args.containsKey("limit");
         if (!ranged) {
-            return "文件内容:\n" + Files.readString(file);
+            String content = Files.readString(file);
+            return ToolOutput.text("文件内容:\n" + content).withCapture(
+                    CaptureCompleteness.COMPLETE, resourcePath(file), Math.toIntExact(content.lines().count()));
         }
 
         int offset = Math.max(1, parseInt(args.get("offset"), 1));
         int limit = Math.max(1, Math.min(parseInt(args.get("limit"), 200), MAX_READ_FILE_LINES));
         List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
         int total = lines.size();
+        Map<String, String> location = resourcePath(file);
+        location.put("offset", Integer.toString(offset));
+        location.put("limit", Integer.toString(limit));
+        location.put("totalLines", Integer.toString(total));
         if (offset > total) {
-            return "文件内容: " + file.getFileName() + " 共 " + total + " 行，offset 超出范围";
+            return ToolOutput.text("文件内容: " + file.getFileName() + " 共 " + total + " 行，offset 超出范围")
+                    .withCapture(total == 0 ? CaptureCompleteness.COMPLETE : CaptureCompleteness.TRUNCATED, location, 0);
         }
 
         int from = offset - 1;
@@ -472,13 +490,15 @@ public class ToolRegistry {
         if (to < total) {
             sb.append("...(已截断，可用 offset=").append(to + 1).append(" 继续读取)");
         }
-        return sb.toString().trim();
+        return ToolOutput.text(sb.toString().trim()).withCapture(
+                from > 0 || to < total ? CaptureCompleteness.TRUNCATED : CaptureCompleteness.COMPLETE,
+                location, to - from);
     }
 
-    private String globFiles(Map<String, String> args) {
+    private ToolOutput globFiles(Map<String, String> args) {
         String pattern = args.get("pattern");
         if (pattern == null || pattern.isBlank()) {
-            return "文件匹配失败: pattern 不能为空";
+            return ToolOutput.failure("文件匹配失败: pattern 不能为空");
         }
         Path root = pathGuard.resolveSafe(args.getOrDefault("path", "."));
         int maxResults = clamp(parseInt(args.get("max_results"), 50), 1, MAX_GREP_RESULTS);
@@ -486,6 +506,9 @@ public class ToolRegistry {
         PathMatcher matcher = projectRoot.getFileSystem().getPathMatcher("glob:" + normalizeGlob(pattern));
         PathMatcher fileNameMatcher = projectRoot.getFileSystem().getPathMatcher("glob:" + normalizeFileNameGlob(pattern));
         List<String> matches = new ArrayList<>();
+        Map<String, String> location = resourcePath(root);
+        location.put("pattern", pattern);
+        location.put("max_results", Integer.toString(maxResults));
 
         try {
             Files.walkFileTree(root, new SearchFileVisitor(projectRoot, path -> {
@@ -498,11 +521,12 @@ public class ToolRegistry {
                 }
             }));
         } catch (Exception e) {
-            return "文件匹配失败: " + e.getMessage();
+            return ToolOutput.failure("文件匹配失败: " + e.getMessage());
         }
 
         if (matches.isEmpty()) {
-            return "未找到匹配文件: " + pattern;
+            return ToolOutput.text("未找到匹配文件: " + pattern)
+                    .withCapture(CaptureCompleteness.COMPLETE, location, 0);
         }
         StringBuilder sb = new StringBuilder();
         sb.append("匹配文件 ").append(matches.size()).append(" 个");
@@ -513,13 +537,15 @@ public class ToolRegistry {
         for (int i = 0; i < matches.size(); i++) {
             sb.append(i + 1).append(". ").append(matches.get(i)).append("\n");
         }
-        return sb.toString().trim();
+        return ToolOutput.text(sb.toString().trim()).withCapture(
+                matches.size() >= maxResults ? CaptureCompleteness.TRUNCATED : CaptureCompleteness.COMPLETE,
+                location, matches.size());
     }
 
-    private String grepCode(Map<String, String> args) {
+    private ToolOutput grepCode(Map<String, String> args) {
         String query = args.get("pattern");
         if (query == null || query.isBlank()) {
-            return "代码搜索失败: pattern 不能为空";
+            return ToolOutput.failure("代码搜索失败: pattern 不能为空");
         }
         Path root = pathGuard.resolveSafe(args.getOrDefault("path", "."));
         Path projectRoot = pathGuard.getRootPath();
@@ -541,12 +567,22 @@ public class ToolRegistry {
                 headLimit
         );
         CodeSearchResult result = codeSearchService.search(request);
+        Map<String, String> location = resourcePath(root);
+        location.put("pattern", query);
+        if (request.glob() != null) location.put("glob", request.glob());
+        location.put("regex", Boolean.toString(regex));
+        location.put("case_sensitive", Boolean.toString(caseSensitive));
+        location.put("context_lines", Integer.toString(contextLines));
+        location.put("max_results", Integer.toString(maxResults));
+        location.put("head_limit", Integer.toString(headLimit));
+        location.put("max_chars", Integer.toString(maxChars));
 
         if (!result.partialReason().isBlank() && result.matches().isEmpty()) {
-            return "代码搜索失败: " + result.partialReason();
+            return ToolOutput.failure("代码搜索失败: " + result.partialReason());
         }
         if (result.matches().isEmpty()) {
-            return "未找到匹配内容: " + query;
+            return ToolOutput.text("未找到匹配内容: " + query)
+                    .withCapture(CaptureCompleteness.COMPLETE, location, 0);
         }
         StringBuilder sb = new StringBuilder();
         sb.append("匹配结果 ").append(result.matches().size()).append(" 条")
@@ -585,7 +621,9 @@ public class ToolRegistry {
             sb.append("\npartial: true（").append(result.partialReason()).append("，请缩小 path/glob/pattern 继续搜索）");
         }
         appendSuggestedReads(sb, result.matches().subList(0, Math.min(rendered, result.matches().size())));
-        return sb.toString().trim();
+        return ToolOutput.text(sb.toString().trim()).withCapture(
+                truncatedByChars || result.partial() ? CaptureCompleteness.TRUNCATED : CaptureCompleteness.COMPLETE,
+                location, rendered);
     }
 
     private void appendSuggestedReads(StringBuilder sb, List<GrepMatch> matches) {
@@ -680,30 +718,40 @@ public class ToolRegistry {
                         new Param("top_k", "integer", "返回结果数量（默认 10，上限 30）", false),
                         new Param("intent", "string", "检索意图：chunks（默认）或 architecture", false)
                 ),
-                args -> {
-                    String query = args.get("query");
-                    int topK = RetrievalRequest.DEFAULT_TOP_K;
-                    try {
-                        if (args.containsKey("top_k")) {
-                            topK = Integer.parseInt(args.get("top_k"));
-                        }
-                    } catch (NumberFormatException ignored) {
-                    }
-                    topK = Math.max(1, Math.min(topK, 30));
-                    RetrievalIntent intent = "architecture".equalsIgnoreCase(args.get("intent"))
-                            ? RetrievalIntent.ARCHITECTURE
-                            : RetrievalIntent.CHUNKS;
-
-                    try {
-                        var response = getCodeRetrievalService().search(new RetrievalRequest(
-                                pathGuard.getRootPath(), query, topK, RetrievalRequest.DEFAULT_MAX_CHARS,
-                                true, intent, args.get("lexical_query")));
-                        return SearchResultFormatter.formatForTool(query, response);
-                    } catch (Exception e) {
-                        return "代码检索失败: " + e.getClass().getSimpleName();
-                    }
-                }
+                args -> searchCodeOutput(args).text()
         ));
+    }
+
+    private ToolOutput searchCodeOutput(Map<String, String> args) {
+        String query = args.get("query");
+        int topK = RetrievalRequest.DEFAULT_TOP_K;
+        try {
+            if (args.containsKey("top_k")) {
+                topK = Integer.parseInt(args.get("top_k"));
+            }
+        } catch (NumberFormatException ignored) {
+        }
+        topK = Math.max(1, Math.min(topK, 30));
+        RetrievalIntent intent = "architecture".equalsIgnoreCase(args.get("intent"))
+                ? RetrievalIntent.ARCHITECTURE
+                : RetrievalIntent.CHUNKS;
+
+        try {
+            var response = getCodeRetrievalService().search(new RetrievalRequest(
+                    pathGuard.getRootPath(), query, topK, RetrievalRequest.DEFAULT_MAX_CHARS,
+                    true, intent, args.get("lexical_query")));
+            Map<String, String> location = resourcePath(pathGuard.getRootPath());
+            location.put("query", query);
+            location.put("top_k", Integer.toString(topK));
+            location.put("intent", intent.name().toLowerCase(Locale.ROOT));
+            location.put("max_chars", Integer.toString(RetrievalRequest.DEFAULT_MAX_CHARS));
+            if (args.get("lexical_query") != null) location.put("lexical_query", args.get("lexical_query"));
+            boolean partial = response.partial() || response.repositoryMap().map(map -> map.partial()).orElse(false);
+            return ToolOutput.text(SearchResultFormatter.formatForTool(query, response)).withCapture(
+                    partial ? CaptureCompleteness.TRUNCATED : CaptureCompleteness.COMPLETE, location, response.hits().size());
+        } catch (Exception e) {
+            return ToolOutput.failure("代码检索失败: " + e.getClass().getSimpleName());
+        }
     }
 
     /** Registers stable Web facades whose backends are selected internally. */
@@ -1230,7 +1278,7 @@ public class ToolRegistry {
                 }
                 ToolOutput output = mcpTool.invoker().apply(argumentsJson);
                 if (output == null) {
-                    output = ToolOutput.text("");
+                    output = ToolOutput.legacy("", true);
                 }
                 output = classifyOutput(output);
                 if (browserGuard != null) {
@@ -1245,7 +1293,7 @@ public class ToolRegistry {
                                 output.imageParts(),
                                 output.successful(),
                                 output.discoveredUrls(),
-                                output.failureKind(), output.structuredContent());
+                                output.failureKind(), output.structuredContent(), output.facts());
                     }
                 }
                 if (shouldAudit) {
@@ -1265,6 +1313,11 @@ public class ToolRegistry {
                 case "web_fetch" -> webFetchOutput(
                         argMap.get("url"), parseInt(argMap.get("max_chars"), DEFAULT_FETCH_MAX_CHARS));
                 case "execute_command" -> executeCommandOutput(argMap.get("command"));
+                case "read_file" -> readFileOutput(argMap);
+                case "list_dir" -> listDirectoryOutput(argMap);
+                case "glob_files" -> globFiles(argMap);
+                case "grep_code" -> grepCode(argMap);
+                case "search_code" -> searchCodeOutput(argMap);
                 default -> classifyTextOutput(tool.executor().execute(argMap));
             };
             if (shouldAudit) {
@@ -1293,17 +1346,20 @@ public class ToolRegistry {
     }
 
     private static ToolOutput classifyTextOutput(String text) {
-        return looksLikeFailureText(text) ? ToolOutput.failure(text) : ToolOutput.text(text);
+        return ToolOutput.legacy(text, !looksLikeFailureText(text));
     }
 
     private static ToolOutput classifyOutput(ToolOutput output) {
         if (output == null) {
-            return ToolOutput.text("");
+            return ToolOutput.legacy("", true);
         }
         if (!output.successful() || !looksLikeFailureText(output.text())) {
             return output;
         }
-        return ToolOutput.failure(output.failureKind(), output.text(), output.imageParts());
+        return new ToolOutput(output.text(), output.imageParts(), false, List.of(),
+                ToolOutput.FailureKind.EXECUTION_ERROR, null,
+                new ToolOutput.Facts(OutcomeSource.LEGACY_INFERRED, CaptureCompleteness.UNKNOWN,
+                        null, null, false, Map.of(), null));
     }
 
     private static boolean looksLikeFailureText(String text) {
@@ -1536,8 +1592,7 @@ public class ToolRegistry {
         ToolExecutionResult result=ToolExecutionResult.completed(invocation,output,elapsedMillis(startedAt));
         if(observation!=null)try{observation.observer().completed(observation.context(),invocation,result);}
         catch(Exception failure){
-            return new ToolExecutionResult(result.id(),result.name(),result.argumentsJson(),result.result(),result.elapsedMillis(),
-                    result.timedOut(),result.imageParts(),false,result.discoveredUrls(),result.executedCommand(),result.exitCode(),true);
+            return ToolExecutionResult.completed(invocation, output, result.elapsedMillis(), true);
         }
         return result;
     }
@@ -1562,14 +1617,7 @@ public class ToolRegistry {
     }
 
     private ToolOutput executeCommandOutput(String command) {
-        String normalized = command == null ? "" : command.trim();
-        ToolOutput output = runNativeCommand(normalized);
-        var metadata = mapper.createObjectNode().put("executedCommand", normalized);
-        if (output.structuredContent() != null && output.structuredContent().has("exitCode")) {
-            metadata.set("exitCode", output.structuredContent().get("exitCode"));
-        }
-        return new ToolOutput(output.text(), output.imageParts(), output.successful(), output.discoveredUrls(),
-                output.failureKind(), metadata);
+        return runNativeCommand(command);
     }
 
     private ToolOutput runNativeCommand(String command) {
@@ -1603,33 +1651,38 @@ public class ToolRegistry {
             process = pb.start();
 
             Process runningProcess = process;
-            Future<String> outputFuture = outputReaderExecutor.submit(() -> readProcessOutput(runningProcess));
+            Future<CommandCapture> outputFuture = outputReaderExecutor.submit(() -> readProcessOutput(runningProcess));
 
             boolean finished = process.waitFor(commandTimeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
                 process.waitFor(2, TimeUnit.SECONDS);
                 outputFuture.cancel(true);
-                return ToolOutput.failure("命令执行超时（" + commandTimeoutSeconds + "秒），已强制终止");
+                return ToolOutput.failure(ToolOutput.FailureKind.TIMED_OUT,
+                                "命令执行超时（" + commandTimeoutSeconds + "秒），已强制终止")
+                        .withCommand(normalized, null, CaptureCompleteness.UNKNOWN, true);
             }
 
-            String output = getCommandOutput(outputFuture);
             int exitCode = process.exitValue();
-            String text = String.format("命令执行完成 (exit code: %d)\n%s", exitCode, output);
+            CommandCapture capture = getCommandOutput(outputFuture);
+            String text = String.format("命令执行完成 (exit code: %d)\n%s", exitCode, capture.text());
             return new ToolOutput(text, List.of(), exitCode == 0, List.of(),
                     exitCode == 0 ? ToolOutput.FailureKind.NONE : ToolOutput.FailureKind.EXECUTION_ERROR,
-                    mapper.createObjectNode().put("exitCode", exitCode));
+                    mapper.createObjectNode().put("exitCode", exitCode).put("executedCommand", normalized))
+                    .withCommand(normalized, exitCode, capture.completeness(), false);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             if (process != null) {
                 process.destroyForcibly();
             }
-            return ToolOutput.failure(ToolOutput.FailureKind.CANCELLED, "用户取消了此次工具调用");
+            return ToolOutput.failure(ToolOutput.FailureKind.CANCELLED, "用户取消了此次工具调用")
+                    .withCommand(process == null ? null : normalized, null, CaptureCompleteness.UNKNOWN, process != null);
         } catch (Exception e) {
             if (process != null) {
                 process.destroyForcibly();
             }
-            return ToolOutput.failure("执行命令失败: " + e.getMessage());
+            return ToolOutput.failure("执行命令失败: " + e.getMessage())
+                    .withCommand(process == null ? null : normalized, null, CaptureCompleteness.UNKNOWN, process != null);
         } finally {
             outputReaderExecutor.shutdownNow();
         }
@@ -1660,34 +1713,36 @@ public class ToolRegistry {
                 || normalized.equals("AUTHORIZATION");
     }
 
-    private String readProcessOutput(Process process) throws Exception {
+    record CommandCapture(String text, CaptureCompleteness completeness) {}
+
+    private CommandCapture readProcessOutput(Process process) throws IOException {
         StringBuilder output = new StringBuilder();
+        boolean truncated = false;
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                if (output.length() < MAX_COMMAND_OUTPUT_CHARS) {
-                    int remaining = MAX_COMMAND_OUTPUT_CHARS - output.length();
-                    if (line.length() > remaining) {
-                        output.append(line, 0, remaining);
-                    } else {
-                        output.append(line);
-                    }
-                    output.append("\n");
+                int remaining = MAX_COMMAND_OUTPUT_CHARS - output.length();
+                if (remaining <= line.length()) {
+                    output.append(line, 0, remaining);
+                    truncated = true;
+                } else {
+                    output.append(line).append('\n');
                 }
             }
         }
-        if (output.length() >= MAX_COMMAND_OUTPUT_CHARS) {
-            return output.substring(0, MAX_COMMAND_OUTPUT_CHARS) + "\n...(输出已截断)";
-        }
-        return output.toString();
+        return truncated
+                ? new CommandCapture(output + "\n...(输出已截断)", CaptureCompleteness.TRUNCATED)
+                : new CommandCapture(output.toString(), CaptureCompleteness.COMPLETE);
     }
 
-    private String getCommandOutput(Future<String> outputFuture) throws Exception {
+    static CommandCapture getCommandOutput(Future<CommandCapture> outputFuture) throws InterruptedException {
         try {
             return outputFuture.get(2, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             outputFuture.cancel(true);
-            return "(命令已结束，但输出读取超时)";
+            return new CommandCapture("(命令已结束，但输出读取超时)", CaptureCompleteness.READ_TIMEOUT);
+        } catch (ExecutionException | CancellationException e) {
+            return new CommandCapture("(命令已结束，但输出读取失败)", CaptureCompleteness.UNKNOWN);
         }
     }
 
@@ -1713,11 +1768,25 @@ public class ToolRegistry {
                                       List<com.codeagent.llm.LlmClient.ContentPart> imageParts,
                                       boolean successful,
                                       List<String> discoveredUrls,
-                                      String executedCommand,Integer exitCode,boolean observationUnknown) {
+                                      String executedCommand,Integer exitCode,boolean observationUnknown,
+                                      ToolResultDescriptor descriptor) {
         public ToolExecutionResult {
             imageParts = imageParts == null ? List.of() : List.copyOf(imageParts);
             discoveredUrls = discoveredUrls == null ? List.of() : List.copyOf(discoveredUrls);
             successful = successful && !timedOut && !observationUnknown;
+            if (descriptor == null) {
+                descriptor = ToolResultDescriptor.unverified(id, name, OutcomeSource.LEGACY_INFERRED,
+                        result, elapsedMillis, observationUnknown);
+            }
+        }
+
+        public ToolExecutionResult(String id, String name, String argumentsJson,
+                                   String result, long elapsedMillis, boolean timedOut,
+                                   List<com.codeagent.llm.LlmClient.ContentPart> imageParts, boolean successful,
+                                   List<String> discoveredUrls, String executedCommand, Integer exitCode,
+                                   boolean observationUnknown) {
+            this(id, name, argumentsJson, result, elapsedMillis, timedOut, imageParts, successful,
+                    discoveredUrls, executedCommand, exitCode, observationUnknown, null);
         }
 
         public ToolExecutionResult(String id, String name, String argumentsJson,
@@ -1743,44 +1812,47 @@ public class ToolRegistry {
                     !timedOut && !looksLikeFailureText(result), List.of());
         }
 
-        private static ToolExecutionResult completed(ToolInvocation invocation, ToolOutput output, long elapsedMillis) {
-            return new ToolExecutionResult(
-                    invocation.id(),
-                    invocation.name(),
-                    invocation.argumentsJson(),
-                    output == null ? "" : output.text(),
-                    elapsedMillis,
-                    false,
-                    output == null ? List.of() : output.imageParts(),
-                    output != null && output.successful(),
-                    output == null ? List.of() : output.discoveredUrls(),
-                    "execute_command".equals(invocation.name()) && output != null && output.structuredContent() != null
-                            ? output.structuredContent().path("executedCommand").asText(null) : null,
-                    "execute_command".equals(invocation.name()) && output != null && output.structuredContent() != null
-                            && output.structuredContent().path("exitCode").isIntegralNumber()
-                            ? output.structuredContent().path("exitCode").intValue() : null,false);
+        static ToolExecutionResult completed(ToolInvocation invocation, ToolOutput output, long elapsedMillis) {
+            return completed(invocation, output, elapsedMillis, false);
         }
 
-        private static ToolExecutionResult completed(ToolInvocation invocation, String result, long elapsedMillis) {
-            return completed(invocation, classifyTextOutput(result), elapsedMillis);
+        private static ToolExecutionResult completed(ToolInvocation invocation, ToolOutput output, long elapsedMillis,
+                                                     boolean observationFailed) {
+            if (output == null) output = ToolOutput.legacy("", false);
+            var facts = output.facts();
+            boolean observationUnknown = observationFailed || facts.observationUnknown();
+            boolean timedOut = output.failureKind() == ToolOutput.FailureKind.TIMED_OUT;
+            boolean successful = output.successful() && !observationUnknown && !timedOut;
+            ToolResultDescriptor descriptor = facts.outcomeSource() == OutcomeSource.TYPED
+                    ? new ToolResultDescriptor(invocation.id(), invocation.name(), OutcomeSource.TYPED,
+                            processOutcome(output), successful, facts.exitCode(), facts.executedCommand(),
+                            output.failureKind(), observationUnknown, facts.captureCompleteness(),
+                            facts.resourceLocation(), facts.resultCount(), ContextDigests.textDigest(output.text()),
+                            List.of(), elapsedMillis)
+                    : ToolResultDescriptor.unverified(invocation.id(), invocation.name(), facts.outcomeSource(),
+                            output.text(), elapsedMillis, observationUnknown);
+            return new ToolExecutionResult(
+                    invocation.id(), invocation.name(), invocation.argumentsJson(), output.text(), elapsedMillis,
+                    timedOut, output.imageParts(), successful, output.discoveredUrls(), facts.executedCommand(),
+                    facts.exitCode(), observationUnknown, descriptor);
+        }
+
+        private static ProcessOutcome processOutcome(ToolOutput output) {
+            return switch (output.failureKind()) {
+                case POLICY_DENIED, HITL_REJECTED -> ProcessOutcome.DENIED;
+                case CANCELLED -> ProcessOutcome.CANCELLED;
+                case TIMED_OUT -> ProcessOutcome.TIMED_OUT;
+                default -> output.successful() ? ProcessOutcome.SUCCEEDED : ProcessOutcome.FAILED;
+            };
         }
 
         private static ToolExecutionResult failed(ToolInvocation invocation, String message) {
-            return completed(invocation, "工具执行失败: " + message, 0);
+            return completed(invocation, ToolOutput.failure("工具执行失败: " + message), 0);
         }
 
         private static ToolExecutionResult timedOut(ToolInvocation invocation, long timeoutSeconds) {
-            return new ToolExecutionResult(
-                    invocation.id(),
-                    invocation.name(),
-                    invocation.argumentsJson(),
-                    "工具执行超时（" + timeoutSeconds + "秒），已取消",
-                    timeoutSeconds * 1000,
-                    true,
-                    List.of(),
-                    false,
-                    List.of()
-            );
+            return completed(invocation, ToolOutput.failure(ToolOutput.FailureKind.TIMED_OUT,
+                    "工具执行超时（" + timeoutSeconds + "秒），已取消"), timeoutSeconds * 1000, true);
         }
 
         public boolean hasImageParts() {

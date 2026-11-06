@@ -24,6 +24,54 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SubAgentTest {
 
     @Test
+    void layeredExecutionPersistsIndependentChildScope(@TempDir Path tempDir) throws Exception {
+        String previous = System.getProperty("codeagent.context.layered.enabled");
+        System.setProperty("codeagent.context.layered.enabled", "true");
+        Path workspace = Files.createDirectory(tempDir.resolve("layered-workspace"));
+        try (SessionStore store = SessionStore.open(tempDir.resolve("sessions"));
+             SessionStore.SessionHandle parent = store.create(new SessionStore.SessionCreateRequest(
+                     workspace, "glm", "test", null, "react", "agent"))) {
+            var tools = new ToolRegistry();
+            tools.setProjectPath(workspace.toString());
+            var worker = new SubAgent("worker", AgentRole.WORKER,
+                    new ScriptedStreamClient(listener -> {}), tools);
+            worker.setParentSession(parent);
+            var result = worker.execute(AgentMessage.task("orchestrator", "task"),
+                    new PrintStream(new ByteArrayOutputStream()));
+            assertEquals(AgentMessage.Type.RESULT, result.type());
+            var child = store.list(workspace, 20).stream()
+                    .filter(summary -> !summary.sessionId().equals(parent.sessionId())).findFirst().orElseThrow();
+            var scopes = store.readProjection(child.sessionId()).contextScopes();
+            assertEquals(1, scopes.size());
+            var scope = scopes.values().iterator().next();
+            assertTrue(scope.scopeId().startsWith(child.sessionId() + ":"));
+            assertEquals(com.codeagent.context.SourceKind.SYSTEM, scope.sourceNodes().get(0).sourceKind());
+            assertTrue(scope.sourceNodes().stream().anyMatch(node ->
+                    node.sourceKind() == com.codeagent.context.SourceKind.REAL_USER));
+        } finally {
+            if (previous == null) System.clearProperty("codeagent.context.layered.enabled");
+            else System.setProperty("codeagent.context.layered.enabled", previous);
+        }
+    }
+
+    @Test
+    void reviewerRejectsOversizedEvidenceBeforeSendingAnyRequest() {
+        GLMClient client = new GLMClient("test-key") {
+            @Override public int maxContextWindow() { return 4096; }
+
+            @Override
+            public ChatResponse chatStructured(List<Message> messages, List<Tool> tools,
+                    com.codeagent.llm.StructuredOutputSpec spec, StreamListener listener) {
+                throw new AssertionError("oversized reviewer evidence reached the provider");
+            }
+        };
+        var reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, client, new ToolRegistry());
+        var result = reviewer.review("task", "complete diff line ".repeat(4000),
+                new PrintStream(new ByteArrayOutputStream()));
+        assertEquals(AgentMessage.Type.ERROR, result.type());
+    }
+
+    @Test
     void executionUsesAChildSessionAndRecordsItsResult(@TempDir Path tempDir) throws Exception {
         Path workspace = Files.createDirectory(tempDir.resolve("workspace"));
         try (SessionStore store = SessionStore.open(tempDir);

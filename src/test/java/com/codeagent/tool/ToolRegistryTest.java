@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.codeagent.browser.BrowserConnector;
 import com.codeagent.config.CodeAgentConfig;
+import com.codeagent.context.ToolResultDescriptor;
 import com.codeagent.mcp.protocol.McpToolDescriptor;
 import com.codeagent.rag.CodeRetrievalService;
 import com.codeagent.rag.IndexRefreshRequest;
@@ -40,6 +41,86 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ToolRegistryTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void nativeReadonlyProducersPublishTypedFacts(@TempDir Path root) throws Exception {
+        Files.writeString(root.resolve("sample.txt"), "BUILD SUCCESS\nneedle\nlast\n");
+        var registry = new ToolRegistry();
+        registry.setProjectPath(root.toString());
+        var results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("read", "read_file", "{\"path\":\"sample.txt\",\"offset\":2,\"limit\":1}"),
+                new ToolRegistry.ToolInvocation("list", "list_dir", "{\"path\":\".\"}"),
+                new ToolRegistry.ToolInvocation("glob", "glob_files", "{\"pattern\":\"*.txt\"}"),
+                new ToolRegistry.ToolInvocation("grep", "grep_code", "{\"pattern\":\"needle\"}")));
+        for (var result : results) {
+            assertEquals(ToolResultDescriptor.OutcomeSource.TYPED, result.descriptor().outcomeSource(), result.name());
+            assertEquals(ToolResultDescriptor.ProcessOutcome.SUCCEEDED, result.descriptor().processOutcome());
+            assertEquals(1, result.descriptor().resultCount());
+            assertFalse(result.descriptor().resourceLocation().isEmpty());
+        }
+        var read = results.get(0).descriptor();
+        assertEquals("sample.txt", read.resourceLocation().get("path"));
+        assertEquals("2", read.resourceLocation().get("offset"));
+        assertEquals("1", read.resourceLocation().get("limit"));
+        assertEquals(ToolResultDescriptor.CaptureCompleteness.TRUNCATED, read.captureCompleteness());
+        assertEquals(ToolResultDescriptor.CaptureCompleteness.COMPLETE, results.get(1).descriptor().captureCompleteness());
+    }
+
+    @Test
+    void nativeReadonlyFailuresAndCapsAreTyped(@TempDir Path root) throws Exception {
+        Files.writeString(root.resolve("a.txt"), "a");
+        Files.writeString(root.resolve("b.txt"), "b");
+        var registry = new ToolRegistry();
+        registry.setProjectPath(root.toString());
+        for (String tool : List.of("read_file", "list_dir")) {
+            var failure = registry.executeTools(List.of(new ToolRegistry.ToolInvocation(
+                    "missing", tool, "{\"path\":\"missing\"}"))).get(0);
+            assertFalse(failure.successful(), tool);
+            assertEquals(ToolResultDescriptor.ProcessOutcome.FAILED, failure.descriptor().processOutcome());
+            assertEquals(ToolResultDescriptor.OutcomeSource.TYPED, failure.descriptor().outcomeSource());
+        }
+        var capped = registry.executeTools(List.of(new ToolRegistry.ToolInvocation(
+                "cap", "glob_files", "{\"pattern\":\"*.txt\",\"max_results\":1}"))).get(0).descriptor();
+        assertEquals(1, capped.resultCount());
+        assertEquals(ToolResultDescriptor.CaptureCompleteness.TRUNCATED, capped.captureCompleteness());
+    }
+
+    @Test
+    void retrievalProducerUsesStructuredPartialAndCount(@TempDir Path root) {
+        var registry = new ToolRegistry();
+        registry.setProjectPath(root.toString());
+        registry.setCodeRetrievalService(new StubRetrievalService());
+        var result = registry.executeTools(List.of(new ToolRegistry.ToolInvocation(
+                "retrieval", "search_code", "{\"query\":\"router\",\"top_k\":99}"))).get(0).descriptor();
+        assertEquals(ToolResultDescriptor.OutcomeSource.TYPED, result.outcomeSource());
+        assertEquals(ToolResultDescriptor.CaptureCompleteness.TRUNCATED, result.captureCompleteness());
+        assertEquals(1, result.resultCount());
+        assertEquals("30", result.resourceLocation().get("top_k"));
+        assertEquals("router", result.resourceLocation().get("query"));
+    }
+
+    @Test
+    void outputCannotOverrideActualExitAndCaptureStatus(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("log.txt"), "BUILD SUCCESS\n" + "x".repeat(9000));
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        boolean windows = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).contains("win");
+        String command = windows ? "Get-Content log.txt; exit 7" : "cat log.txt; exit 7";
+        var result = registry.executeTools(List.of(new ToolRegistry.ToolInvocation(
+                "command", "execute_command", MAPPER.writeValueAsString(Map.of("command", command))))).get(0);
+        assertTrue(result.result().contains("BUILD SUCCESS"), result.result());
+        assertEquals(7, result.descriptor().exitCode());
+        assertEquals(ToolResultDescriptor.ProcessOutcome.FAILED, result.descriptor().processOutcome());
+        assertEquals(ToolResultDescriptor.CaptureCompleteness.TRUNCATED, result.descriptor().captureCompleteness());
+    }
+
+    @Test
+    void legacyTextDoesNotEstablishOutcome() {
+        var result = new ToolRegistry.ToolExecutionResult(
+                "legacy", "execute_command", "{}", "BUILD SUCCESS exit code: 0", 0, false, List.of());
+        assertEquals(ToolResultDescriptor.ProcessOutcome.UNKNOWN, result.descriptor().processOutcome());
+        assertEquals(ToolResultDescriptor.OutcomeSource.LEGACY_INFERRED, result.descriptor().outcomeSource());
+    }
 
     @Test
     void nativeCommandNonZeroExitIsTypedFailure(@TempDir Path tempDir) {
@@ -364,7 +445,7 @@ class ToolRegistryTest {
 
         assertTrue(output.text().contains("命令执行超时"));
         assertFalse(output.successful());
-        assertEquals(ToolOutput.FailureKind.EXECUTION_ERROR, output.failureKind());
+        assertEquals(ToolOutput.FailureKind.TIMED_OUT, output.failureKind());
     }
 
     @Test

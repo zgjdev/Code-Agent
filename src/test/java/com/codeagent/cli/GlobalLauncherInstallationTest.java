@@ -28,7 +28,11 @@ class GlobalLauncherInstallationTest {
                 "-File", repository.resolve("src/test/resources/launcher/install-smoke.ps1").toString(),
                 "-Repository", repository.toString(), "-JavaHome", System.getProperty("java.home")));
         if (distribution) command.add("-CheckPackage");
-        Process process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile());
+        builder.environment().keySet().removeIf(key -> key.equalsIgnoreCase("PSModulePath"));
+        builder.environment().put("PSModulePath", Path.of(System.getenv("SystemRoot"), "System32",
+                "WindowsPowerShell", "v1.0", "Modules").toString());
+        Process process = builder.start();
         try {
             assertTrue(process.waitFor(120, TimeUnit.SECONDS), "Isolated Windows launcher smoke timed out");
             String output = Files.readString(log);

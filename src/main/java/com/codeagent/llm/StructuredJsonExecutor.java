@@ -44,6 +44,11 @@ public final class StructuredJsonExecutor {
     public record Result<T>(LlmClient.ChatResponse response, JsonNode json, T value) {
     }
 
+    @FunctionalInterface
+    public interface RequestGuard {
+        void check(List<LlmClient.Message> messages, List<LlmClient.Tool> tools) throws IOException;
+    }
+
     public <T> Result<T> execute(LlmClient client,
                                  List<LlmClient.Message> messages,
                                  List<LlmClient.Tool> tools,
@@ -51,6 +56,18 @@ public final class StructuredJsonExecutor {
                                  boolean allowMarkdownFence,
                                  JsonDecoder<T> decoder,
                                  LlmClient.StreamListener listener) throws IOException {
+        return execute(client, messages, tools, spec, allowMarkdownFence, decoder, listener,
+                (attemptMessages, attemptTools) -> {});
+    }
+
+    public <T> Result<T> execute(LlmClient client,
+                                 List<LlmClient.Message> messages,
+                                 List<LlmClient.Tool> tools,
+                                 StructuredOutputSpec spec,
+                                 boolean allowMarkdownFence,
+                                 JsonDecoder<T> decoder,
+                                 LlmClient.StreamListener listener,
+                                 RequestGuard guard) throws IOException {
         Objects.requireNonNull(client, "client");
         Objects.requireNonNull(messages, "messages");
         Objects.requireNonNull(spec, "spec");
@@ -65,8 +82,10 @@ public final class StructuredJsonExecutor {
         IOException lastValidationFailure = null;
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            List<LlmClient.Message> request = List.copyOf(attemptMessages);
+            guard.check(request, tools);
             LlmClient.ChatResponse response = client.chatStructured(
-                    List.copyOf(attemptMessages), tools, spec, safeListener);
+                    request, tools, spec, safeListener);
             totalInput += Math.max(0, response == null ? 0 : response.inputTokens());
             totalOutput += Math.max(0, response == null ? 0 : response.outputTokens());
             totalCached += Math.max(0, response == null ? 0 : response.cachedInputTokens());
@@ -84,7 +103,7 @@ public final class StructuredJsonExecutor {
                 log.warn("Structured output validation failed; requesting one repair "
                                 + "provider={} model={} contract={} attempt={}/{} cause={}",
                         client.getProviderName(), client.getModelName(), spec.name(),
-                        attempt, maxAttempts, validationFailure.getMessage());
+                        attempt, maxAttempts, validationFailure.getClass().getSimpleName());
                 attemptMessages.add(LlmClient.Message.assistant(
                         truncate(response == null ? "" : response.content(), MAX_REPAIR_OUTPUT_CHARS)));
                 attemptMessages.add(LlmClient.Message.user(repairInstruction(spec, validationFailure)));

@@ -16,6 +16,25 @@ class TaskTranscriptReaderTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    @Test void syntheticSummaryCannotBecomeARecoveredExecutionResult() throws Exception {
+        var plans = new PlanStateStore(temp.resolve("plans.db"));
+        var plan = new ExecutionPlan("p", "goal");
+        plan.addTask(new Task("task", "description", Task.TaskType.FILE_READ));
+        plan.computeExecutionOrder();
+        try (var sessions = SessionStore.open(temp.resolve("history"));
+             var parent = sessions.create(new SessionStore.SessionCreateRequest(temp, "test", "model", null, "plan", "agent"));
+             var child = parent.createChild("plan", "task:task")) {
+            plans.savePlan(temp, parent.sessionId(), "e", "policy", plan);
+            var attempts = new TaskRecoveryStore(plans.dbPath());
+            var binding = attempts.bindAttempt(temp, parent.sessionId(), "e", "p", "task", child.sessionId(), null, "owner", 1);
+            var payload = JSON.createObjectNode().put("sourceKind", "GLOBAL_SUMMARY");
+            payload.set("message", JSON.valueToTree(com.codeagent.llm.LlmClient.Message.assistant("all tests passed")));
+            child.append(new SessionEventDraft(SessionEvent.Types.ASSISTANT_MESSAGE, "plan", "task:task", "context",
+                    false, SessionEvent.SurfaceOperation.append(), payload));
+            assertTrue(new TaskTranscriptReader(sessions, attempts).read(binding, -1).groups().isEmpty());
+        }
+    }
+
     @Test void unresolvedAncestorEffectsSurviveRepeatedInterruptionsWithoutImportedGroups() throws Exception {
         var plans = new PlanStateStore(temp.resolve("plans.db"));
         var plan = new ExecutionPlan("p", "goal");
